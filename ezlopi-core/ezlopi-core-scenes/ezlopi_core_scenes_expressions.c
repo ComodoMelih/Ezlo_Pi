@@ -1543,26 +1543,51 @@ static int __remove_exp_id_from_nvs_exp_list(uint32_t target_id)
 #endif
 
             uint32_t idx = 0;
-            cJSON *cj_exp_id = NULL;
-            cJSON_ArrayForEach(cj_exp_id, cj_exp_ids)
+            cJSON *cj_exp_id = cj_exp_ids->child;
+
+            // iterate upto last elements (incase -->  for doubles)
+            while (cj_exp_id)
             {
-                uint32_t _id = strtoul(cj_exp_id->valuestring, NULL, 16);
-                if (_id == target_id)
+                /* ->next is captured *before* the delete below.
+                 * cJSON_DeleteItemFromArray frees the node (cjext.c:2652),
+                 * and cJSON_ArrayForEach's "element = element->next"
+                 * (cjext.h:246) then read it back out of freed memory.
+                 * Detaching also NULLs the node's ->next (cjext.c:2635),
+                 * so even ignoring the free, the walk stopped dead at the
+                 * first match -- which defeats the "incase for doubles"
+                 * intent of this loop. */
+                cJSON *cj_next = cj_exp_id->next;
+
+                /* ->valuestring is NULL on every node that is not a
+                 * string, so a corrupt or truncated NVS list holding a
+                 * number instead of an id string reached strtoul(NULL). */
+                if (cJSON_IsString(cj_exp_id) && (strtoul(cj_exp_id->valuestring, NULL, 16) == target_id))
                 {
                     cJSON_DeleteItemFromArray(__FUNCTION__, cj_exp_ids, idx);
+                    /* idx deliberately not advanced: the elements after
+                     * the removed one have all shifted down by one, so
+                     * incrementing here (as the original did) made every
+                     * subsequent index off-by-one and deleted the wrong
+                     * element on a second match. */
+                }
+                else
+                {
+                    idx++;
                 }
 
-                // iterate upto last elements (incase -->  for doubles)
-                idx++;
+                cj_exp_id = cj_next;
             }
 
             char *updated_ids_str = cJSON_PrintBuffered(__FUNCTION__, cj_exp_ids, 1024, false);
-            TRACE_D("length of 'updated_ids_str': %d", strlen(updated_ids_str));
 
             cJSON_Delete(__FUNCTION__, cj_exp_ids);
 
             if (updated_ids_str)
             {
+                /* The length trace was above this NULL check, so a failed
+                 * print reached strlen(NULL) before the test meant to
+                 * catch it. */
+                TRACE_D("length of 'updated_ids_str': %d", strlen(updated_ids_str));
                 TRACE_D("updated-expression-ids: %s", updated_ids_str);
                 EZPI_core_nvs_write_scenes_expressions(updated_ids_str);
                 ezlopi_free(__FUNCTION__, updated_ids_str);
