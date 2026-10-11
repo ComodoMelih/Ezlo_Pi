@@ -305,11 +305,15 @@ static void ble_device_info_send_data(const cJSON *cj_response_data, esp_gatt_va
             strncpy((char *)value->value, send_data + param->read.offset, copy_size);
             value->len = copy_size;
         }
-        if ((param->read.offset + copy_size) >= total_data_len)
-        {
-            ezlopi_free(__FUNCTION__, send_data);
-            send_data = NULL;
-        }
+
+        /* send_data is printed fresh on every chunk, so it must be released on
+         * every chunk. Freeing it only on the last one (offset + copy_size >=
+         * total_data_len) leaked the whole printed document for each
+         * intermediate chunk of a long read -- and the app re-reads these
+         * characteristics on every adoption attempt, so the leak accumulates
+         * until BLE allocations start failing. */
+        ezlopi_free(__FUNCTION__, send_data);
+        send_data = NULL;
     }
     else
     {
@@ -714,16 +718,24 @@ static void ezpi_service_ble_net_info(esp_gatt_value_t *value, esp_ble_gatts_cb_
             EZPI_core_factory_info_v3_free(wifi_ssid);
 
             ezlopi_wifi_status_t *wifi_status = EZPI_core_wifi_status();
-            // if (wifi_status)
+            /* The guard used to be commented out, so an allocation failure in
+             * EZPI_core_wifi_status() dereferenced NULL and panicked the device
+             * in the middle of serving an ATT read -- the client just sees the
+             * link drop. Restored, with the else branch still answering (with
+             * the ssid alone) rather than leaking cj_network and returning. */
+            if (wifi_status)
             {
                 char *wifi_mode = EZPI_core_info_get_wifi_mode_to_name(wifi_status->wifi_mode);
                 cJSON_AddStringToObject(__FUNCTION__, cj_network, ezlopi_wifi_mode_str, wifi_mode ? wifi_mode : ezlopi__str);
 
-                char ip_str[20];
-                memset(ip_str, 0, 20);
-                snprintf(ip_str, 20, IPSTR, IP2STR(&wifi_status->ip_info->ip));
-                cJSON_AddStringToObject(__FUNCTION__, cj_network, ezlopi_ip_sta_str, ip_str);
+                /* Kept in its own buffer so it is still the station address at
+                 * the trace below; ip_str gets overwritten by netmask and gw. */
+                char sta_ip_str[20];
+                memset(sta_ip_str, 0, 20);
+                snprintf(sta_ip_str, 20, IPSTR, IP2STR(&wifi_status->ip_info->ip));
+                cJSON_AddStringToObject(__FUNCTION__, cj_network, ezlopi_ip_sta_str, sta_ip_str);
 
+                char ip_str[20];
                 memset(ip_str, 0, 20);
                 snprintf(ip_str, 20, IPSTR, IP2STR(&wifi_status->ip_info->netmask));
                 cJSON_AddStringToObject(__FUNCTION__, cj_network, ezlopi_ip_nmask_str, ip_str);
@@ -746,11 +758,24 @@ static void ezpi_service_ble_net_info(esp_gatt_value_t *value, esp_ble_gatts_cb_
 
                 cJSON_AddBoolToObject(__FUNCTION__, cj_network, ezlopi_cloud_str, cloud_connection_status);
 
-                ble_device_info_send_data(cj_network, value, param);
-
-                cJSON_Delete(__FUNCTION__, cj_network);
-                ezlopi_free(__FUNCTION__, wifi_status);
+#ifdef CONFIG_EZPI_UTIL_TRACE_EN
+                /* This is the characteristic the app reads to learn the hub's
+                 * addresses. If wifi_connection is false the ip/netmask/gw are
+                 * all 0.0.0.0, which is a legitimate answer but may be what the
+                 * app rejects -- log exactly what went out. */
+                TRACE_I("ble-net-info read: ip %s, wifi_connected %d, cloud %d, offset %d",
+                        sta_ip_str, (int)wifi_status->wifi_connection, (int)cloud_connection_status, param->read.offset);
+#endif
             }
+            else
+            {
+                TRACE_E("ble-net-info: wifi status alloc failed, answering with ssid only");
+            }
+
+            ble_device_info_send_data(cj_network, value, param);
+
+            cJSON_Delete(__FUNCTION__, cj_network);
+            ezlopi_free(__FUNCTION__, wifi_status);
         }
         else
         {

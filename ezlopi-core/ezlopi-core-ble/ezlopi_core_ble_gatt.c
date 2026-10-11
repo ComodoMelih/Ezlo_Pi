@@ -96,6 +96,11 @@ uint16_t EZPI_core_ble_gatt_get_max_data_size(void)
 
 void EZPI_core_ble_gatts_characteristic_notify(s_gatt_service_t *service, s_gatt_char_t *characteristics, esp_gatt_value_t *value)
 {
+    if ((NULL == service) || (NULL == characteristics) || (NULL == value) || (false == service->connected))
+    {
+        return;
+    }
+
     esp_ble_gatts_send_indicate(service->gatts_if, service->conn_id, characteristics->handle, value->len, value->value, false);
 }
 
@@ -112,7 +117,9 @@ void EZPI_core_ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t
         {
             // TRACE_D("Found app-id: %d", service->app_id);
             EZPI_core_ble_gap_config_adv_data();
-            // EZPI_core_ble_gap_config_scan_rsp_data();
+            /* Required: the device name is carried in the scan response, so it
+             * must be configured here or the name is never advertised at all. */
+            EZPI_core_ble_gap_config_scan_rsp_data();
 
             service->gatts_if = gatts_if;
             service->status = GATT_STATUS_PROCESSING;
@@ -282,13 +289,18 @@ void EZPI_core_ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t
     }
     case ESP_GATTS_READ_EVT:
     {
+#ifdef CONFIG_EZPI_UTIL_TRACE_EN
+        TRACE_I("ATT read req: handle 0x%04x, offset %d, is_long %d", param->read.handle, param->read.offset, param->read.is_long);
+#endif
         EZPI_core_ble_gatt_call_read_by_handle(gatts_if, param);
-        // esp_gatt_rsp_t rsp = {.attr_value = {.len = 0, .value[0] = 0}, .handle = param->read.handle};
-        // esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id, ESP_GATT_OK, &rsp);
         break;
     }
     case ESP_GATTS_WRITE_EVT:
     {
+#ifdef CONFIG_EZPI_UTIL_TRACE_EN
+        TRACE_I("ATT write req: handle 0x%04x, offset %d, len %d, is_prep %d, need_rsp %d",
+                param->write.handle, param->write.offset, param->write.len, param->write.is_prep, param->write.need_rsp);
+#endif
         EZPI_core_ble_gatt_call_write_by_handle(gatts_if, param);
         break;
     }
@@ -297,22 +309,49 @@ void EZPI_core_ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t
         EZPI_core_ble_gatt_call_write_exec_by_handle(gatts_if, param);
         break;
     }
-#if (1 == CONFIG_EZPI_BLE_ENABLE_PAIRING)
     case ESP_GATTS_CONNECT_EVT:
     {
 #ifdef CONFIG_EZPI_UTIL_TRACE_EN
         TRACE_S("ESP_GATTS_CONNECT_EVT");
 #endif
+        /* Notifications are addressed by (gatts_if, conn_id). This is the only
+         * event that carries conn_id, so it must be latched here or every
+         * notification is sent to a stale/incorrect connection. */
+        s_gatt_service_t *connected_service = EZPI_core_ble_profile_get_service_by_gatts_if(gatts_if);
+        if (connected_service)
+        {
+            connected_service->conn_id = param->connect.conn_id;
+            connected_service->connected = true;
+
+            /* The controller reuses conn_id across successive connections, so it
+             * cannot by itself distinguish one client from the next. Anything
+             * that is only valid for the life of a connection (a CCCD
+             * subscription) must be keyed on this instead. */
+            connected_service->conn_generation++;
+        }
+#if (1 == CONFIG_EZPI_BLE_ENABLE_PAIRING)
         /* start security connect with peer device when receive the connect event sent by the master */
         esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
+#endif
         break;
     }
-#endif
     case ESP_GATTS_DISCONNECT_EVT:
     {
 #ifdef CONFIG_EZPI_UTIL_TRACE_EN
         TRACE_S("ESP_GATTS_DISCONNECT_EVT, disconnect reason 0x%x", param->disconnect.reason);
 #endif
+        s_gatt_service_t *disconnected_service = EZPI_core_ble_profile_get_service_by_gatts_if(gatts_if);
+        if (disconnected_service)
+        {
+            disconnected_service->connected = false;
+        }
+
+        /* The ATT MTU is per-connection and reverts to the default for the next
+         * one, so a negotiated value must not outlive its connection. Keeping a
+         * stale larger value makes the next client -- which may never request an
+         * exchange -- be sent payloads above its actual limit. */
+        g_mtu_size = ESP_GATT_DEF_BLE_MTU_SIZE;
+
         EZPI_core_ble_gap_start_advertising();
         break;
     }
@@ -359,14 +398,21 @@ static f_upcall_t EZPI_core_ble_gatt_call_by_handle(esp_gatt_if_t gatts_if, uint
                 case ESP_GATTS_READ_EVT:
                 {
 #ifdef CONFIG_EZPI_UTIL_TRACE_EN
-                    TRACE_S("Is a characteristic 'read'.");
+                    /* uuid16 is only meaningful for 16-bit UUIDs; every attribute
+                     * this firmware registers is one, so log the len too rather
+                     * than silently printing garbage if that ever changes. */
+                    TRACE_I("  -> characteristic read: uuid 0x%04x (len %d)%s",
+                            characteristic->uuid.uuid.uuid16, characteristic->uuid.len,
+                            characteristic->read_upcall ? "" : " [NO READ HANDLER]");
 #endif
                     return characteristic->read_upcall;
                 }
                 case ESP_GATTS_WRITE_EVT:
                 {
 #ifdef CONFIG_EZPI_UTIL_TRACE_EN
-                    TRACE_S("Is a characteristic 'write'.");
+                    TRACE_I("  -> characteristic write: uuid 0x%04x (len %d)%s",
+                            characteristic->uuid.uuid.uuid16, characteristic->uuid.len,
+                            characteristic->write_upcall ? "" : " [NO WRITE HANDLER]");
 #endif
                     return characteristic->write_upcall;
                 }
@@ -393,7 +439,8 @@ static f_upcall_t EZPI_core_ble_gatt_call_by_handle(esp_gatt_if_t gatts_if, uint
                 if (handle == descriptor->handle)
                 {
 #ifdef CONFIG_EZPI_UTIL_TRACE_EN
-                    TRACE_S("Is a descriptor %s.", event ? "read" : "write");
+                    TRACE_I("  -> descriptor uuid 0x%04x on characteristic uuid 0x%04x",
+                            descriptor->uuid.uuid.uuid16, characteristic->uuid.uuid.uuid16);
 #endif
                     // EZPI_core_ble_gatt_print_descriptor(descriptor);
                     switch (event)
@@ -437,8 +484,13 @@ static f_upcall_t EZPI_core_ble_gatt_call_by_handle(esp_gatt_if_t gatts_if, uint
 #ifdef CONFIG_EZPI_UTIL_TRACE_EN
     else
     {
-        TRACE_E("Service not found!");
+        TRACE_E("Service not found for gatts_if %d!", gatts_if);
     }
+
+    /* Reached only when nothing in the table owns this handle. Logging the raw
+     * event number rather than the name keeps this independent of whether the
+     * event-to-string helper is compiled in. */
+    TRACE_E("No attribute for handle 0x%04x (gatts event %d)", handle, (int)event);
 #endif
 
     return NULL;
@@ -469,6 +521,15 @@ static void EZPI_core_ble_gatt_call_write_by_handle(esp_gatt_if_t gatts_if, esp_
             }
         }
     }
+    else if (param->write.need_rsp)
+    {
+        /* Same contract as the read path: a write request that asked for a
+         * response must get one, even when no handler is registered. */
+#ifdef CONFIG_EZPI_UTIL_TRACE_EN
+        TRACE_E("ATT write: no handler for handle 0x%04x -> replying WRITE_NOT_PERMIT", param->write.handle);
+#endif
+        esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_WRITE_NOT_PERMIT, NULL);
+    }
 }
 
 static void EZPI_core_ble_gatt_call_write_exec_by_handle(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param)
@@ -496,10 +557,26 @@ static void EZPI_core_ble_gatt_call_read_by_handle(esp_gatt_if_t gatts_if, esp_b
 
     if (read_upcall)
     {
+        /* The upcall only sets 'len' and 'value'; the rest of the response --
+         * including the 600-byte value buffer beyond 'len' -- would otherwise be
+         * whatever was left on the stack. */
         esp_gatt_rsp_t rsp;
+        memset(&rsp, 0, sizeof(rsp));
         rsp.attr_value.handle = param->read.handle;
         read_upcall(&rsp.attr_value, param);
         esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id, ESP_GATT_OK, &rsp);
+    }
+    else
+    {
+        /* Every ATT request must be answered. Returning silently leaves the
+         * client blocked until its 30 s ATT timeout expires, and a client that
+         * reads an attribute with no registered handler -- 0xE101 is declared
+         * write-only but nothing stops a read of it -- then reports a generic
+         * failure instead of "not readable". Answer with an explicit error. */
+#ifdef CONFIG_EZPI_UTIL_TRACE_EN
+        TRACE_E("ATT read: no handler for handle 0x%04x -> replying READ_NOT_PERMIT", param->read.handle);
+#endif
+        esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id, ESP_GATT_READ_NOT_PERMIT, NULL);
     }
 }
 

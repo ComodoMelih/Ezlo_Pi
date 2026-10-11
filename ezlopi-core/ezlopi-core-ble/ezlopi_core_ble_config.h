@@ -104,6 +104,8 @@ extern "C"
     {
         uint16_t app_id;
         uint16_t conn_id;
+        bool connected;          // true between CONNECT_EVT and DISCONNECT_EVT; 'conn_id' is only meaningful while set
+        uint32_t conn_generation; // incremented on every CONNECT_EVT; 'conn_id' alone is reused across connections
         uint16_t gatts_if;
         uint16_t num_handles; // Number of handles
         e_gatt_status_t status;

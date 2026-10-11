@@ -71,7 +71,6 @@
 /*******************************************************************************
  *                          Static Function Prototypes
  *******************************************************************************/
-static void ezlopi_ble_setup_service_uuid(void);
 #if (1 == ENABLE_TRACE)
 static void show_bonded_devices(void);
 static char *esp_key_type_to_str(esp_ble_key_type_t key_type);
@@ -83,12 +82,35 @@ static char *EZPI_core_ble_gap_event_to_str(esp_gap_ble_cb_event_t event);
  *******************************************************************************/
 static uint8_t adv_config_done = 0;
 // static uint8_t manufacturer[] = {'e', 'z', 'l', 'o', 'p', 'i'};
-static uint8_t *all_service_uuid = NULL;
-static uint32_t all_service_uuid_len = 0;
+
+/* Service UUIDs published in the advertisement packet so central devices can
+ * discover EzloPi hubs by service UUID instead of by device-name prefix.
+ * Keep in sync with BLE_WIFI_SERVICE_UUID / BLE_PROVISIONING_SERVICE_UUID in
+ * ezlopi_service_ble.h -- ezlopi-core must not depend on ezlopi-services, so
+ * the values are restated here rather than included.
+ *
+ * esp_ble_gap_config_adv_data() expects p_service_uuid to be an array of
+ * 128-bit UUIDs and compacts every entry that matches the Bluetooth Base UUID
+ * into a 2-byte AD element. Entries must therefore be base-UUID expansions of
+ * the 16-bit service UUIDs, little-endian, with the 16-bit value at [12..13].
+ * Advertising the two provisioning-relevant services costs 6 bytes
+ * (2 header + 2 x 2), which keeps the 31-byte legacy adv payload well within
+ * budget once the device name is moved to the scan response below. */
+static uint8_t adv_service_uuid128[32] = {
+    /* 000000E1-0000-1000-8000-00805F9B34FB -- WiFi service (0x00E1) */
+    0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80,
+    0x00, 0x10, 0x00, 0x00, 0xE1, 0x00, 0x00, 0x00,
+    /* 000000E3-0000-1000-8000-00805F9B34FB -- Provisioning service (0x00E3) */
+    0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80,
+    0x00, 0x10, 0x00, 0x00, 0xE3, 0x00, 0x00, 0x00,
+};
 
 static esp_ble_adv_data_t adv_data = {
     .set_scan_rsp = false,
-    .include_name = true,
+    /* Name lives in the scan response; the adv packet carries the service
+     * UUIDs so that iOS scanForPeripherals(withServices:) and Android
+     * ScanFilter.setServiceUuid() can match without a name-prefix hack. */
+    .include_name = false,
     .include_txpower = false,
     .min_interval = 0x0006,
     .max_interval = 0x0010,
@@ -99,8 +121,8 @@ static esp_ble_adv_data_t adv_data = {
     .p_manufacturer_data = NULL,
     .service_data_len = 0,
     .p_service_data = NULL,
-    .service_uuid_len = 0,
-    .p_service_uuid = NULL,
+    .service_uuid_len = sizeof(adv_service_uuid128),
+    .p_service_uuid = adv_service_uuid128,
     .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
 };
 
@@ -151,14 +173,6 @@ void EZPI_core_ble_gap_start_advertising(void)
 
 void EZPI_core_ble_gap_config_adv_data(void)
 {
-    if (NULL == all_service_uuid)
-    {
-        ezlopi_ble_setup_service_uuid();
-    }
-
-    // adv_data.p_service_uuid = all_service_uuid;
-    // adv_data.service_uuid_len = all_service_uuid_len;
-
 #ifndef CONFIG_EZPI_UTIL_TRACE_EN
     esp_ble_gap_config_adv_data(&adv_data);
 #else
@@ -174,14 +188,10 @@ void EZPI_core_ble_gap_config_adv_data(void)
 
 void EZPI_core_ble_gap_config_scan_rsp_data(void)
 {
-    if (NULL == all_service_uuid)
-    {
-        ezlopi_ble_setup_service_uuid();
-    }
-
-    // scan_rsp_data.p_service_uuid = all_service_uuid;
-    // scan_rsp_data.service_uuid_len = all_service_uuid_len;
-
+    /* The scan response carries only the device name and TX power. Service
+     * UUIDs are deliberately left out of it: name (up to 26 bytes) plus TX
+     * power (3) plus a UUID list (6) would exceed the 31-byte limit for
+     * longer provisioned names such as "ezlopi_generic_105200261". */
 #ifndef CONFIG_EZPI_UTIL_TRACE_EN
     esp_ble_gap_config_adv_data(&scan_rsp_data);
 #else
@@ -219,14 +229,8 @@ void EZPI_core_ble_gap_dissociate_bonded_devices(void)
 
 void EZPI_core_ble_setup_adv_config(void)
 {
-    if (NULL == all_service_uuid)
-    {
-        ezlopi_ble_setup_service_uuid();
-    }
-
-    adv_data.p_service_uuid = all_service_uuid;
-    adv_data.service_uuid_len = all_service_uuid_len;
-
+    /* adv_data already carries the curated service-UUID list; scan_rsp_data
+     * intentionally carries none (see EZPI_core_ble_gap_config_scan_rsp_data). */
     esp_err_t ret = esp_ble_gap_config_adv_data(&adv_data);
     if (!ret)
     {
@@ -239,8 +243,6 @@ void EZPI_core_ble_setup_adv_config(void)
     }
 #endif
 
-    scan_rsp_data.p_service_uuid = all_service_uuid;
-    scan_rsp_data.service_uuid_len = all_service_uuid_len;
     ret = esp_ble_gap_config_adv_data(&scan_rsp_data);
     if (!ret)
     {
@@ -397,42 +399,6 @@ void EZPI_core_ble_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_c
     case ESP_GAP_BLE_SET_LOCAL_PRIVACY_COMPLETE_EVT: // 22
     {
         EZPI_core_ble_setup_adv_config();
-#if 0
-        if (param->local_privacy_cmpl.status != ESP_BT_STATUS_SUCCESS)
-        {
-            TRACE_E("config local privacy failed, error status = %x", param->local_privacy_cmpl.status);
-            break;
-        }
-
-        if (NULL == all_service_uuid)
-        {
-            ezlopi_ble_setup_service_uuid();
-        }
-        adv_data.p_service_uuid = all_service_uuid;
-        adv_data.service_uuid_len = all_service_uuid_len;
-
-        esp_err_t ret = esp_ble_gap_config_adv_data(&adv_data);
-        if (ret)
-        {
-            TRACE_E("config adv data failed, error code = %x", ret);
-        }
-        else
-        {
-            adv_config_done |= ADV_CONFIG_FLAG;
-        }
-
-        scan_rsp_data.p_service_uuid = all_service_uuid;
-        scan_rsp_data.service_uuid_len = all_service_uuid_len;
-        ret = esp_ble_gap_config_adv_data(&scan_rsp_data);
-        if (ret)
-        {
-            TRACE_E("config adv data failed, error code = %x", ret);
-        }
-        else
-        {
-            adv_config_done |= SCAN_RSP_CONFIG_FLAG;
-        }
-#endif
         break;
     }
 #endif
@@ -450,33 +416,6 @@ void EZPI_core_ble_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_c
 /*******************************************************************************
  *                         Static Function Definitions
  *******************************************************************************/
-static void ezlopi_ble_setup_service_uuid(void)
-{
-    s_gatt_service_t *service_head = EZPI_core_ble_profile_get_head();
-    while (service_head)
-    {
-        all_service_uuid_len += ESP_UUID_LEN_128;
-        service_head = service_head->next;
-    }
-
-    if (all_service_uuid_len)
-    {
-        all_service_uuid = ezlopi_malloc(__FUNCTION__, all_service_uuid_len);
-        if (all_service_uuid)
-        {
-            int uuid_pos = 0;
-            service_head = EZPI_core_ble_profile_get_head();
-            while (service_head)
-            {
-                memcpy(&all_service_uuid[uuid_pos], &service_head->service_id.id.uuid.uuid.uuid128, ESP_UUID_LEN_128);
-                uuid_pos += ESP_UUID_LEN_128;
-                service_head = service_head->next;
-            }
-        }
-    }
-
-    // dump("complete-uuid", (all_service_uuid ? (void *)all_service_uuid : (void *)ezlopi__str), 0, all_service_uuid_len);
-}
 #if (1 == ENABLE_TRACE)
 static char *EZPI_core_ble_gap_event_to_str(esp_gap_ble_cb_event_t event)
 {

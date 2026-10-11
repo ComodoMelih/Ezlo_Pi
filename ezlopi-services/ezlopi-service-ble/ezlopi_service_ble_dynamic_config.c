@@ -56,6 +56,9 @@
 #include <time.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "lwip/ip_addr.h"
 #include "mbedtls/base64.h"
 
@@ -63,6 +66,7 @@
 #include "esp_gatt_common_api.h"
 
 #include "ezlopi_util_trace.h"
+#include "ezlopi_util_sanitize.h"
 #include "cjext.h"
 #include "EZLOPI_USER_CONFIG.h"
 
@@ -177,8 +181,30 @@ void EZPI_ble_service_dynamic_config_init(void)
  *                          Static Function Definitions
  *******************************************************************************/
 
+/* Devices are instantiated exactly once per boot: EZPI_device_prepare() ->
+ * ezlopi_device_parse_json_v3() is reachable only from ezlopi_core_ezlopi.c,
+ * and nothing re-reads the stored config afterwards. So a config written here
+ * is persisted to flash but has no effect on the running hub until it reboots
+ * -- which is why adding a device over BLE appeared to do nothing.
+ *
+ * The reboot cannot happen inline in the write upcall. The GATT layer sends the
+ * ATT write response only after the upcall returns (see
+ * EZPI_core_ble_gatt_call_write_by_handle in ezlopi_core_ble_gatt.c), so
+ * restarting inside it swallows the response to the final chunk: the client's
+ * write request goes unanswered and the link just drops. Hence the short-lived
+ * task -- it lets the upcall return and the response reach the phone first. */
+static void ezpi_dynamic_config_reboot_task(void *arg)
+{
+    vTaskDelay(1500 / portTICK_PERIOD_MS);
+    TRACE_W("New device config stored, restarting to apply it .....");
+    EZPI_core_reset_reboot();
+    vTaskDelete(NULL);
+}
+
 static void ezpi_dynamic_config_write_func(esp_gatt_value_t *value, esp_ble_gatts_cb_param_t *param)
 {
+    bool reboot_to_apply = false;
+
     TRACE_D("Write function called!");
     TRACE_D("GATT_WRITE_EVT value: %.*s", param->write.len, param->write.value);
 
@@ -219,9 +245,11 @@ static void ezpi_dynamic_config_write_func(esp_gatt_value_t *value, esp_ble_gatt
                             {
                                 if (EZPI_core_factory_info_v3_set_ezlopi_config(cjson_config))
                                 {
-                                    // TRACE_W("Restarting .....");
-                                    // vTaskDelay(1000 / portTICK_PERIOD_MS);
-                                    // EZPI_core_reset_reboot();
+                                    reboot_to_apply = true;
+                                }
+                                else
+                                {
+                                    TRACE_E("ERROR : Failed storing device config.");
                                 }
                                 cJSON_Delete(__FUNCTION__, cjson_config);
                             }
@@ -236,7 +264,26 @@ static void ezpi_dynamic_config_write_func(esp_gatt_value_t *value, esp_ble_gatt
                         g_dynamic_config_linked_buffer = NULL;
                     }
                 }
+
+                /* root holds a parsed copy of this chunk's envelope and nothing
+                 * below keeps a pointer into it, but it was never released --
+                 * so every chunk of every config write leaked a whole cJSON
+                 * tree. */
+                cJSON_Delete(__FUNCTION__, root);
             }
+        }
+    }
+
+    if (reboot_to_apply)
+    {
+        if (pdPASS != xTaskCreate(ezpi_dynamic_config_reboot_task, "ezpi_cfg_reboot", 2048, NULL, 1, NULL))
+        {
+            /* Without the deferred task the config would sit in flash unapplied
+             * until the next power cycle, which is the failure this fix exists
+             * to remove. Rebooting inline costs the write response but at least
+             * applies the config. */
+            TRACE_E("Could not defer restart, restarting inline.");
+            EZPI_core_reset_reboot();
         }
     }
 }
@@ -296,7 +343,15 @@ static void ezpi_dynamic_config_read_func(esp_gatt_value_t *value, esp_ble_gatts
 
                     cJSON_AddNumberToObject(__FUNCTION__, cj_response, ezlopi_len_str, copy_size);
                     cJSON_AddNumberToObject(__FUNCTION__, cj_response, ezlopi_total_len_str, total_data_len);
-                    cJSON_AddNumberToObject(__FUNCTION__, cj_response, ezlopi_sequence_str, g_dynamic_config_sequence_no);
+                    /* The wire protocol numbers chunks from 1, not 0: the write
+                     * counterpart in this same file rejects sequence 0 outright
+                     * (`if (sequence && len && tot_len)`) and offsets with
+                     * `(sequence - 1) * 400`. Emitting the raw 0-based counter
+                     * made the very first chunk look invalid to the client,
+                     * which then reports the characteristic as not offered at
+                     * all. g_dynamic_config_sequence_no stays 0-based because
+                     * the local offset arithmetic above depends on it. */
+                    cJSON_AddNumberToObject(__FUNCTION__, cj_response, ezlopi_sequence_str, g_dynamic_config_sequence_no + 1);
                     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_data_str, data_buffer);
 
                     bool ret = cJSON_PrintPreallocated(__FUNCTION__, cj_response, (char *)value->value, 512, false);
@@ -391,6 +446,10 @@ static char *ezpi_base64_decode_dynamic_config(uint32_t total_size)
         uint32_t pos = 0;
         s_linked_buffer_t *tmp_prov_buffer = g_dynamic_config_linked_buffer;
 
+        /* If the very first chunk carries no data member, the strlen() and the
+         * trace below would both read this buffer uninitialised. */
+        base64_buffer[0] = '\0';
+
         while (tmp_prov_buffer)
         {
             // TRACE_W("tmp_prov_buffer->buffer[%d]: %.*s", tmp_prov_buffer->len, tmp_prov_buffer->len, (char *)tmp_prov_buffer->buffer);
@@ -403,6 +462,18 @@ static char *ezpi_base64_decode_dynamic_config(uint32_t total_size)
                 char *data = CJ_GET_STRING(ezlopi_data_str);
                 if (data)
                 {
+                    /* len and the data member both come straight off the wire,
+                     * and base64_buffer is only total_size + 1 bytes. Copying
+                     * len bytes unchecked let a client whose chunks claim more
+                     * than total_len -- or whose len exceeds the string it
+                     * actually sent -- walk off the end of the heap block. */
+                    uint32_t safe_len = EZPI_util_clamp_copy_len(len, (uint32_t)strlen(data), total_size - pos);
+                    if (safe_len != len)
+                    {
+                        TRACE_E("chunk claimed %d byte(s), only %d safe at pos %d of %d, truncating", len, safe_len, pos, total_size);
+                    }
+                    len = safe_len;
+
                     memcpy(base64_buffer + pos, data, len);
                     pos += len;
                     base64_buffer[pos] = '\0';
@@ -411,6 +482,10 @@ static char *ezpi_base64_decode_dynamic_config(uint32_t total_size)
                 {
                     TRACE_E("DATA IS NULL");
                 }
+
+                /* data pointed into root, so this has to come after the copy.
+                 * It was missing entirely, leaking one tree per chunk. */
+                cJSON_Delete(__FUNCTION__, root);
             }
             else
             {
