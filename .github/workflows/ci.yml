@@ -130,3 +130,56 @@ jobs:
             build/*.map
             sdkconfig
           if-no-files-found: error
+
+  # ezlopi_core_ota.c is entirely wrapped in "#ifdef CONFIG_EZPI_ENABLE_OTA",
+  # and that symbol is "not set" in every committed sdkconfig.defaults.*. The
+  # four builds above therefore compile none of it, so they cannot catch a
+  # syntax error, an unused variable or a changed IDF signature in the update
+  # path. This job turns the feature on for one target so the file is at least
+  # compiled on every push.
+  #
+  # It needs ca_mios.h, which is deliberately not in the repository (it is in
+  # .gitignore, because it holds the CA chain for Ezlo's own OTA host). A
+  # throwaway placeholder is generated here: this job only ever compiles, it
+  # never connects to anything, so the contents just have to be a valid C
+  # string literal. Nothing in the uploaded artifacts above comes from here.
+  firmware-ota:
+    name: Build esp32 (OTA enabled)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v4.4.6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate a placeholder CA header
+        shell: bash
+        run: |
+          cat > ezlopi-core/ezlopi-core-ota/ca_mios.h <<'EOF'
+          /* CI placeholder. Not a usable certificate -- compile coverage only. */
+          #ifndef _CA_MIOS_H_
+          #define _CA_MIOS_H_
+          static const char ca_mios[] =
+              "-----BEGIN CERTIFICATE-----\n"
+              "PLACEHOLDER-FOR-COMPILE-COVERAGE-ONLY\n"
+              "-----END CERTIFICATE-----\n";
+          #endif
+          EOF
+
+      - name: Build with OTA enabled
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32;tests/ci/sdkconfig.ota_enabled" \
+                 set-target esp32
+          idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32;tests/ci/sdkconfig.ota_enabled" \
+                 build
+
+      # Guards against the fragment silently failing to apply, which would make
+      # this job pass while compiling exactly as little as the others do.
+      - name: Confirm OTA was actually compiled in
+        shell: bash
+        run: |
+          grep -q '^CONFIG_EZPI_ENABLE_OTA=y' sdkconfig || {
+            echo "::error::CONFIG_EZPI_ENABLE_OTA did not get enabled; this job proved nothing."
+            exit 1
+          }
+          echo "OTA compiled in"

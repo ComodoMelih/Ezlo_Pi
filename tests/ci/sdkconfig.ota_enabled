@@ -1,0 +1,13 @@
+# Config fragment used only by the "Build esp32 (OTA enabled)" CI job.
+#
+# Why this exists: CONFIG_EZPI_ENABLE_OTA is "not set" in all four committed
+# sdkconfig.defaults.* files, and the whole of ezlopi_core_ota.c sits behind
+# "#ifdef CONFIG_EZPI_ENABLE_OTA". So none of that file was compiled by any CI
+# job -- a green CI run said nothing about it at all. It is roughly 300 lines
+# that fetch and flash a firmware image over the network, which is the last
+# place a compile error should be discovered by the first person to switch the
+# feature on.
+#
+# This fragment is not applied to the normal builds, so the shipped default
+# configuration is unchanged: OTA stays off unless someone turns it on.
+CONFIG_EZPI_ENABLE_OTA=y
