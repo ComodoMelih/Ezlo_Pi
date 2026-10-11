@@ -69,6 +69,7 @@
  * scope, where an include belongs, it is static storage as intended. */
 #include "ca_mios.h"
 
+#include <stdbool.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -121,7 +122,26 @@ typedef enum e_ezlopi_ota_state
  *                          Static Data Definitions
  *******************************************************************************/
 static int32_t __byte_count = 0;
+
+/* Reported OTA state, returned verbatim by EPZI_core_ota_get_state(). The
+ * numeric values are part of the scene surface: ezlopi_core_scenes_when_methods.c
+ * compares this against the literals 0, 1 and 2 for "done", "started" and
+ * "updating", so neither the enum numbering nor what this holds after a failed
+ * update may change. It stays at EZLOPI_OTA_STATE_FAILED after a failure,
+ * exactly as before. */
 static volatile uint32_t __ota_in_process = 0;
+
+/* Whether an OTA task is currently alive. This used to be conflated with the
+ * reported state above, which wedged OTA permanently: a failed download leaves
+ * the state at EZLOPI_OTA_STATE_FAILED (3), nothing ever reset it, and the
+ * launch guard demanded 0 -- so after one flaky download no further update
+ * could be started until a power cycle. The two concerns are now separate, so
+ * the reported state is unchanged while the guard clears correctly.
+ *
+ * It is also set *before* xTaskCreate rather than in the task body. Setting it
+ * inside the task left a window in which two requests arriving close together
+ * both passed the guard and spawned two concurrent OTA tasks. */
+static volatile bool __ota_task_alive = false;
 
 static void ezlopi_ota_process(void *pv);
 static esp_err_t _http_event_handler(esp_http_client_event_t *evt);
@@ -143,21 +163,53 @@ void EZPI_core_ota_start(cJSON *url)
 {
     if (url && url->valuestring)
     {
-        char *ota_url = (char *)ezlopi_malloc(__FUNCTION__, OTA_URL_SIZE);
+        /* Check the guard before allocating, so the in-progress case does not
+         * allocate a buffer only to free it again. */
+        if (__ota_task_alive)
+        {
+            TRACE_W("Ota in progress...");
+            return;
+        }
+
+        /* The URL length is measured rather than assumed. This was
+         * memcpy(ota_url, url->valuestring, OTA_URL_SIZE) with OTA_URL_SIZE of
+         * 512, copying a fixed 512 bytes out of a cJSON string allocated to
+         * the length of the actual URL -- typically 60 to 100 bytes. Every OTA
+         * read roughly 400 bytes past the end of that allocation. It did not
+         * crash in practice only because the heap happened to be readable
+         * there, and it could copy unrelated heap contents into the URL. */
+        const size_t url_len = strlen(url->valuestring);
+        if (url_len >= OTA_URL_SIZE)
+        {
+            TRACE_E("OTA url too long: %u bytes, max %d", (unsigned)url_len, OTA_URL_SIZE - 1);
+            return;
+        }
+
+        char *ota_url = (char *)ezlopi_malloc(__FUNCTION__, url_len + 1);
         if (ota_url)
         {
-            memcpy(ota_url, url->valuestring, OTA_URL_SIZE);
-            if (0 == __ota_in_process)
+            memcpy(ota_url, url->valuestring, url_len + 1);
+
+            /* Claimed before xTaskCreate, not inside the task body, so two
+             * requests arriving close together cannot both get past the guard.
+             * Cleared again below if the task fails to start, and by the task
+             * itself on the failure path. */
+            __ota_task_alive = true;
+
+            TaskHandle_t ezlopi_core_ota_process_task_handle = NULL;
+            if (pdPASS == xTaskCreate(ezlopi_ota_process, "EzpiOTAProcess", EZLOPI_CORE_OTA_PROCESS_TASK_DEPTH, ota_url, 3, &ezlopi_core_ota_process_task_handle))
             {
-                TaskHandle_t ezlopi_core_ota_process_task_handle = NULL;
-                xTaskCreate(ezlopi_ota_process, "EzpiOTAProcess", EZLOPI_CORE_OTA_PROCESS_TASK_DEPTH, ota_url, 3, &ezlopi_core_ota_process_task_handle);
 #if defined(CONFIG_FREERTOS_USE_TRACE_FACILITY)
                 EZPI_core_process_set_process_info(ENUM_EZLOPI_CORE_OTA_PROCESS_TASK, &ezlopi_core_ota_process_task_handle, EZLOPI_CORE_OTA_PROCESS_TASK_DEPTH);
 #endif
             }
             else
             {
-                TRACE_W("Ota in progress...");
+                /* xTaskCreate was previously called without checking its
+                 * return value. On failure the task never runs, so nothing
+                 * would ever have released the guard or the buffer. */
+                TRACE_E("Failed to create OTA task");
+                __ota_task_alive = false;
                 ezlopi_free(__FUNCTION__, ota_url);
                 ota_url = NULL;
             }
@@ -234,15 +286,28 @@ static void ezlopi_ota_process(void *pv)
         TRACE_E("Firmware upgrade failed");
     }
 
+    /* Freed here, before vTaskDelete, and no longer referenced by config.url
+     * now that esp_https_ota() has returned. The free used to sit *after*
+     * vTaskDelete(NULL), which never returns, so it was unreachable and every
+     * OTA attempt leaked the URL buffer. */
+    if (url)
+    {
+        ezlopi_free(__FUNCTION__, url);
+        url = NULL;
+        config.url = NULL;
+    }
+
+    /* Released on every path that reaches here. The success path above reboots
+     * and never gets this far; the failure path does, and this is what makes a
+     * later OTA attempt possible. __ota_in_process is deliberately left at
+     * EZLOPI_OTA_STATE_FAILED so the state reported to scenes and to the cloud
+     * is exactly what it was before this change. */
+    __ota_task_alive = false;
+
 #if defined(CONFIG_FREERTOS_USE_TRACE_FACILITY)
     EZPI_core_process_set_is_deleted(ENUM_EZLOPI_CORE_OTA_PROCESS_TASK);
 #endif
     vTaskDelete(NULL);
-
-    if (url)
-    {
-        ezlopi_free(__FUNCTION__, url);
-    }
 }
 
 static esp_err_t _http_event_handler(esp_http_client_event_t *evt)
