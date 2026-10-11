@@ -90,6 +90,15 @@ jobs:
           done
           echo "all present"
 
+      # CJSON_GET_VALUE_STRING_BY_COPY leaves its destination buffer untouched
+      # when the JSON key is absent or is not a string -- there is no else
+      # branch around the snprintf. Twelve of sixty-six call sites therefore
+      # read uninitialised stack whenever a payload omitted a field, on inputs
+      # arriving over BLE, UART and the cloud socket. The script explains the
+      # mechanism in full.
+      - name: JSON string destinations are initialised
+        run: python3 tests/ci/check_uninit_json_buffers.py
+
   firmware:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -164,22 +173,37 @@ jobs:
           #endif
           EOF
 
+      # The fragment is appended to the per-target defaults file rather than
+      # passed via -DSDKCONFIG_DEFAULTS. Overriding that variable did build, but
+      # left CONFIG_EZPI_ENABLE_OTA unset, so the job compiled exactly as little
+      # as the other four and only the assertion below revealed it. Appending to
+      # the file ESP-IDF already applies last is the same mechanism the four
+      # firmware jobs use, so it cannot diverge from them. The checkout is
+      # ephemeral, so the committed defaults are untouched.
+      - name: Enable OTA in the per-target defaults
+        shell: bash
+        run: |
+          cat tests/ci/sdkconfig.ota_enabled >> sdkconfig.defaults.esp32
+          echo "--- tail of sdkconfig.defaults.esp32 ---"
+          tail -5 sdkconfig.defaults.esp32
+
       - name: Build with OTA enabled
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
-          idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32;tests/ci/sdkconfig.ota_enabled" \
-                 set-target esp32
-          idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32;tests/ci/sdkconfig.ota_enabled" \
-                 build
+          idf.py set-target esp32
+          idf.py build
 
       # Guards against the fragment silently failing to apply, which would make
-      # this job pass while compiling exactly as little as the others do.
+      # this job pass while compiling exactly as little as the others do. This
+      # has already caught one such case, so it stays.
       - name: Confirm OTA was actually compiled in
         shell: bash
         run: |
-          grep -q '^CONFIG_EZPI_ENABLE_OTA=y' sdkconfig || {
+          if ! grep -q '^CONFIG_EZPI_ENABLE_OTA=y' sdkconfig; then
             echo "::error::CONFIG_EZPI_ENABLE_OTA did not get enabled; this job proved nothing."
+            echo "--- what the generated sdkconfig says instead ---"
+            grep -n 'EZPI_ENABLE_OTA\|EZPI_ENABLE_WIFI\|EZPI_CORE_ENABLE_ETH' sdkconfig || echo "(no matching lines at all)"
             exit 1
-          }
+          fi
           echo "OTA compiled in"

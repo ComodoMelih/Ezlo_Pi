@@ -349,11 +349,25 @@ void ezlopi_wifi_try_connect_task(void *params)
     {
         while (1)
         {
-            char ssid[32];
-            char pass[32];
+            /* Zeroed because CJSON_GET_VALUE_STRING_BY_COPY leaves its
+             * destination untouched when the key is absent or is not a string
+             * (see EZPI_core_cjson_get_value_string_by_copy, where the snprintf
+             * is guarded by "if (o_item && o_item->valuestring ...)"). A
+             * cj_network without "key" therefore left pass holding whatever was
+             * on the stack. */
+            char ssid[32] = {0};
+            char pass[32] = {0};
             CJSON_GET_VALUE_STRING_BY_COPY(cj_network, ezlopi_ssid_str, ssid, sizeof(ssid));
             CJSON_GET_VALUE_STRING_BY_COPY(cj_network, ezlopi_key_str, pass, sizeof(pass));
-            if (('\0' != ssid[0]) && ('\0' != pass))
+
+            /* The second test was "('\0' != pass)", comparing the *address* of
+             * the array rather than its first character. The address of a local
+             * array is never NULL, so that half of the condition was constant
+             * true and the password was never actually checked for emptiness --
+             * which is what let the uninitialised buffer above reach
+             * EZPI_core_wifi_connect() and the TRACE_D below, instead of being
+             * rejected here. */
+            if (('\0' != ssid[0]) && ('\0' != pass[0]))
             {
                 TRACE_D("Trying to connect to %s with password %s", ssid, pass);
                 esp_err_t error = EZPI_core_wifi_connect(ssid, pass);

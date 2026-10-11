@@ -613,11 +613,19 @@ static int __provision_update(char *arg)
             s_basic_factory_info_t config_check_factoryInfo;
             memset(&config_check_factoryInfo, 0, sizeof(s_basic_factory_info_t));
 
-            char tmp_id_str[20];
-            char tmp_dev_uuid[40];
-            char tmp_prov_uuid[40];
-            char tmp_cloud_server[128];
-            char tmp_provision_token[300];
+            /* Zeroed, matching the memset of config_check_factoryInfo just
+             * above. CJSON_GET_VALUE_STRING_BY_COPY leaves its destination
+             * untouched when the key is missing or is not a string, and these
+             * five buffers are then pointed at by config_check_factoryInfo and
+             * compared against -- and potentially written to -- the stored
+             * factory configuration. A provisioning response missing any of
+             * these fields fed uninitialised stack into that path, with
+             * tmp_provision_token alone covering 300 bytes of it. */
+            char tmp_id_str[20] = {0};
+            char tmp_dev_uuid[40] = {0};
+            char tmp_prov_uuid[40] = {0};
+            char tmp_cloud_server[128] = {0};
+            char tmp_provision_token[300] = {0};
 
             CJSON_GET_VALUE_STRING_BY_COPY(cj_root_data, ezlopi_id_str, tmp_id_str, sizeof(tmp_id_str));
             CJSON_GET_VALUE_STRING_BY_COPY(cj_root_data, ezlopi_uuid_str, tmp_dev_uuid, sizeof(tmp_dev_uuid));

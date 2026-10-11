@@ -399,8 +399,14 @@ static int ezpi_service_uart_set_uart_config(const cJSON *cj_root)
 {
     int ret = 0;
 
-    char parity[16];
-    char flow_control[16];
+    /* Zeroed, like every other local here that has an explicit default:
+     * CJSON_GET_VALUE_STRING_BY_COPY leaves its destination untouched when the
+     * key is missing or is not a string, so a config omitting "parity" or
+     * "flow_control" left these holding stack contents, which are then
+     * compared below to decide whether to write a new UART configuration to
+     * NVS. This function is reachable from the UART command interface. */
+    char parity[16] = {0};
+    char flow_control[16] = {0};
 
     uint32_t baud = 0;
     uint32_t parity_val = EZPI_SERV_UART_PARITY_DEFAULT;

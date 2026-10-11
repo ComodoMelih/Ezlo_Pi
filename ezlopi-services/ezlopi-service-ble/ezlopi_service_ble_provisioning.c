@@ -331,10 +331,42 @@ static void ezpi_provisioning_info_write_func(esp_gatt_value_t *value, esp_ble_g
 
                             if (cj_config)
                             {
-                                char user_id[32];
+                                /* Zeroed, like every other buffer filled from
+                                 * this config below. It was the one that was
+                                 * not, and CJSON_GET_VALUE_STRING_BY_COPY
+                                 * leaves its destination completely untouched
+                                 * when the key is absent or not a string -- see
+                                 * EZPI_core_cjson_get_value_string_by_copy in
+                                 * ezlopi_core_cjson_macros.c, where the
+                                 * snprintf sits behind
+                                 * "if (o_item && o_item->valuestring ...)".
+                                 *
+                                 * So a BLE provisioning payload that simply
+                                 * omitted "user_id" passed uninitialised stack
+                                 * to the comparison below, and on a device that
+                                 * had not been claimed yet that stack garbage
+                                 * was written into NVS as the owning user. */
+                                char user_id[32] = {0};
                                 CJSON_GET_VALUE_STRING_BY_COPY(cj_config, ezlopi_user_id_str, user_id, sizeof(user_id));
 
-                                if (BLE_AUTH_SUCCESS == EZPI_ble_auth_check_user_id(user_id))
+                                /* An absent key now yields "" rather than
+                                 * garbage, but "" must not be allowed through
+                                 * either: storing an empty user id would make
+                                 * strlen(stored) zero, and the strncmp in
+                                 * EZPI_ble_auth_check_user_id compares zero
+                                 * bytes -- after which every subsequent client
+                                 * authenticates. Reject it here instead.
+                                 *
+                                 * This matches what the other BLE provisioning
+                                 * path already does: ezlopi_service_ble_wifi.c
+                                 * refuses a payload "missing wifi_ssid,
+                                 * wifi_password or user_id". A config with no
+                                 * user id was never serviceable. */
+                                if ('\0' == user_id[0])
+                                {
+                                    TRACE_E("provisioning config has no user_id; rejecting");
+                                }
+                                else if (BLE_AUTH_SUCCESS == EZPI_ble_auth_check_user_id(user_id))
                                 {
                                     s_basic_factory_info_t *ezlopi_config_basic = ezlopi_malloc(__FUNCTION__, sizeof(s_basic_factory_info_t));
                                     if (ezlopi_config_basic)

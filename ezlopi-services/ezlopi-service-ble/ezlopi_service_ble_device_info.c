@@ -545,8 +545,13 @@ static void ezpi_service_ble_serial_config_write(esp_gatt_value_t *value, esp_bl
                 uint32_t frame_size_current = EZPI_SERV_UART_FRAME_SIZE_DEFAULT;
                 uint32_t flow_control_current = EZPI_SERV_UART_FLOW_CTRL_DEFAULT;
 
-                char str_parity[4];
-                char str_flowcontrol[16];
+                /* Zeroed: CJSON_GET_VALUE_STRING_BY_COPY leaves its destination
+                 * untouched when the key is missing or is not a string, so a
+                 * payload omitting "parity" or "flow_control" left these
+                 * holding stack contents, which are then compared below to
+                 * decide whether to write a new UART configuration to NVS. */
+                char str_parity[4] = {0};
+                char str_flowcontrol[16] = {0};
                 bool flag_new_config = false;
 
                 CJSON_GET_VALUE_UINT32(root, ezlopi_baud_str, baud);
