@@ -120,8 +120,6 @@ static const char *sg_last_disconnect_reason = scg_wifi_no_error_str;
 static ll_ezlopi_wifi_event_upcall_t *__event_upcall_head = NULL;
 // This task name is used to get the task handle while deleting the scanner task. Also, the task name should be < 16 to get handle using the freeRTOS API.
 static TaskHandle_t sg_scan_handle = NULL;
-static wifi_ap_record_t *ap_record = NULL;
-static uint16_t total_wifi_APs_available = 0;
 
 /*******************************************************************************
  *                          Extern Data Definitions
@@ -425,13 +423,12 @@ void EZPI_core_wifi_scan_stop()
         sg_scan_handle = NULL;
     }
 
-    TRACE_E("Deleting previous record.");
-
-    if (ap_record)
-    {
-        ezlopi_free(__FUNCTION__, ap_record);
-        ap_record = NULL;
-    }
+    /* No record array is freed here any more. It used to be a file static that
+     * this function released, but it is allocated and released inside
+     * __event_wifi_scan_done() on the event task -- so freeing it from here,
+     * which runs on whichever task served the stop request, could pull it out
+     * from under that loop. Nothing else ever read it, so it is simply a local
+     * there now and there is nothing left for this function to clean up. */
 }
 
 void EZPI_core_wifi_scan_start()
@@ -648,9 +645,27 @@ static void __ezlopi_wifi_scanner_task(void *params)
             // Scanning for available AP for about 30s. This is because, the scanning tends to prevent data TX/RX over wifi.
             if (current_time - previous_scan_time >= 30000)
             {
-                TRACE_E("Starting the scan, (%d)", current_time);
-                ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
-                TRACE_E("Scanning completed.");
+                TRACE_I("Starting the scan, (%d)", current_time);
+
+                /* Checked rather than ESP_ERROR_CHECK'd. esp_wifi_scan_start()
+                 * returns ESP_ERR_WIFI_NOT_STARTED whenever esp_wifi_start()
+                 * has not been called, and on this firmware that is not an
+                 * exotic state: esp_wifi_set_mode() and esp_wifi_start() are
+                 * reached only from EZPI_core_wifi_connect(), which only runs
+                 * when credentials already exist. So on an unprovisioned
+                 * controller -- or an Ethernet-only one -- a
+                 * hub.network.wifi.scan.start request aborted the firmware and
+                 * rebooted the board. A request to scan with no radio running
+                 * should fail, not restart the device. */
+                esp_err_t err = esp_wifi_scan_start(&scan_config, true);
+
+                if (ESP_OK != err)
+                {
+                    TRACE_E("Scan could not start: %s; stopping scanner.", esp_err_to_name(err));
+                    break;
+                }
+
+                TRACE_I("Scanning completed.");
                 previous_scan_time = current_time;
             }
         }
@@ -701,44 +716,110 @@ static void __event_wifi_disconnected(void *event_data)
 
 static void __event_wifi_scan_done(void *event_data)
 {
-    if (event_data)
+    if (NULL == event_data)
     {
-        wifi_event_sta_scan_done_t *scan_event_param = (wifi_event_sta_scan_done_t *)event_data;
-        TRACE_I("status: %d, event data: %d", scan_event_param->status, scan_event_param->number);
-        if (scan_event_param->status == 0)
-        {
-            total_wifi_APs_available = scan_event_param->number;
-            ap_record = (wifi_ap_record_t *)ezlopi_malloc(__FUNCTION__, total_wifi_APs_available * sizeof(wifi_ap_record_t));
-            ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&total_wifi_APs_available, ap_record));
-            cJSON *network_array = cJSON_CreateArray(__FUNCTION__);
-            if (network_array)
-            {
-                char temporary[50];
-                for (int i = 0; i < total_wifi_APs_available; i++)
-                {
-                    cJSON *network_data = cJSON_CreateObject(__FUNCTION__);
-                    if (network_data)
-                    {
-                        memset(temporary, 0, 50);
-                        memcpy(temporary, ap_record[i].ssid, 33);
-                        cJSON_AddStringToObject(__FUNCTION__, network_data, "ssid", temporary);
-                        memset(temporary, 0, 50);
-                        snprintf(temporary, 50, "%02x:%02x:%02x:%02x:%02x:%02x", ap_record[i].bssid[0], ap_record[i].bssid[1], ap_record[i].bssid[2],
-                                 ap_record[i].bssid[3], ap_record[i].bssid[0], ap_record[i].bssid[5]);
-                        cJSON_AddStringToObject(__FUNCTION__, network_data, "bssid", temporary);
-                        cJSON_AddNumberToObject(__FUNCTION__, network_data, "rssi", ap_record[i].rssi);
-                        EZPI_core_wifi_get_auth_mode_str(temporary, ap_record[i].authmode);
-                        cJSON_AddStringToObject(__FUNCTION__, network_data, "security", temporary);
-                        cJSON_AddItemToArray(network_array, network_data);
-                    }
-                }
+        return;
+    }
 
-                EZPI_core_device_value_update_wifi_scan_broadcast(network_array);
+    wifi_event_sta_scan_done_t *scan_event_param = (wifi_event_sta_scan_done_t *)event_data;
+    TRACE_I("status: %d, event data: %d", scan_event_param->status, scan_event_param->number);
+
+    /* Non-zero means the scan failed or was aborted, in which case there is no
+     * result set to fetch. */
+    if (0 != scan_event_param->status)
+    {
+        return;
+    }
+
+    /* The record array is local rather than a file static, which is what it
+     * used to be. Nothing outside this function ever read it -- it was
+     * allocated and freed here -- but EZPI_core_wifi_scan_stop() also freed it,
+     * and that runs on whichever task served hub.network.wifi.scan.stop while
+     * this runs on the event task. A stop arriving while the loop below was
+     * part-way through the array freed the memory under it. */
+    uint16_t found = scan_event_param->number;
+
+    /* esp_wifi_scan_get_ap_records() rejects a count of zero, and a scan that
+     * finds nothing is a perfectly ordinary outcome -- an RF-quiet room, or
+     * every AP hidden. Calling it anyway returned ESP_ERR_INVALID_ARG into an
+     * ESP_ERROR_CHECK, and with CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE
+     * set in every committed sdkconfig.defaults.* that aborts: the controller
+     * rebooted because it could not see a network. An empty list is still
+     * broadcast below, because "I scanned and found nothing" is a true and
+     * useful answer. */
+    cJSON *network_array = cJSON_CreateArray(__FUNCTION__);
+    wifi_ap_record_t *records = NULL;
+
+    if (found > 0)
+    {
+        records = (wifi_ap_record_t *)ezlopi_malloc(__FUNCTION__, found * sizeof(wifi_ap_record_t));
+
+        if (NULL == records)
+        {
+            /* Also previously fatal, by the same route: the unchecked pointer
+             * went straight into the IDF call. Out of memory is a reason to
+             * report nothing, not a reason to restart. */
+            TRACE_E("scan-done: no memory for %u AP record(s)", (unsigned)found);
+            found = 0;
+        }
+        else
+        {
+            esp_err_t err = esp_wifi_scan_get_ap_records(&found, records);
+
+            if (ESP_OK != err)
+            {
+                TRACE_E("scan-done: esp_wifi_scan_get_ap_records failed: %s", esp_err_to_name(err));
+                found = 0;
+            }
+        }
+    }
+
+    if (network_array)
+    {
+        char temporary[50];
+
+        for (uint16_t i = 0; i < found; i++)
+        {
+            cJSON *network_data = cJSON_CreateObject(__FUNCTION__);
+
+            if (NULL == network_data)
+            {
+                continue;
             }
 
-            ezlopi_free(__FUNCTION__, ap_record);
-            ap_record = NULL;
+            /* The SSID field is 33 bytes and the IDF terminates it, but the
+             * terminator is written in rather than relied on: this buffer is
+             * handed to cJSON as a C string. */
+            memset(temporary, 0, sizeof(temporary));
+            memcpy(temporary, records[i].ssid, sizeof(records[i].ssid));
+            temporary[sizeof(records[i].ssid)] = '\0';
+            cJSON_AddStringToObject(__FUNCTION__, network_data, "ssid", temporary);
+
+            /* The fifth octet used to be printed as bssid[0] -- a copy-paste
+             * slip in the argument list, so every BSSID this controller ever
+             * reported had its fifth octet replaced by its first. Two APs
+             * differing only in that octet were indistinguishable, and the
+             * address was simply wrong for anything matching on it. */
+            memset(temporary, 0, sizeof(temporary));
+            snprintf(temporary, sizeof(temporary), "%02x:%02x:%02x:%02x:%02x:%02x",
+                     records[i].bssid[0], records[i].bssid[1], records[i].bssid[2],
+                     records[i].bssid[3], records[i].bssid[4], records[i].bssid[5]);
+            cJSON_AddStringToObject(__FUNCTION__, network_data, "bssid", temporary);
+
+            cJSON_AddNumberToObject(__FUNCTION__, network_data, "rssi", records[i].rssi);
+
+            EZPI_core_wifi_get_auth_mode_str(temporary, records[i].authmode);
+            cJSON_AddStringToObject(__FUNCTION__, network_data, "security", temporary);
+
+            cJSON_AddItemToArray(network_array, network_data);
         }
+
+        EZPI_core_device_value_update_wifi_scan_broadcast(network_array);
+    }
+
+    if (NULL != records)
+    {
+        ezlopi_free(__FUNCTION__, records);
     }
 }
 
