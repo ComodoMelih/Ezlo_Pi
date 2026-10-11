@@ -255,9 +255,19 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
                         memcpy(s_buffer + data->payload_offset, data->data_ptr, data->data_len);
                     }
 
+                    /* s_buffer is NULL when the allocation above failed, which
+                     * is reachable for a large payload on a fragmented heap.
+                     * The completion test below does not depend on s_buffer, so
+                     * without this guard the final chunk handed a NULL payload
+                     * to msg_upcall, which took ownership of it and queued it
+                     * for the consumer to parse. Drop the message instead. */
                     if ((data->payload_offset + data->data_len) >= data->payload_len)
                     {
-                        if (0 == event_arg->msg_upcall(s_buffer, data->payload_len, now))
+                        if (NULL == s_buffer)
+                        {
+                            TRACE_E("chunked payload dropped: buffer allocation failed (payload_len: %d)", data->payload_len);
+                        }
+                        else if (0 == event_arg->msg_upcall(s_buffer, data->payload_len, now))
                         {
                             ezlopi_free(__FUNCTION__, s_buffer);
                         }
