@@ -204,12 +204,20 @@ failure.
   The header defines a variable, so at block scope it became a per-call local.
   Moved to the file's include block, where it has static storage as intended.
 
-- **`#include "../../build/config/sdkconfig.h"` hard-coded the build
-  directory.** It pinned both the directory's name and its position relative to
-  the source file, so it broke for any build directory other than
-  `<project>/build` — including `idf.py -B <dir>`. ESP-IDF already puts the
-  generated config directory on every component's include path, so this is now
-  just `#include "sdkconfig.h"`.
+- **New code no longer hard-codes the build directory in its `sdkconfig.h`
+  include.** `#include "../../build/config/sdkconfig.h"` pins both the build
+  directory's name and its position relative to the source file, so it breaks
+  for any build directory other than `<project>/build` — including
+  `idf.py -B <dir>`. ESP-IDF already puts the generated config directory on
+  every component's include path, so the plain `#include "sdkconfig.h"` works.
+
+  **This is not fixed tree-wide, and an earlier wording of this entry implied it
+  was.** What actually changed: `ezlopi_core_ota.c` was converted, and
+  `ezlopi_service_ble_improv.c` was written that way. **83 files inherited from
+  upstream still use the relative form**, so the tree as a whole still cannot be
+  built with `idf.py -B <dir>`. See [Known gaps](#known-gaps). Converting the
+  rest belongs with the ESP-IDF 5.x work: it is 83 files touched for no
+  behaviour change, which is a poor thing to bury in an unrelated pull request.
 
 ### Provisioning — [feat]
 
@@ -512,3 +520,24 @@ Listed because a changelog that only mentions what was finished is misleading.
   exercises it.
 - **The PSK is still sent to the cloud as `key`** in `hub.network.get`. Only
   the local trace is masked. See the README privacy note.
+- **83 files still pin the generated config by relative path**, so the tree as a
+  whole still cannot be built with `idf.py -B <dir>`. Four files use the plain
+  `#include "sdkconfig.h"`: `ezlopi_core_ota.c`, `ezlopi_service_ble_improv.c`
+  (added in this branch), and
+  `ezlopi_service_system_temperature_sensor.c`/`.h`, which were already that way
+  upstream.
+
+  Counting this takes more care than it looks, which is worth recording for
+  whoever does the conversion.
+  `git grep -l 'build/config/sdkconfig.h' -- '*.c' '*.h'` reports 87, but three
+  of those quote the path in a comment while *not* including it: the two
+  converted files explain what they moved away from, and two host-test stubs
+  describe what they stub out. Matching the `#include` line itself gives 82 --
+  one short, because `ezlopi-user-config/EZLOPI_USER_CONFIG.h:48` sits one
+  directory shallower and writes `"../build/config/sdkconfig.h"`. A ratchet
+  check for this must match on the path suffix, not on a fixed `../` depth, or
+  it will wave that file through.
+- **The install page has never been used to flash a board.** It is assembled
+  and checked on every CI run, and the images it serves are verified
+  byte-for-byte against the build outputs, but no one has opened it in a
+  browser and driven it end to end against hardware.

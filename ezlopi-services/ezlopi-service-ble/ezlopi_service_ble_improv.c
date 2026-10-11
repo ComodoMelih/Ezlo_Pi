@@ -73,7 +73,13 @@
  *                          Include Files
  *******************************************************************************/
 
-#include "../../build/config/sdkconfig.h"
+/* Not "../../build/config/sdkconfig.h". ESP-IDF puts the generated config
+ * directory on every component's include path, so the plain name resolves; the
+ * relative form pins both the build directory's name and its position relative
+ * to this file, and breaks under "idf.py -B <dir>". Most of the tree still uses
+ * the relative form -- see the known gap in the CHANGELOG -- but new code
+ * should not add to it. */
+#include "sdkconfig.h"
 
 #if defined(CONFIG_EZPI_BLE_ENABLE) && defined(CONFIG_EZPI_BLE_ENABLE_IMPROV)
 
