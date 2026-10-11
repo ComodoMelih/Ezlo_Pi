@@ -274,6 +274,11 @@ static void test_copy_str_bounded(void)
  *******************************************************************************/
 int main(void)
 {
+    /* See the matching note in test_cjext.c. stdout is block-buffered when this
+     * runs under a pipe, and a sanitizer abort does not flush, so FAIL lines
+     * printed before a crash would be lost exactly when they matter most. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     test_json_value_end();
     test_redact_secrets();
     test_clamp_copy_len();

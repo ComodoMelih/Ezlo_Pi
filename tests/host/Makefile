@@ -10,6 +10,14 @@
 
 CC      ?= cc
 SANITIZE_DIR := ../../ezlopi-util/ezlopi-util-sanitize
+CJEXT_DIR    := ../../ezlopi-components/cjext
+
+# cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
+# (whose real version includes driver/uart.h and the generated sdkconfig.h) and
+# ezlopi_util_trace.h (esp_log.h, FreeRTOS). stubs/ supplies both. cjext
+# references no CONFIG_* symbol and no TRACE_* macro, which is the only reason
+# a shim this thin is enough -- see stubs/EZLOPI_USER_CONFIG.h.
+STUBS_DIR    := stubs
 
 # -fsanitize is where the value is for this particular suite: the defects being
 # regression-tested were buffer overruns, and an overrun that happens to land
@@ -24,7 +32,7 @@ CFLAGS  += -std=c99 -O1 -g \
 LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
-TESTS   := test_sanitize
+TESTS   := test_sanitize test_cjext
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -42,6 +50,18 @@ test: $(BINARIES)
 
 $(BUILD)/test_sanitize: test_sanitize.c $(SANITIZE_DIR)/ezlopi_util_sanitize.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# cjext.c is vendored third-party code, so it is compiled without -Werror and
+# with the two warnings it legitimately trips disabled. The test file itself is
+# still built under the strict flags above. What is being regression-tested
+# here is cjext's documented behaviour, not its warning cleanliness; turning
+# the vendored file's style warnings into build failures would only invite
+# someone to patch upstream code and make the next cjext update harder.
+$(BUILD)/test_cjext: CJEXT_CFLAGS := -std=c99 -O1 -g -I$(CJEXT_DIR) -I$(STUBS_DIR) $(SANITIZERS)
+$(BUILD)/test_cjext: test_cjext.c $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(CJEXT_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_cjext_main.o test_cjext.c
+	$(CC) $(CJEXT_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_cjext_main.o $(BUILD)/cjext.o $(LDFLAGS) -lm
 
 $(BUILD):
 	mkdir -p $(BUILD)
