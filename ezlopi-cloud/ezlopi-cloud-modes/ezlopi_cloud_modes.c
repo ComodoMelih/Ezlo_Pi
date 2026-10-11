@@ -208,7 +208,14 @@ void EZPI_cloud_modes_notifications_set(cJSON *cj_request, cJSON *cj_response)
         CJSON_GET_VALUE_BOOL(cj_params, "all", all);
         cJSON *cj_modeId = cJSON_GetObjectItem(__FUNCTION__, cj_params, ezlopi_modeId_str);
         cJSON *cj_userIds = cJSON_GetObjectItem(__FUNCTION__, cj_params, ezlopi_userId_str);
-        if (cj_userIds && cj_modeId)
+        /* cJSON_IsString, not just the pointer. cJSON_GetObjectItem returns a
+         * node for *any* JSON type, and ->valuestring is NULL on every node
+         * that is not a string -- so a request sending "modeId": 4 instead of
+         * "modeId": "4" reached strtoul(NULL) and crashed the hub. Every
+         * ->valuestring use in this file needs the type check; two of them
+         * (modes.alarms.off.add / .remove, below) already had it, which is how
+         * the omissions here were identified as accidental. */
+        if (cj_userIds && cj_modeId && cJSON_IsString(cj_modeId))
         {
             uint8_t modeId = strtoul(cj_modeId->valuestring, NULL, 10);
             EZPI_core_modes_api_set_notifications(modeId, all, cj_userIds);
@@ -226,7 +233,7 @@ void EZPI_cloud_modes_disarmed_default_set(cJSON *cj_request, cJSON *cj_response
         {
             cJSON *cj_modeId = cJSON_GetObjectItem(__func__, cj_params, ezlopi_modeId_str);
             cJSON *cj_disarmedDefault = cJSON_GetObjectItem(__func__, cj_params, ezlopi_disarmedDefault_str);
-            if (cj_modeId && cj_disarmedDefault)
+            if (cj_modeId && cj_disarmedDefault && cJSON_IsString(cj_modeId))
             {
                 uint8_t modeId = strtoul(cj_modeId->valuestring, NULL, 10);
                 bool disarmedDefault = (cj_disarmedDefault->type == cJSON_True) ? true : false;
@@ -255,7 +262,7 @@ void EZPI_cloud_modes_disarmed_devices_add(cJSON *cj_request, cJSON *cj_response
         {
             cJSON *cj_modeId = cJSON_GetObjectItem(__func__, cj_params, ezlopi_modeId_str);
             cJSON *cj_deviceId = cJSON_GetObjectItem(__func__, cj_params, ezlopi_deviceId_str);
-            if (cj_modeId && cj_deviceId)
+            if (cj_modeId && cj_deviceId && cJSON_IsString(cj_modeId) && cJSON_IsString(cj_deviceId))
             {
                 uint8_t modeId = strtoul(cj_modeId->valuestring, NULL, 10);
                 EZPI_core_modes_api_add_disarmed_device(modeId, cj_deviceId->valuestring);
@@ -274,7 +281,7 @@ void EZPI_cloud_modes_disarmed_devices_remove(cJSON *cj_request, cJSON *cj_respo
         {
             cJSON *cj_modeID = cJSON_GetObjectItem(__func__, cj_params, ezlopi_modeId_str);
             cJSON *cj_deviceId = cJSON_GetObjectItem(__func__, cj_params, ezlopi_deviceId_str);
-            if (cj_modeID && cj_deviceId)
+            if (cj_modeID && cj_deviceId && cJSON_IsString(cj_modeID) && cJSON_IsString(cj_deviceId))
             {
                 uint8_t modeId = strtoul(cj_modeID->valuestring, NULL, 10);
                 EZPI_core_modes_api_remove_disarmed_device(modeId, cj_deviceId->valuestring);
@@ -331,7 +338,7 @@ void EZPI_cloud_modes_cameras_off_add(cJSON *cj_request, cJSON *cj_response)
         {
             cJSON *cj_modeId = cJSON_GetObjectItem(__func__, cj_params, ezlopi_modeId_str);
             cJSON *cj_deviceId = cJSON_GetObjectItem(__func__, cj_params, ezlopi_deviceId_str);
-            if (cj_modeId && cj_deviceId)
+            if (cj_modeId && cj_deviceId && cJSON_IsString(cj_modeId) && cJSON_IsString(cj_deviceId))
             {
                 uint8_t modeId = strtoul(cj_modeId->valuestring, NULL, 10);
                 EZPI_core_modes_api_add_cameras_off(modeId, cj_deviceId->valuestring);
@@ -350,7 +357,7 @@ void EZPI_cloud_modes_cameras_off_remove(cJSON *cj_request, cJSON *cj_response)
         {
             cJSON *cj_modeId = cJSON_GetObjectItem(__func__, cj_params, ezlopi_modeId_str);
             cJSON *cj_deviceId = cJSON_GetObjectItem(__func__, cj_params, ezlopi_deviceId_str);
-            if (cj_modeId && cj_deviceId)
+            if (cj_modeId && cj_deviceId && cJSON_IsString(cj_modeId) && cJSON_IsString(cj_deviceId))
             {
                 uint8_t modeId = strtoul(cj_modeId->valuestring, NULL, 10);
                 EZPI_core_modes_api_remove_cameras_off(modeId, cj_deviceId->valuestring);
@@ -369,7 +376,7 @@ void EZPI_cloud_modes_bypass_devices_add(cJSON *cj_request, cJSON *cj_response)
         {
             cJSON *cj_modelID = cJSON_GetObjectItem(__func__, cj_params, ezlopi_modeId_str);
             cJSON *cj_deviceIds = cJSON_GetObjectItem(__func__, cj_params, ezlopi_device_ids_str);
-            if (cj_modelID && cj_deviceIds && (cj_deviceIds->type == cJSON_Array))
+            if (cj_modelID && cj_deviceIds && cJSON_IsString(cj_modelID) && (cj_deviceIds->type == cJSON_Array))
             {
                 uint8_t modeId = strtoul(cj_modelID->valuestring, NULL, 10);
                 EZPI_core_modes_api_bypass_device_add(modeId, cj_deviceIds);
@@ -388,7 +395,7 @@ void EZPI_cloud_modes_bypass_devices_remove(cJSON *cj_request, cJSON *cj_respons
         {
             cJSON *cj_modelID = cJSON_GetObjectItem(__func__, cj_params, ezlopi_modeId_str);
             cJSON *cj_deviceIds = cJSON_GetObjectItem(__func__, cj_params, ezlopi_device_ids_str);
-            if (cj_modelID && cj_deviceIds && (cj_deviceIds->type == cJSON_Array))
+            if (cj_modelID && cj_deviceIds && cJSON_IsString(cj_modelID) && (cj_deviceIds->type == cJSON_Array))
             {
                 uint8_t modeId = strtoul(cj_modelID->valuestring, NULL, 10);
                 EZPI_core_modes_api_bypass_device_remove(modeId, cj_deviceIds);
@@ -632,7 +639,7 @@ void EZPI_cloud_modes_local_alarm_off(cJSON *cj_request, cJSON *cj_response)
         if (cj_params)
         {
             cJSON *cj_modeId = cJSON_GetObjectItem(__func__, cj_params, ezlopi_modeId_str);
-            if (cj_modeId)
+            if (cj_modeId && cJSON_IsString(cj_modeId))
             {
                 uint8_t modeId = strtoul(cj_modeId->valuestring, NULL, 10);
                 // cJSON *cj_armed = cJSON_GetObjectItem(__func__, cj_params, ezlopi_deviceId_str);
@@ -651,7 +658,7 @@ void EZPI_cloud_modes_force_disarm(cJSON *cj_request, cJSON *cj_response)
         if (cj_params)
         {
             cJSON *cj_modeId = cJSON_GetObjectItem(__func__, cj_params, ezlopi_modeId_str);
-            if (cj_modeId)
+            if (cj_modeId && cJSON_IsString(cj_modeId))
             {
                 double timestamp = 0;
                 CJSON_GET_VALUE_DOUBLE(cj_params, ezlopi_timestamp_str, timestamp); // timestamp not needed rightnow

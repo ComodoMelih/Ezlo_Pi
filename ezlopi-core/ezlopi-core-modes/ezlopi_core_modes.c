@@ -1099,6 +1099,17 @@ ezlopi_error_t EZPI_core_modes_set_unset_device_armed_status(cJSON *cj_device_ar
         cJSON *curr_device = NULL;
         cJSON_ArrayForEach(curr_device, cj_device_array)
         {
+            /* The caller checks cJSON_Array but not the element types --
+             * this array arrives from modes.bypass_device.add /
+             * .remove (ezlopi_cloud_modes.c), where only
+             * "type == cJSON_Array" was verified. ->valuestring is NULL
+             * on every non-string node, so {"devices":[1]} reached
+             * strtoul(NULL). */
+            if (false == cJSON_IsString(curr_device))
+            {
+                continue;
+            }
+
             uint32_t device_id = strtoul(curr_device->valuestring, NULL, 16);
             l_ezlopi_device_t *device_to_change = EZPI_core_device_get_by_id(device_id);
             if (device_to_change)

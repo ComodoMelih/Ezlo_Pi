@@ -1083,6 +1083,21 @@ int EZPI_core_scenes_when_is_device_state(l_scenes_list_v2_t *scene_node, void *
                 cJSON *cj_device = NULL;
                 cJSON_ArrayForEach(cj_device, curr_devgrp->devices)
                 {
+                    /* This array is stored verbatim from
+                     * hub.device_group.create, which checks only
+                     * cJSON_IsArray and not the element types
+                     * (ezlopi_core_device_group.c:1129). A group created
+                     * with {"devices":[1]} therefore stored a number, and
+                     * ->valuestring is NULL on every non-string node, so
+                     * evaluating this "when" block reached strtoul(NULL).
+                     * The group is persisted to NVS, so the bad element
+                     * survives a reboot and the crash repeats on every
+                     * scene evaluation -- guard at the point of use. */
+                    if (false == cJSON_IsString(cj_device))
+                    {
+                        continue;
+                    }
+
                     uint32_t curr_devce_id = strtoul(cj_device->valuestring, NULL, 16);
                     l_ezlopi_device_t *curr_device = EZPI_core_device_get_by_id(curr_devce_id); // immediately goto "102ec000" ...
                     if (curr_device)

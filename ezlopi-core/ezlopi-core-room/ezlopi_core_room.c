@@ -325,6 +325,15 @@ int EZPI_core_room_reorder(cJSON *cj_rooms_ids)
 
                 cJSON_ArrayForEach(cj_room_id, cj_rooms_ids)
                 {
+                    /* ->valuestring is NULL on every element that is not a
+                     * string, and the element types come from the request, so
+                     * a numeric id reached strtoul(NULL) here and
+                     * cJSON_AddStringToObject(NULL) below. */
+                    if (false == cJSON_IsString(cj_room_id))
+                    {
+                        continue;
+                    }
+
                     uint32_t room_id = strtoul(cj_room_id->valuestring, NULL, 16);
                     if (room_id)
                     {

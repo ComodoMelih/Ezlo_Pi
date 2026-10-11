@@ -222,6 +222,22 @@ int EZPI_core_scene_then_group_set_item_value(l_scenes_list_v2_t *curr_scene, vo
                     cJSON *cj_get_devarr = NULL;
                     cJSON_ArrayForEach(cj_get_devarr, curr_devgrp->devices)
                     {
+                        /* These two arrays are stored verbatim from
+                         * hub.device_group.create / hub.item_group.create,
+                         * which check only cJSON_IsArray and not the element
+                         * types (ezlopi_core_device_group.c:1129, :1190). A
+                         * group created with {"devices":[1]} therefore stored
+                         * a number, and ->valuestring is NULL on every
+                         * non-string node, so running the scene reached
+                         * strtoul(NULL). The groups are persisted to NVS, so
+                         * the bad element survives a reboot and the crash
+                         * repeats on every scene run -- guard at the point of
+                         * use so already-stored data is handled too. */
+                        if (false == cJSON_IsString(cj_get_devarr))
+                        {
+                            continue;
+                        }
+
                         uint32_t curr_device_id = strtoul(cj_get_devarr->valuestring, NULL, 16);
                         l_ezlopi_device_t *curr_device = EZPI_core_device_get_by_id(curr_device_id); // immediately goto "102ec000" ...
                         if (curr_device)
@@ -237,6 +253,16 @@ int EZPI_core_scene_then_group_set_item_value(l_scenes_list_v2_t *curr_scene, vo
                                     cJSON *cj_item_names = NULL;
                                     while (NULL != (cj_item_names = cJSON_GetArrayItem(curr_item_grp->item_names, count))) // ["202ec000" , "202ec001" ,..]
                                     {
+                                        /* count++ before the guard: skipping
+                                         * it would leave the index unchanged
+                                         * and spin forever. */
+                                        count++;
+
+                                        if (false == cJSON_IsString(cj_item_names))
+                                        {
+                                            continue;
+                                        }
+
                                         uint32_t req_item_id_from_itemgrp = strtoul(cj_item_names->valuestring, NULL, 16);
                                         if (req_item_id_from_itemgrp == curr_item_node->cloud_properties.item_id)
                                         {
@@ -244,7 +270,6 @@ int EZPI_core_scene_then_group_set_item_value(l_scenes_list_v2_t *curr_scene, vo
                                             curr_item_node->func(EZLOPI_ACTION_SET_VALUE, curr_item_node, cj_params, curr_item_node->user_arg);
                                             ret = 1;
                                         }
-                                        count++;
                                     }
                                 }
                                 curr_item_node = curr_item_node->next;
@@ -345,6 +370,11 @@ int EZPI_core_scene_then_group_set_device_armed(l_scenes_list_v2_t *curr_scene, 
                     cJSON *cj_get_devarr = NULL;
                     cJSON_ArrayForEach(cj_get_devarr, curr_devgrp->devices)
                     {
+                        if (false == cJSON_IsString(cj_get_devarr))
+                        {
+                            continue;
+                        }
+
                         uint32_t curr_device_id = strtoul(cj_get_devarr->valuestring, NULL, 16);
                         l_ezlopi_device_t *curr_device = EZPI_core_device_get_by_id(curr_device_id); // immediately goto "102ec000" ...
                         if (curr_device)
@@ -982,6 +1012,11 @@ int EZPI_core_scene_then_group_toggle_value(l_scenes_list_v2_t *curr_scene, void
                     cJSON *cj_get_devarr = NULL;
                     cJSON_ArrayForEach(cj_get_devarr, curr_devgrp->devices)
                     {
+                        if (false == cJSON_IsString(cj_get_devarr))
+                        {
+                            continue;
+                        }
+
                         uint32_t curr_device_id = strtoul(cj_get_devarr->valuestring, NULL, 16);
                         l_ezlopi_device_t *curr_device = EZPI_core_device_get_by_id(curr_device_id); // immediately goto "102ec000" ...
                         if (curr_device)
@@ -996,6 +1031,11 @@ int EZPI_core_scene_then_group_toggle_value(l_scenes_list_v2_t *curr_scene, void
                                     cJSON *cj_item_names = NULL;
                                     cJSON_ArrayForEach(cj_item_names, curr_item_grp->item_names)
                                     {
+                                        if (false == cJSON_IsString(cj_item_names))
+                                        {
+                                            continue;
+                                        }
+
                                         uint32_t req_item_id_from_itemgrp = strtoul(cj_item_names->valuestring, NULL, 16);
                                         // if the item_ids match ; Then compare the "item_values" with that of the "scene's" requirement
                                         if (req_item_id_from_itemgrp == curr_item_node->cloud_properties.item_id)

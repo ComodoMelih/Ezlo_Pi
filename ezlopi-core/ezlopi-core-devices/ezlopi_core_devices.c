@@ -1168,6 +1168,16 @@ static void __change_room_id_in_device_ll_and_nvs(l_ezlopi_device_t *curr_node, 
             cJSON *cj_separate_child = NULL;
             cJSON_ArrayForEach(cj_separate_child, cj_separate_child_devices)
             {
+                /* This node is handed in straight from the request params
+                 * at ezlopi_cloud_devices.c:201 with no type check at all,
+                 * so the element types are fully caller-controlled.
+                 * ->valuestring is NULL on every non-string node, meaning
+                 * {"separateChildDevices":[1]} reached strtoul(NULL). */
+                if (false == cJSON_IsString(cj_separate_child))
+                {
+                    continue;
+                }
+
                 uint32_t _id_to_avoid = strtoul(cj_separate_child->valuestring, NULL, 16);
                 if (_id_to_avoid == curr_node->cloud_properties.device_id)
                 {

@@ -516,7 +516,12 @@ static l_ezlopi_scenes_script_t *__scripts_create_node(uint32_t script_id, cJSON
         cJSON *cj_script_name = cJSON_GetObjectItem(__FUNCTION__, cj_script, ezlopi_name_str);
         cJSON *cj_script_code = cJSON_GetObjectItem(__FUNCTION__, cj_script, ezlopi_code_str);
 
-        if (cj_script_name && cj_script_name->valuestring && cj_script_code && cj_script_code->string)
+        /* ->valuestring, not ->string. cJSON's ->string member holds the
+         * *key* of an object member, which is always non-NULL here, so the
+         * original test passed for any "code" value and left ->valuestring
+         * -- NULL on every non-string node -- unchecked for the strlen and
+         * two snprintf("%s") uses below. */
+        if (cj_script_name && cj_script_name->valuestring && cj_script_code && cj_script_code->valuestring)
         {
             if (script_id)
             {
@@ -526,10 +531,15 @@ static l_ezlopi_scenes_script_t *__scripts_create_node(uint32_t script_id, cJSON
             {
                 script_id = EZPI_core_cloud_generate_script_id();
                 char *script_str = cJSON_PrintBuffered(__FUNCTION__, cj_script, 4096, false);
-                TRACE_D("length of 'script_str': %d", strlen(script_str));
 
                 if (script_str)
                 {
+                    /* The trace was above the NULL check, so a failed
+                     * cJSON_PrintBuffered (allocation failure) reached
+                     * strlen(NULL) before the test that was meant to
+                     * catch it. */
+                    TRACE_D("length of 'script_str': %d", strlen(script_str));
+
                     char scrpt_id_str[32];
                     snprintf(scrpt_id_str, sizeof(scrpt_id_str), "%08x", script_id);
                     EZPI_core_nvs_write_str(script_str, strlen(script_str), scrpt_id_str);

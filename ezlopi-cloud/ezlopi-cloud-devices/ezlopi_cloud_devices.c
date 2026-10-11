@@ -143,11 +143,17 @@ void EZPI_device_name_set(cJSON *cj_request, cJSON *cj_response)
         if (cj_params)
         {
             cJSON *cj_device_id = cJSON_GetObjectItem(__FUNCTION__, cj_params, ezlopi__id_str);
-            if (cj_device_id)
+            /* cJSON_IsString, not just the pointer: cJSON_GetObjectItem
+             * returns a node for any JSON type and ->valuestring is NULL on
+             * every non-string node, so {"_id": 1} instead of {"_id": "1"}
+             * reached strtoul(NULL). */
+            if (cj_device_id && cJSON_IsString(cj_device_id))
             {
                 uint32_t device_id = strtoul(cj_device_id->valuestring, NULL, 16);
                 cJSON *cj_device_name_str = cJSON_GetObjectItem(__FUNCTION__, cj_params, ezlopi_name_str);
-                if (device_id && cj_device_name_str->valuestring)
+                /* cj_device_name_str was dereferenced before being tested --
+                 * a request with no "name" member returns NULL here. */
+                if (device_id && cj_device_name_str && cj_device_name_str->valuestring)
                 {
                     EZPI_core_device_name_set_by_device_id(device_id, cj_device_name_str->valuestring);
                 }
@@ -166,7 +172,7 @@ void EZPI_device_armed_set(cJSON *cj_request, cJSON *cj_response)
         {
             cJSON *cj_device_id = cJSON_GetObjectItem(__FUNCTION__, cj_params, ezlopi__id_str);
             cJSON *cj_armed_status = cJSON_GetObjectItem(__FUNCTION__, cj_params, ezlopi_armed_str);
-            if (cj_device_id && cj_armed_status)
+            if (cj_device_id && cj_armed_status && cJSON_IsString(cj_device_id))
             {
                 uint32_t device_id = strtoul(cj_device_id->valuestring, NULL, 16);
                 bool armed_status = cj_armed_status->type == cJSON_True ? true : false;

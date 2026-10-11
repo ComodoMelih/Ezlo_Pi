@@ -105,6 +105,16 @@ void EZPI_room_get(cJSON *cj_request, cJSON *cj_response)
             cJSON *cj_room_id = NULL;
             cJSON_ArrayForEach(cj_room_id, cj_params)
             {
+                /* The caller controls the element types of this array, and
+                 * ->valuestring is NULL on every element that is not a
+                 * string, so a numeric or null element reached strtoul(NULL).
+                 * Skip anything that is not a string rather than failing the
+                 * whole request. */
+                if (false == cJSON_IsString(cj_room_id))
+                {
+                    continue;
+                }
+
                 uint32_t room_id = strtoul(cj_room_id->valuestring, NULL, 16);
                 s_ezlopi_room_t *l_room_node = EZPI_core_room_get_room_head();
                 while (l_room_node)

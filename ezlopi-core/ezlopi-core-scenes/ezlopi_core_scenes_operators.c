@@ -1784,6 +1784,15 @@ static int __trigger_grp_functions(e_with_grp_t choice, l_fields_v2_t *devgrp_fi
         cJSON *cj_get_devarr = NULL;
         cJSON_ArrayForEach(cj_get_devarr, curr_devgrp->devices)
         {
+            /* Element types in devgrp->devices / itemgrp->item_names are not
+             * validated when the group is created (only cJSON_IsArray is), and
+             * ->valuestring is NULL on every non-string node, so a group
+             * holding a numeric id reached strtoul(NULL). */
+            if (false == cJSON_IsString(cj_get_devarr))
+            {
+                continue;
+            }
+
             uint32_t curr_devce_id = strtoul(cj_get_devarr->valuestring, NULL, 16);
             l_ezlopi_device_t *curr_device = EZPI_core_device_get_by_id(curr_devce_id); // immediately goto "102ec000" ...
             if (curr_device)
@@ -1798,6 +1807,11 @@ static int __trigger_grp_functions(e_with_grp_t choice, l_fields_v2_t *devgrp_fi
                         cJSON *cj_item_names = NULL;
                         cJSON_ArrayForEach(cj_item_names, curr_item_grp->item_names)
                         {
+                            if (false == cJSON_IsString(cj_item_names))
+                            {
+                                continue;
+                            }
+
                             uint32_t req_item_id_from_itemgrp = strtoul(cj_item_names->valuestring, NULL, 16);
                             // if the item_ids match ; Then compare the "item_values" with that of the "scene's" requirement
                             if (req_item_id_from_itemgrp == curr_item_node->cloud_properties.item_id)

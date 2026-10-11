@@ -158,11 +158,26 @@ static void ezpi_core_hub_data_list_process_settings_data_list(cJSON *cj_names, 
     cJSON *cj_names_element = NULL;
     cJSON_ArrayForEach(cj_names_element, cj_names)
     {
+        /* The caller verified that cj_names and cj_include are arrays, but not
+         * that their elements are strings. ->valuestring is NULL on every
+         * non-string node, so a request of {"names":[1]} reached
+         * cJSON_AddObjectToObject with a NULL key, and {"include":[1]}
+         * reached strncmp(NULL). Skip non-string elements. */
+        if (false == cJSON_IsString(cj_names_element))
+        {
+            continue;
+        }
+
         cJSON *cj_result_names = cJSON_AddObjectToObject(__FUNCTION__, cj_settings, cj_names_element->valuestring);
         if (cj_result_names)
         {
             cJSON_ArrayForEach(cj_include_element, cj_include)
             {
+                if (false == cJSON_IsString(cj_include_element))
+                {
+                    continue;
+                }
+
                 if (0 == strncmp(cj_include_element->valuestring, ezlopi_value_str, 6))
                 {
                     ezpi_core_hub_data_list_populate_settings_json(cj_result_names, cj_include_element->valuestring, cj_names_element->valuestring);
