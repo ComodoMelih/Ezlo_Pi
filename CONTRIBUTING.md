@@ -38,11 +38,93 @@ The process is straightforward.
 - Fork the EzloPi Repository git repository.
 - Write/Change the code in your Fork for a new feature, bug fix, new sensor, optimization, etc.
 - Header, Source and CMakeList files should accurately follow [this](ezlopi-src-template/Readme.md) guideline.
-- Ensure tests pass.
-- Create a Pull Request against the **development** branch of EzloPi.
+- Ensure tests pass — see [Checks your PR has to pass](#checks-your-pr-has-to-pass) below.
+- Create a Pull Request against the default branch of this fork. (If you are
+  contributing to [upstream](https://github.com/ezloteam/Ezlo_Pi) instead,
+  target its **development** branch.)
 
-1. All pull requests must target the development branch.
-2. Modify only relevant files (Also, be cautious if your editor...[additional content not provided in the original reference]).
+1. Modify only relevant files. Check `git diff` before you push — in
+   particular, a reformat-on-save editor will happily rewrite an entire file
+   you only meant to change two lines of, and a diff like that is very hard to
+   review.
+2. `sdkconfig` is generated and git-ignored. Never commit it. If you need to
+   change a build option permanently, change `sdkconfig.defaults.<target>`.
+
+## Checks your PR has to pass
+
+"Ensure tests pass" used to be the entire instruction here, and there was
+nothing to run. There is now. Everything below is also run automatically by
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) on every push, so you
+can let CI tell you — but running it locally is faster.
+
+### Host tests — no hardware or toolchain needed
+
+```sh
+make -C tests/host
+```
+
+This needs only a C compiler. It compiles the untrusted-input helpers in
+[`ezlopi-util/ezlopi-util-sanitize`](ezlopi-util/ezlopi-util-sanitize/) with
+`-Wall -Wextra -Werror` under AddressSanitizer and UndefinedBehaviorSanitizer
+and runs the assertions in [`tests/host/`](tests/host/). It should end with:
+
+```
+72 check(s), 0 failure(s)
+HOST TESTS PASSED
+```
+
+**If you touch any code that parses input arriving over BLE, UART or the
+network, add tests here.** That component is deliberately dependency-free —
+`idf_component_register` is called with an empty `REQUIRES` — precisely so it
+can be compiled by a plain host compiler. Please keep it that way; adding an
+ESP-IDF dependency to it makes the whole suite unbuildable off-target.
+
+When you add a test, check that it would actually have caught the bug: break
+the fix on purpose, confirm the suite goes red, then put it back. A test that
+passes against the broken code is evidence of nothing.
+
+### Firmware build
+
+```sh
+idf.py set-target esp32   # or esp32s2 / esp32s3 / esp32c3
+idf.py build
+```
+
+Use **ESP-IDF v4.4.6** exactly; the project does not build on v5.x. CI builds
+all four targets, so a change that only compiles on one of them will be caught
+even if you cannot build the others locally.
+
+### Repository hygiene
+
+CI will fail your PR if:
+
+- The old hard-coded `opentelemetry.ezlo.com` endpoint reappears anywhere.
+- `CONFIG_EZPI_ENABLE_OPENTELEMETRY=y` is committed into any
+  `sdkconfig.defaults*` file. Open-telemetry has no default endpoint, so
+  enabling it by default produces a build that retries a connection forever.
+- `sdkconfig.defaults` or any `sdkconfig.defaults.<target>` goes missing. The
+  base file is load-bearing even though it is nearly empty: IDF only looks for
+  `.<target>` variants of files already in `SDKCONFIG_DEFAULTS`, which starts
+  out holding just `sdkconfig.defaults`. Remove it and every per-target file is
+  ignored *silently*, and the build still succeeds with the wrong
+  configuration.
+
+### Things worth knowing before you debug something
+
+- **Device instantiation is boot-only.** Devices are built once at startup
+  (`EZPI_device_prepare()`), so a configuration written over BLE or UART only
+  takes effect after a reboot. This is not a bug in your change.
+- **Do not let anything convert line endings across the whole tree.** The repo
+  ships precompiled archives such as
+  `ezlopi-components/Bosch_BSEC2/precompiled_binaries/esp32/libalgobsec.a`.
+  Stripping `0x0D` bytes from one of those corrupts the object code and the
+  link fails with `error adding symbols: malformed archive`, which reads like a
+  project bug but is not.
+
+### Reporting a security problem
+
+Please do not open a public issue or PR for a security vulnerability. See
+[SECURITY.md](SECURITY.md).
 
 --------------------------------------
 
