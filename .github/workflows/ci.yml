@@ -1,0 +1,132 @@
+name: CI
+
+# Nothing in this repository was checked automatically before. The four
+# memory-safety defects fixed in this branch were all reachable from an
+# unauthenticated BLE or UART client, and all four would have been caught by
+# the host job below. The firmware job exists because three of the four
+# supported chips were never built by anyone routinely, so target-specific
+# breakage could sit in the tree indefinitely.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A force-push should not leave half-finished runs burning minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: Host tests (sanitizers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Runs the untrusted-input helpers under AddressSanitizer and
+      # UndefinedBehaviorSanitizer. That combination is the point: the defects
+      # being regression-tested were buffer overruns, and an overrun that
+      # happens to land in unused stack passes a plain assertion.
+      - name: Build and run
+        run: make -C tests/host
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No hard-coded telemetry endpoint
+        run: |
+          # Every build used to ship pointing at an Ezlo internal
+          # review-staging collector that nobody outside Ezlo can reach.
+          #
+          # Markdown is excluded deliberately. What has to be impossible is the
+          # endpoint coming back in code or in a committed Kconfig/sdkconfig
+          # default. The CHANGELOG and SECURITY notes have to be able to name
+          # the host they removed, and an unscoped grep meant the documentation
+          # of the fix failed the check that enforces the fix.
+          #
+          # Note this file does not match itself: the pattern is written with
+          # escaped dots, so the literal hostname never appears here.
+          if grep -rIn --exclude-dir=.git --exclude='*.md' 'opentelemetry\.ezlo\.com' .; then
+            echo "::error::A hard-coded Ezlo telemetry endpoint is back in the tree."
+            exit 1
+          fi
+          echo "clean"
+
+      - name: Telemetry stays opt-in
+        run: |
+          # Open-telemetry has no default endpoint, so enabling it by default
+          # produces a build that retries a connection forever and floods the
+          # console.
+          if grep -In 'CONFIG_EZPI_ENABLE_OPENTELEMETRY=y' sdkconfig.defaults*; then
+            echo "::error::Open-telemetry must not be enabled in committed defaults."
+            exit 1
+          fi
+          echo "clean"
+
+      - name: Per-target defaults are wired up
+        run: |
+          # ESP-IDF only looks for sdkconfig.defaults.<target> variants of
+          # files already in SDKCONFIG_DEFAULTS, and that list starts out
+          # holding just sdkconfig.defaults. If the base file goes missing,
+          # every per-target file is ignored silently and the build still
+          # succeeds -- with the wrong configuration.
+          test -f sdkconfig.defaults || {
+            echo "::error::sdkconfig.defaults is missing; per-target defaults would be ignored."
+            exit 1
+          }
+          for target in esp32 esp32s2 esp32s3 esp32c3; do
+            test -f "sdkconfig.defaults.$target" || {
+              echo "::error::sdkconfig.defaults.$target is missing."
+              exit 1
+            }
+          done
+          echo "all present"
+
+  firmware:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    # Pinned to the exact IDF release the project targets. The README used to
+    # claim v4.4.4 in one place and v4.4.6 in another; this file is now the
+    # authoritative answer.
+    container: espressif/idf:v4.4.6
+    strategy:
+      # One chip failing should not hide the state of the other three.
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32s2, esp32s3, esp32c3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target ${{ matrix.target }}
+          idf.py build
+
+      # Confirms the per-target defaults were actually applied rather than the
+      # build falling back to Kconfig defaults, which would still compile.
+      - name: Check the generated configuration
+        shell: bash
+        run: |
+          grep -q "^CONFIG_IDF_TARGET=\"${{ matrix.target }}\"" sdkconfig
+          grep -q '^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=' sdkconfig
+          echo "configuration inherited from sdkconfig.defaults.${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.target }}
+          path: |
+            build/*.bin
+            build/*.elf
+            build/*.map
+            sdkconfig
+          if-no-files-found: error
