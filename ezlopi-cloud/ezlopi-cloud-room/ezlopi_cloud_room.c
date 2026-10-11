@@ -124,7 +124,31 @@ void EZPI_room_get(cJSON *cj_request, cJSON *cj_response)
                         cJSON *cj_room_obj = cJSON_CreateObject(__FUNCTION__);
                         if (cj_room_obj)
                         {
-                            cJSON_AddItemToObject(__FUNCTION__, cj_room_obj, ezlopi__id_str, cj_room_id);
+                            /* Copies the id string. This used to be
+                             * cJSON_AddItemToObject(..., cj_room_id), handing
+                             * the response a node that belongs to cj_request's
+                             * params array, with three consequences:
+                             *
+                             * - The node ended up in two parent lists at once.
+                             *   cJSON_Delete walks the ->next sibling chain, so
+                             *   whichever of the two trees was freed second
+                             *   freed it again: a double free reachable from an
+                             *   ordinary hub.room.get.
+                             *
+                             * - Adopting it rewrites its ->prev and ->next, so
+                             *   cj_params' own chain was cut at that element and
+                             *   the rest of the caller's array was lost.
+                             *
+                             * - cJSON_ArrayForEach advances with
+                             *   element = element->next, and the adopted node's
+                             *   ->next now points into cj_room_obj. On a request
+                             *   naming two rooms, the next iteration therefore
+                             *   read the room *name* string added just below and
+                             *   ran strtoul on it, instead of the second id.
+                             *
+                             * The response owns its own copy now, and cj_request
+                             * is left untouched. */
+                            cJSON_AddStringToObject(__FUNCTION__, cj_room_obj, ezlopi__id_str, cj_room_id->valuestring);
                             cJSON_AddStringToObject(__FUNCTION__, cj_room_obj, ezlopi_name_str, l_room_node->name);
 
                             if (!cJSON_AddItemToArray(cj_result, cj_room_obj))
