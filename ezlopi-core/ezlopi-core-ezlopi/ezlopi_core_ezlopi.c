@@ -66,9 +66,14 @@
 #include "ezlopi_core_log.h"
 // #include "ezlopi_core_errors.h"
 
-#ifdef CONFIG_EZPI_CORE_ETHERNET_EN
+/* CONFIG_EZPI_CORE_ENABLE_ETH, not CONFIG_EZPI_CORE_ETHERNET_EN. The latter is
+ * declared by no Kconfig file anywhere in the tree, so this include was never
+ * compiled -- while the call to EZPI_ethernet_init() further down is guarded by
+ * the real option (Kconfig.projbuild:43). Enabling Ethernet therefore called
+ * the function with no declaration in scope. */
+#ifdef CONFIG_EZPI_CORE_ENABLE_ETH
 #include "ezlopi_core_ethernet.h"
-#endif // CONFIG_EZPI_CORE_ETHERNET_EN
+#endif // CONFIG_EZPI_CORE_ENABLE_ETH
 
 #include "ezlopi_hal_system_info.h"
 #include "ezlopi_service_loop.h"
@@ -158,7 +163,7 @@ void EZPI_init(void)
 
 #if defined(CONFIG_EZPI_CORE_ENABLE_ETH)
     EZPI_ethernet_init();
-#endif // CONFIG_EZPI_CORE_ETHERNET_EN
+#endif // CONFIG_EZPI_CORE_ENABLE_ETH
 
     EZPI_core_nvs_set_boot_count(EZPI_hal_system_info_get_boot_count() + 1);
 

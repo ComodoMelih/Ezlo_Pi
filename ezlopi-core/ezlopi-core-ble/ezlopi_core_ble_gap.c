@@ -159,7 +159,7 @@ esp_ble_adv_data_t scan_rsp_data = {
 /*******************************************************************************
  *                          Extern Function Definitions
  *******************************************************************************/
-#if (1 == CONFIG_EZPI_BLE_ENALBE_PASSKEY)
+#if (1 == CONFIG_EZPI_BLE_ENABLE_PASSKEY)
 void EZPI_core_ble_gap_set_passkey(uint32_t passkey)
 {
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &passkey, sizeof(uint32_t));

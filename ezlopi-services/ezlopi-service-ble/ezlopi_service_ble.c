@@ -126,14 +126,14 @@ static void ezlopi_ble_basic_init(void);
 static void ezlopi_ble_start_secure_gatt_server_open_pairing(void);
 #endif // CONFIG_EZPI_BLE_ENABLE_PAIRING
 
-#ifdef CONFIG_EZPI_BLE_ENALBE_PASSKEY
+#ifdef CONFIG_EZPI_BLE_ENABLE_PASSKEY
 
 /**
  * @brief Function to set BLE in pairing mode
  *
  */
 static void ezlopi_ble_start_secure_gatt_server(void);
-#endif // CONFIG_EZPI_BLE_ENALBE_PASSKEY
+#endif // CONFIG_EZPI_BLE_ENABLE_PASSKEY
 
 /*******************************************************************************
  *                          Static Data Definitions
