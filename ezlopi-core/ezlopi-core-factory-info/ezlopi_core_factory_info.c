@@ -553,14 +553,24 @@ char *EZPI_core_factory_info_v3_get_ezlopi_config(void)
 {
     // TRACE_E("ezlopi-config address: %d", EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_EZLOPI_CONFIG_JSON, E_EZLOPI_FACTORY_INFO_CONN_DATA));
     char *ret = __EZPI_core_factory_info_v3_read_string(__FUNCTION__, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_EZLOPI_CONFIG_JSON, E_EZLOPI_FACTORY_INFO_CONN_DATA), EZLOPI_FINFO_LEN_EZLOPI_CONFIG_JSON);
-    if (false == isprint(ret[0]))
+
+    /* The NULL check has to happen before the subscript, not after it.
+     * __EZPI_core_factory_info_v3_read_string returns NULL on four separate
+     * paths (partition init failure, either of two allocations failing, and a
+     * failed esp_partition_read), and every one of those reached ret[0] first.
+     *
+     * isprint() is also passed an unsigned char: it is undefined for negative
+     * values, and a raw flash byte above 0x7F is negative on this toolchain,
+     * where plain char is signed. */
+    if (ret)
     {
-        if (ret)
+        if (0 == isprint((unsigned char)ret[0]))
         {
             ezlopi_free(__FUNCTION__, ret);
             ret = NULL;
         }
     }
+
     return ret;
 }
 
@@ -978,11 +988,18 @@ static char *__EZPI_core_factory_info_v3_read_string(const char *name, e_EZPI_co
     if (EZPI_factory_info_v3_init())
     {
         // TRACE_D("%s", name);
-        char *tmp_buffer = (char *)ezlopi_malloc(name, length);
+        /* One byte more than the region: esp_partition_read fills exactly
+         * 'length' bytes of raw flash and guarantees no terminator, so the
+         * strlen below would read past the allocation whenever the region
+         * holds no zero byte -- which is the normal case for an erased or
+         * fully-populated field. The extra byte bounds the scan. */
+        char *tmp_buffer = (char *)ezlopi_malloc(name, length + 1);
         if (tmp_buffer)
         {
             if (ESP_OK == esp_partition_read(partition_ctx_v3, offset, tmp_buffer, length))
             {
+                tmp_buffer[length] = '\0';
+
                 int s_length = (strlen(tmp_buffer) < length) ? strlen(tmp_buffer) : length;
                 read_string = (char *)ezlopi_malloc(name, s_length + 1);
 

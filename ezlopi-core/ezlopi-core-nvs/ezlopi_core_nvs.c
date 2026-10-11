@@ -181,6 +181,14 @@ ezlopi_error_t EZPI_core_nvs_config_info_update_time_set(uint32_t value)
         nvs_erase_key(ezlopi_nvs_handle, config_info_update_time_name);
         esp_err_t err = nvs_set_u32(ezlopi_nvs_handle, config_info_update_time_name, value);
         TRACE_W("(nvs_set_u32)-%s:: error: %s", config_info_update_time_name, esp_err_to_name(err));
+        if (ESP_OK == err)
+        {
+            err = nvs_commit(ezlopi_nvs_handle);
+            if (ESP_OK != err)
+            {
+                TRACE_E("(nvs_commit)-%s:: error: %s", config_info_update_time_name, esp_err_to_name(err));
+            }
+        }
         error = (ESP_OK == err) ? EZPI_SUCCESS : error;
     }
     return error;
@@ -193,6 +201,14 @@ ezlopi_error_t EZPI_core_nvs_config_info_version_number_set(uint32_t value)
     {
         esp_err_t err = nvs_set_u32(ezlopi_nvs_handle, config_info_version_number, value);
         TRACE_W("(nvs_set_u32)-%s:: - error: %s", config_info_version_number, esp_err_to_name(err));
+        if (ESP_OK == err)
+        {
+            err = nvs_commit(ezlopi_nvs_handle);
+            if (ESP_OK != err)
+            {
+                TRACE_E("(nvs_commit)-%s:: error: %s", config_info_version_number, esp_err_to_name(err));
+            }
+        }
         error = (ESP_OK == err) ? EZPI_SUCCESS : error;
     }
     return error;
@@ -339,7 +355,15 @@ ezlopi_error_t EZPI_core_nvs_write_ble_passkey(uint32_t passkey)
 
         if (ESP_OK == err)
         {
-            error = EZPI_SUCCESS;
+            err = nvs_commit(ezlopi_nvs_handle);
+            if (ESP_OK != err)
+            {
+                TRACE_E("(nvs_commit)-passkey_nvs_name:: error: %s", esp_err_to_name(err));
+            }
+            else
+            {
+                error = EZPI_SUCCESS;
+            }
         }
     }
 
@@ -422,6 +446,14 @@ ezlopi_error_t EZPI_core_nvs_set_boot_count(uint32_t boot_count)
     {
         esp_err_t err = nvs_set_u32(ezlopi_nvs_handle, boot_count_nvs_name, boot_count);
         TRACE_W("nvs_set_u32 - error: %s", esp_err_to_name(err));
+        if (ESP_OK == err)
+        {
+            err = nvs_commit(ezlopi_nvs_handle);
+            if (ESP_OK != err)
+            {
+                TRACE_E("(nvs_commit)-%s:: error: %s", boot_count_nvs_name, esp_err_to_name(err));
+            }
+        }
         error = (ESP_OK == err) ? EZPI_SUCCESS : error;
     }
     return error;
@@ -439,6 +471,14 @@ uint32_t EZPI_core_nvs_get_boot_count(void)
         {
             err = nvs_set_u32(ezlopi_nvs_handle, boot_count_nvs_name, boot_count);
             TRACE_W("nvs_set_u32 - error: %s", esp_err_to_name(err));
+            if (ESP_OK == err)
+            {
+                err = nvs_commit(ezlopi_nvs_handle);
+                if (ESP_OK != err)
+                {
+                    TRACE_E("(nvs_commit)-%s:: error: %s", boot_count_nvs_name, esp_err_to_name(err));
+                }
+            }
         }
     }
 
