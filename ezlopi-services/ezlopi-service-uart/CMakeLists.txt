@@ -26,8 +26,15 @@ set(EZLOPI_CLOUD_COMPONENTS
         ezlopi-cloud-info
 )
 
+# ezlopi-service-improv supplies the Improv serial filter that
+# ezpi_service_uart_task() calls on the raw byte buffer. The dependency only
+# goes this way: that component must not REQUIRE this one back, so its
+# transport writes to UART0 directly rather than through
+# EZPI_SERV_uart_tx_data() -- which it could not use anyway, because that
+# function appends "\r\n" and splits the write in two.
 set(EZLOPI_SERVICE_COMPONENTS
         ezlopi-service-ble
+        ezlopi-service-improv
 )
 
 idf_component_register(SRCS "ezlopi_service_uart.c" "${src_files}"

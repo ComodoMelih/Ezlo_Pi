@@ -66,6 +66,40 @@ menu "EzloPi User Config"
                 "provisioned" and refuses to re-provision, so a neighbour cannot
                 move a claimed controller onto their own network.
 
+    config EZPI_ENABLE_IMPROV_SERIAL
+        bool "Enable Improv Wi-Fi provisioning over serial"
+        depends on EZPI_ENABLE_WIFI
+        default n
+        help
+            Accept Improv Wi-Fi frames (improv-wifi.com/serial) on UART0,
+            alongside the existing EzloPi serial protocol rather than instead
+            of it, so that a browser running ESP Web Tools can flash this
+            firmware and put the controller on Wi-Fi in the same session --
+            no app, no cloud account, no second cable.
+
+            Nothing about the port changes. The IDF console, the EzloPi serial
+            protocol and ESP Web Tools all use UART0 at 115200 already, and
+            115200 is fixed on the client side in any case.
+
+            What does change is where the received bytes are inspected. Improv
+            frames are binary and routinely contain 0x00 -- a bare "get current
+            state" command has a data length of exactly 0x00 -- so they are
+            taken out of the byte buffer before it is NUL-terminated and handed
+            to the EzloPi parser as a C string. Bytes that are not part of an
+            Improv frame are passed through unchanged and in order. With this
+            option off, the filter is not compiled in and the reader does not
+            call it.
+
+            Improv is unauthenticated: anyone who can reach the port can write
+            credentials. Over a cable that is a weaker objection than it is
+            over the air, but the same rule is applied either way -- a
+            provisioning request is only accepted while the controller is
+            unclaimed (no user_id in NVS). Once claimed it reports
+            "provisioned" and refuses. A factory reset makes it usable again.
+
+            Off by default because it is new, and because anything that shares
+            the console port deserves to be opted into rather than inherited.
+
     config EZPI_CORE_ENABLE_ETH
         bool "Enable ethernet"
         depends on ETH_USE_SPI_ETHERNET

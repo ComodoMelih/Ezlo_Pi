@@ -296,37 +296,20 @@ extern "C"
             0x63, 0x46, 0x72, 0x22, 0x28, 0x62,         \
             0x68, 0x77, 0x46, 0x00,                     \
     }
-/**
- * @brief Improv current-state codes
- */
-#define BLE_IMPROV_STATE_AUTH_REQUIRED 0x01
-#define BLE_IMPROV_STATE_AUTHORIZED 0x02
-#define BLE_IMPROV_STATE_PROVISIONING 0x03
-#define BLE_IMPROV_STATE_PROVISIONED 0x04
-/**
- * @brief Improv error codes
- */
-#define BLE_IMPROV_ERROR_NONE 0x00
-#define BLE_IMPROV_ERROR_INVALID_RPC 0x01
-#define BLE_IMPROV_ERROR_UNKNOWN_RPC 0x02
-#define BLE_IMPROV_ERROR_UNABLE_TO_CONNECT 0x03
-#define BLE_IMPROV_ERROR_NOT_AUTHORIZED 0x04
-#define BLE_IMPROV_ERROR_UNKNOWN 0xFF
-/**
- * @brief Improv RPC command identifiers
- */
-#define BLE_IMPROV_RPC_SEND_WIFI 0x01
-#define BLE_IMPROV_RPC_IDENTIFY 0x02
-#define BLE_IMPROV_RPC_GET_DEVICE_INFO 0x03
-#define BLE_IMPROV_RPC_SCAN_WIFI 0x04
-/**
- * @brief Improv capability bits
+/*
+ * The Improv state, error, command and capability codes used to live here as
+ * BLE_IMPROV_* macros. They are now in ezlopi-util-improv, which the BLE and
+ * serial transports share, so the protocol has one definition rather than one
+ * per transport.
  *
- * Bit 0 is "identify supported". EzloPi has an indicator LED but no Improv
- * identify handler yet, so no capability is claimed.
+ * That is more than tidiness. The copy that was here defined
+ * BLE_IMPROV_RPC_IDENTIFY as 0x02, and there is no identify command: the
+ * Improv SDK gives IDENTIFY and GET_CURRENT_STATE the same value 0x02, and the
+ * reference implementations treat 0x02 as get-current-state. A handler written
+ * against that constant would have answered the wrong question, and a
+ * capability bit advertising it would have put a dead button in the client's
+ * UI. The two macros above are genuinely BLE-specific and stay.
  */
-#define BLE_IMPROV_CAP_NONE 0x00
-#define BLE_IMPROV_CAP_IDENTIFY 0x01
 /*******************************************************************************
  *                          Improv Wi-Fi Service Macros end
  *******************************************************************************/

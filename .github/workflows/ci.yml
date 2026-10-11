@@ -245,11 +245,22 @@ jobs:
           fi
           echo "OTA compiled in"
 
-  # Same reasoning as firmware-ota: ezlopi_service_ble_improv.c and the Improv
-  # advertisement in ezlopi_core_ble_gap.c sit entirely behind
-  # CONFIG_EZPI_BLE_ENABLE_IMPROV, which is "not set" in all four committed
-  # sdkconfig.defaults.* files. Without this job a green CI run would say
-  # nothing about either of them.
+  # Same reasoning as firmware-ota: the Improv sources sit entirely behind
+  # CONFIG_EZPI_BLE_ENABLE_IMPROV and CONFIG_EZPI_ENABLE_IMPROV_SERIAL, both of
+  # which are "not set" in all four committed sdkconfig.defaults.* files.
+  # Without this job a green CI run would say nothing about any of them --
+  # ezlopi_service_ble_improv.c, ezlopi_service_improv.c,
+  # ezlopi_service_improv_serial.c, the filter call in ezlopi_service_uart.c or
+  # the Improv advertisement in ezlopi_core_ble_gap.c.
+  #
+  # Both transports are enabled together. That is the configuration worth
+  # building, because it is the only one in which the shared core in
+  # ezlopi-service-improv has more than one registered transport: with a single
+  # transport, a broadcast and an addressed reply go to the same place, so
+  # confusing the two is invisible. It is also the configuration in which a
+  # reintroduced second copy of the state machine -- the BLE transport carried
+  # one until the serial work removed it -- becomes a duplicate-symbol link
+  # error rather than silent drift. See tests/ci/sdkconfig.improv_enabled.
   #
   # This job is also what exercises the _Static_assert guarding the 31-byte
   # advertising payload, and that assert is the only automated check on the
@@ -259,7 +270,7 @@ jobs:
   # offer provisioning", with nothing in the log. Compiling this configuration
   # is what turns that into a build failure instead.
   firmware-improv:
-    name: Build esp32 (Improv enabled)
+    name: Build esp32 (Improv enabled, both transports)
     runs-on: ubuntu-latest
     container: espressif/idf:v4.4.6
     steps:
@@ -288,13 +299,23 @@ jobs:
       - name: Confirm Improv was actually compiled in
         shell: bash
         run: |
-          if ! grep -q '^CONFIG_EZPI_BLE_ENABLE_IMPROV=y' sdkconfig; then
-            echo "::error::CONFIG_EZPI_BLE_ENABLE_IMPROV did not get enabled; this job proved nothing."
+          # Both symbols are checked, not just one. A fragment that sets only
+          # the BLE option still builds green, and would leave the serial
+          # transport and the single-transport/multi-transport distinction
+          # above untested while looking exactly like a pass.
+          missing=0
+          for sym in CONFIG_EZPI_BLE_ENABLE_IMPROV CONFIG_EZPI_ENABLE_IMPROV_SERIAL; do
+            if ! grep -q "^$sym=y" sdkconfig; then
+              echo "::error::$sym did not get enabled; this job proved less than it claims."
+              missing=1
+            fi
+          done
+          if [ $missing -ne 0 ]; then
             echo "--- what the generated sdkconfig says instead ---"
-            grep -n 'EZPI_BLE_ENABLE\|EZPI_ENABLE_WIFI' sdkconfig || echo "(no matching lines at all)"
+            grep -n 'EZPI_BLE_ENABLE\|EZPI_ENABLE_WIFI\|IMPROV' sdkconfig || echo "(no matching lines at all)"
             exit 1
           fi
-          echo "Improv compiled in"
+          echo "Improv compiled in, both transports"
 
       # The symbol in the ELF is the evidence that the guarded body was reached.
       # The config assertion above only proves the Kconfig symbol was set; this
@@ -317,13 +338,26 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh"
           xtensa-esp32-elf-nm build/*.elf > improv-symbols.txt
-          if ! grep -q 'EZPI_ble_service_improv_init' improv-symbols.txt; then
-            echo "::error::EZPI_ble_service_improv_init is absent from the ELF; the service was not linked in."
+
+          # One symbol per thing that could be preprocessed away independently:
+          # the GATT transport, the serial transport's filter entry point (the
+          # function ezlopi_service_uart.c calls on the raw byte buffer), and
+          # the shared core both of them register into.
+          missing=0
+          for sym in EZPI_ble_service_improv_init \
+                     EZPI_SERV_improv_serial_filter \
+                     EZPI_SERV_improv_transport_register; do
+            if ! grep -q "$sym" improv-symbols.txt; then
+              echo "::error::$sym is absent from the ELF; that part was not linked in."
+              missing=1
+            fi
+          done
+          if [ $missing -ne 0 ]; then
             echo "--- every Improv symbol the image does contain ---"
             grep -i improv improv-symbols.txt || echo "(none at all)"
             exit 1
           fi
-          echo "Improv service linked into the image"
+          echo "Improv linked into the image: GATT transport, serial transport and shared core"
           grep -i improv improv-symbols.txt
 
   # Assembles install/ into a publishable directory: the static page plus the

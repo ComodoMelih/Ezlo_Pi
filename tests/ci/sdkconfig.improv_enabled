@@ -1,10 +1,11 @@
 # Config fragment used only by the "Build esp32 (Improv enabled)" CI job.
 #
-# Why this exists: CONFIG_EZPI_BLE_ENABLE_IMPROV is "not set" by default and
-# every line of ezlopi_service_ble_improv.c, plus the Improv advertisement in
-# ezlopi_core_ble_gap.c, sits behind it. The four target builds therefore
-# compile none of it, exactly as they compiled none of ezlopi_core_ota.c before
-# tests/ci/sdkconfig.ota_enabled existed.
+# Why this exists: both Improv options are "not set" by default and every line
+# of ezlopi_service_ble_improv.c, ezlopi_service_improv_serial.c, the whole of
+# ezlopi_service_improv.c and the Improv advertisement in ezlopi_core_ble_gap.c
+# sit behind them. The four target builds therefore compile none of it, exactly
+# as they compiled none of ezlopi_core_ota.c before tests/ci/sdkconfig.ota_enabled
+# existed.
 #
 # This fragment is not applied to the normal builds, so the shipped default
 # configuration is unchanged: Improv stays off unless someone turns it on. The
@@ -12,3 +13,19 @@
 # have both CONFIG_EZPI_BLE_ENABLE=y and CONFIG_EZPI_ENABLE_WIFI=y, which are
 # the two symbols CONFIG_EZPI_BLE_ENABLE_IMPROV depends on.
 CONFIG_EZPI_BLE_ENABLE_IMPROV=y
+
+# Both transports in one job, deliberately, rather than one job each.
+#
+# The two of them share ezlopi_service_improv.c, and the failure that is worth
+# catching is in that sharing: each transport registers itself into the same
+# fixed-size table, state and error changes are broadcast to every registered
+# transport, and an RPC result is addressed back to only the one that asked.
+# None of that is reachable with a single transport compiled in -- with one
+# entry the broadcast and the addressed delivery go to the same place, so a
+# mix-up between them looks identical to correct behaviour.
+#
+# Enabling both also means a duplicated symbol is a link error here. The BLE
+# transport used to carry its own copy of the claim gate, the state machine and
+# the provisioning timer; the serial work removed that copy. If someone
+# reintroduces one, this is the configuration that fails.
+CONFIG_EZPI_ENABLE_IMPROV_SERIAL=y

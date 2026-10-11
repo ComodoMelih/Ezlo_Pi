@@ -90,6 +90,9 @@
 
 #include "ezlopi_service_ble.h"
 #include "ezlopi_service_uart.h"
+#if defined(CONFIG_EZPI_ENABLE_IMPROV_SERIAL)
+#include "ezlopi_service_improv_serial.h"
+#endif
 #include "ezlopi_service_loop.h"
 #include "ezlopi_service_webprov.h"
 
@@ -340,6 +343,14 @@ void EZPI_SERV_cdc_init()
 void EZPI_SERV_uart_init(void)
 {
     // EZPI_service_loop_add("uart-loop", __uart_loop, 1, NULL);
+
+#if defined(CONFIG_EZPI_ENABLE_IMPROV_SERIAL)
+    /* Before the task starts, so the first block of bytes it reads is already
+     * being filtered. Improv does not claim or reconfigure the port -- UART0
+     * belongs to this service, and the console, the EzloPi protocol and ESP
+     * Web Tools all already agree on 115200. */
+    EZPI_SERV_improv_serial_init();
+#endif
 
     xTaskCreate(ezpi_service_uart_task, "serv_uart_task", EZLOPI_SERVICE_UART_TASK_DEPTH, NULL, configMAX_PRIORITIES - 4, NULL);
 
@@ -687,6 +698,29 @@ static void ezpi_service_uart_task(void *arg)
 
                     int rxBytes = uart_read_bytes(EZPI_SERV_UART_NUM_DEFAULT, uart_rx_data, buffred_data_len, 1000 / portTICK_RATE_MS);
 
+#if defined(CONFIG_EZPI_ENABLE_IMPROV_SERIAL)
+                    if (rxBytes > 0)
+                    {
+                        /* Improv frames are taken out here, before the buffer
+                         * is NUL-terminated below, and not as another case in
+                         * ezpi_service_uart_parser(). They are binary and
+                         * routinely contain 0x00 -- a bare "get current state"
+                         * command has a data length of exactly 0x00 -- so by
+                         * the time the buffer is a C string a frame may already
+                         * have been cut in half. The parser walks it with
+                         * `while ('\0' != *at)` and could not see past that.
+                         *
+                         * Filtering in place: the filter only ever hands back
+                         * bytes it has already consumed, so it cannot overrun
+                         * the bytes it has yet to read. What is left is the
+                         * non-Improv traffic, in its original order, which is
+                         * exactly what this parser received before Improv
+                         * existed. */
+                        rxBytes = (int)EZPI_SERV_improv_serial_filter(uart_rx_data, (uint32_t)rxBytes,
+                                                                      uart_rx_data, buffred_data_len);
+                    }
+#endif
+
                     if (rxBytes > 0)
                     {
                         uart_rx_data[rxBytes] = 0;
@@ -702,6 +736,24 @@ static void ezpi_service_uart_task(void *arg)
                 }
             }
         }
+#if defined(CONFIG_EZPI_ENABLE_IMPROV_SERIAL)
+        else
+        {
+            /* Nothing was buffered, so the port has been quiet for at least
+             * one pass of this loop. Improv has no escape sequence and no
+             * terminator that could not also be a data byte, so a frame that
+             * was cut short is only recoverable by giving up on it -- which is
+             * what the reference implementation does after
+             * IMPROV_SERIAL_TIMEOUT, also 100 ms. Without this, one truncated
+             * frame would leave the parser waiting for a payload that is never
+             * coming and every later frame would be read as its continuation.
+             *
+             * Discarding here rather than on a timer of its own is why the
+             * delay below matters: it is both this loop's poll interval and
+             * Improv's resync window. */
+            EZPI_SERV_improv_serial_idle();
+        }
+#endif
 
         vTaskDelay(100 / portTICK_RATE_MS);
     }
