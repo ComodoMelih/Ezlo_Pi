@@ -269,6 +269,69 @@ extern "C"
      *                          Dynamic Config Service Macros end
      *******************************************************************************/
 
+#ifdef CONFIG_EZPI_BLE_ENABLE_IMPROV
+/*******************************************************************************
+ *                          Improv Wi-Fi Service Macros Start
+ *******************************************************************************/
+/**
+ * @brief Service handle ID for the Improv Wi-Fi service
+ *
+ * Handles 0..4 belong to the five EzloPi services; Improv is the sixth, and the
+ * same value must be passed to esp_ble_gatts_app_register() in
+ * EZPI_ble_service_init().
+ */
+#define BLE_IMPROV_SERVICE_HANDLE 5
+/**
+ * @brief Improv UUID builder, for the UUIDs fixed by improv-wifi.com
+ *
+ * The Improv UUIDs are 00467768-6228-2272-4663-2774782680xx, where xx is 00 for
+ * the service and 01..05 for the characteristics. Unlike the EzloPi services,
+ * which use 16-bit UUIDs, these have to be given to esp_bt_uuid_t as a full
+ * uint8_t[16] in little-endian order -- byte 0 is the UUID's *last* octet, which
+ * is exactly the octet that varies, hence the parameter.
+ */
+#define BLE_IMPROV_UUID128(last_octet)                  \
+    {                                                   \
+        (last_octet), 0x80, 0x26, 0x78, 0x74, 0x27,     \
+            0x63, 0x46, 0x72, 0x22, 0x28, 0x62,         \
+            0x68, 0x77, 0x46, 0x00,                     \
+    }
+/**
+ * @brief Improv current-state codes
+ */
+#define BLE_IMPROV_STATE_AUTH_REQUIRED 0x01
+#define BLE_IMPROV_STATE_AUTHORIZED 0x02
+#define BLE_IMPROV_STATE_PROVISIONING 0x03
+#define BLE_IMPROV_STATE_PROVISIONED 0x04
+/**
+ * @brief Improv error codes
+ */
+#define BLE_IMPROV_ERROR_NONE 0x00
+#define BLE_IMPROV_ERROR_INVALID_RPC 0x01
+#define BLE_IMPROV_ERROR_UNKNOWN_RPC 0x02
+#define BLE_IMPROV_ERROR_UNABLE_TO_CONNECT 0x03
+#define BLE_IMPROV_ERROR_NOT_AUTHORIZED 0x04
+#define BLE_IMPROV_ERROR_UNKNOWN 0xFF
+/**
+ * @brief Improv RPC command identifiers
+ */
+#define BLE_IMPROV_RPC_SEND_WIFI 0x01
+#define BLE_IMPROV_RPC_IDENTIFY 0x02
+#define BLE_IMPROV_RPC_GET_DEVICE_INFO 0x03
+#define BLE_IMPROV_RPC_SCAN_WIFI 0x04
+/**
+ * @brief Improv capability bits
+ *
+ * Bit 0 is "identify supported". EzloPi has an indicator LED but no Improv
+ * identify handler yet, so no capability is claimed.
+ */
+#define BLE_IMPROV_CAP_NONE 0x00
+#define BLE_IMPROV_CAP_IDENTIFY 0x01
+/*******************************************************************************
+ *                          Improv Wi-Fi Service Macros end
+ *******************************************************************************/
+#endif // CONFIG_EZPI_BLE_ENABLE_IMPROV
+
     /*******************************************************************************
      *                          Extern Data Declarations
      *******************************************************************************/

@@ -100,6 +100,12 @@ extern void EZPI_ble_service_device_info_init(void);
  * @brief Function to prepare BLE dynamic device config services
  */
 extern void EZPI_ble_service_dynamic_config_init(void);
+#ifdef CONFIG_EZPI_BLE_ENABLE_IMPROV
+/**
+ * @brief Function to prepare the Improv Wi-Fi provisioning service
+ */
+extern void EZPI_ble_service_improv_init(void);
+#endif // CONFIG_EZPI_BLE_ENABLE_IMPROV
 
 /*******************************************************************************
  *                          Type & Macro Definitions
@@ -154,6 +160,11 @@ void EZPI_ble_service_init(void)
     EZPI_ble_service_provisioning_init();
     EZPI_ble_service_device_info_init();
     EZPI_ble_service_dynamic_config_init();
+#ifdef CONFIG_EZPI_BLE_ENABLE_IMPROV
+    /* Added last so that the five services the Ezlo app talks to keep the
+     * handles they have always had. Improv is additive; nothing above it moves. */
+    EZPI_ble_service_improv_init();
+#endif // CONFIG_EZPI_BLE_ENABLE_IMPROV
 
     // EZPI_core_ble_profile_print();
     ezlopi_ble_basic_init();
@@ -163,6 +174,9 @@ void EZPI_ble_service_init(void)
     CHECK_PRINT_ERROR(esp_ble_gatts_app_register(BLE_PROVISIONING_ID_HANDLE), "gatts 'provisioning-app' register error");
     CHECK_PRINT_ERROR(esp_ble_gatts_app_register(BLE_DEVICE_INFO_ID_HANDLE), "gatts 'device-info-app' register error");
     CHECK_PRINT_ERROR(esp_ble_gatts_app_register(BLE_DYNAMIC_CONFIG_HANDLE), "gatts 'dynamic-config-app' register error");
+#ifdef CONFIG_EZPI_BLE_ENABLE_IMPROV
+    CHECK_PRINT_ERROR(esp_ble_gatts_app_register(BLE_IMPROV_SERVICE_HANDLE), "gatts 'improv-app' register error");
+#endif // CONFIG_EZPI_BLE_ENABLE_IMPROV
 
     CHECK_PRINT_ERROR(esp_ble_gatt_set_local_mtu(517), "set local  MTU failed");
 

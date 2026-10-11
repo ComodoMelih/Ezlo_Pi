@@ -40,6 +40,32 @@ menu "EzloPi User Config"
             help
                 Enable BLE pass key
 
+        config EZPI_BLE_ENABLE_IMPROV
+            bool "Enable Improv Wi-Fi provisioning over BLE"
+            depends on EZPI_BLE_ENABLE && EZPI_ENABLE_WIFI
+            default n
+            help
+                Expose the Improv Wi-Fi BLE service (00467768-6228-2272-4663-
+                277478268000) so that Home Assistant and any Improv-capable
+                client can put this controller on a Wi-Fi network without the
+                Ezlo app and without a cloud account.
+
+                This is off by default, and not only for caution. The legacy BLE
+                advertisement carries 31 bytes, and Improv needs all of them: 3
+                for the flags, 18 for its 128-bit service UUID, and 10 for the
+                service data that holds the provisioning state. There is no room
+                left for the device name, so when this is enabled the name moves
+                to the scan response and the advertisement stops carrying it.
+                That changes what a passive scanner sees, which is why it is a
+                deliberate opt-in rather than the default.
+
+                Improv itself is unauthenticated: anyone in radio range can
+                write credentials. The implementation therefore only accepts a
+                provisioning request while the controller is still unclaimed
+                (no user_id in NVS). Once claimed, the Improv service reports
+                "provisioned" and refuses to re-provision, so a neighbour cannot
+                move a claimed controller onto their own network.
+
     config EZPI_CORE_ENABLE_ETH
         bool "Enable ethernet"
         depends on ETH_USE_SPI_ETHERNET

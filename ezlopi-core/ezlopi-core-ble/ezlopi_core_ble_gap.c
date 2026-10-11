@@ -83,34 +83,24 @@ static char *EZPI_core_ble_gap_event_to_str(esp_gap_ble_cb_event_t event);
 static uint8_t adv_config_done = 0;
 // static uint8_t manufacturer[] = {'e', 'z', 'l', 'o', 'p', 'i'};
 
-/* Service UUIDs published in the advertisement packet so central devices can
- * discover EzloPi hubs by service UUID instead of by device-name prefix.
- * Keep in sync with BLE_WIFI_SERVICE_UUID / BLE_PROVISIONING_SERVICE_UUID in
- * ezlopi_service_ble.h -- ezlopi-core must not depend on ezlopi-services, so
- * the values are restated here rather than included.
+/* The advertisement carries the device name, as it always has: the shipped Ezlo
+ * app discovers controllers by name prefix, so the name must stay in the
+ * advertising payload and not move to the scan response.
  *
- * esp_ble_gap_config_adv_data() expects p_service_uuid to be an array of
- * 128-bit UUIDs and compacts every entry that matches the Bluetooth Base UUID
- * into a 2-byte AD element. Entries must therefore be base-UUID expansions of
- * the 16-bit service UUIDs, little-endian, with the 16-bit value at [12..13].
- * Advertising the two provisioning-relevant services costs 6 bytes
- * (2 header + 2 x 2), which keeps the 31-byte legacy adv payload well within
- * budget once the device name is moved to the scan response below. */
-static uint8_t adv_service_uuid128[32] = {
-    /* 000000E1-0000-1000-8000-00805F9B34FB -- WiFi service (0x00E1) */
-    0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0xE1, 0x00, 0x00, 0x00,
-    /* 000000E3-0000-1000-8000-00805F9B34FB -- Provisioning service (0x00E3) */
-    0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0xE3, 0x00, 0x00, 0x00,
-};
-
+ * An earlier revision of this file moved the name into the scan response and
+ * put the 0x00E1/0x00E3 service UUIDs here instead, so that
+ * scanForPeripherals(withServices:) and ScanFilter.setServiceUuid() could
+ * match. That has been reverted. The UUID list only helps clients that filter
+ * by service UUID, and no shipped client does; against that it demoted the one
+ * discovery key the Ezlo app actually uses to a field only an active scan
+ * retrieves. Not a trade worth making by default.
+ *
+ * Compiled out when Improv is enabled, because improv_adv_data replaces it
+ * wholesale and an unused file-scope static would warn. */
+#ifndef CONFIG_EZPI_BLE_ENABLE_IMPROV
 static esp_ble_adv_data_t adv_data = {
     .set_scan_rsp = false,
-    /* Name lives in the scan response; the adv packet carries the service
-     * UUIDs so that iOS scanForPeripherals(withServices:) and Android
-     * ScanFilter.setServiceUuid() can match without a name-prefix hack. */
-    .include_name = false,
+    .include_name = true,
     .include_txpower = false,
     .min_interval = 0x0006,
     .max_interval = 0x0010,
@@ -121,10 +111,153 @@ static esp_ble_adv_data_t adv_data = {
     .p_manufacturer_data = NULL,
     .service_data_len = 0,
     .p_service_data = NULL,
-    .service_uuid_len = sizeof(adv_service_uuid128),
-    .p_service_uuid = adv_service_uuid128,
+    .service_uuid_len = 0,
+    .p_service_uuid = NULL,
     .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
 };
+#endif // !CONFIG_EZPI_BLE_ENABLE_IMPROV
+
+#ifdef CONFIG_EZPI_BLE_ENABLE_IMPROV
+/* Improv Wi-Fi service UUID 00467768-6228-2272-4663-277478268000, as a 128-bit
+ * little-endian array (byte 0 is the UUID's last octet).
+ *
+ * This is not a Bluetooth Base UUID expansion, so bluedroid cannot compact it
+ * into a 2-byte element: btc_gap_ble.c takes the LEN_UUID_128 branch and emits
+ * the full 16 bytes. That same branch is commented "Currently, only one
+ * 128-bit UUID is supported", which is why nothing else can share this list. */
+static uint8_t improv_service_uuid128[16] = {
+    0x00, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+    0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00,
+};
+
+/* Improv requires service data under the 16-bit UUID 0x4677 holding
+ * [current state][capabilities][0][0][0][0].
+ *
+ * bluedroid copies p_service_data into the AD element verbatim and does not
+ * prepend the UUID itself (btc_gap_ble.c memcpy of service_data_len into a
+ * BTM_BLE_AD_TYPE_SERVICE_DATA element), so the two UUID bytes are part of this
+ * array, little-endian. */
+static uint8_t improv_service_data[8] = {
+    0x77, 0x46, /* 0x4677, little-endian */
+    0x02,       /* current state: authorized */
+    0x00,       /* capabilities: no identify */
+    0x00, 0x00, 0x00, 0x00,
+};
+
+/* Advertisement used when Improv is compiled in. The budget is exact:
+ *
+ *     flags                     1 + 1 + 1          =  3
+ *     128-bit service UUID      1 + 1 + 16         = 18
+ *     service data (0x4677)     1 + 1 + 8          = 10
+ *                                                    --
+ *                                                    31  of BTM_BLE_AD_DATA_LEN
+ *
+ * There is no room for the device name, so include_name is false here and the
+ * name is served from the scan response instead. That is the documented cost of
+ * CONFIG_EZPI_BLE_ENABLE_IMPROV.
+ *
+ * Nothing may be added to this structure. btm_ble_build_adv_data() guards every
+ * element with `if (len > ...)` and simply stops emitting when the budget is
+ * gone -- it returns no error. Service data is built last, so anything extra
+ * here would silently drop the Improv state bytes and leave a service UUID
+ * advertised with no state attached, which is precisely the field Improv
+ * clients read. */
+static esp_ble_adv_data_t improv_adv_data = {
+    .set_scan_rsp = false,
+    .include_name = false,
+    .include_txpower = false,
+    /* Both intervals must stay zero. btc_gap_ble.c sets BTM_BLE_AD_BIT_INT_RANGE
+     * whenever min and max are non-zero and max >= min, which emits a 6-byte
+     * slave-connection-interval-range element. Carrying the 0x0006/0x0010 pair
+     * that adv_data uses would make the payload 3 + 6 + 18 + 10 = 37 bytes, and
+     * the 6 bytes over budget would be taken off the end -- silently costing us
+     * the Improv service data. The range is advisory only; dropping it does not
+     * change the advertising interval, which comes from esp_ble_adv_params_t. */
+    .min_interval = 0x0000,
+    .max_interval = 0x0000,
+    .appearance = 0x00,
+    .manufacturer_len = 0,
+    .p_manufacturer_data = NULL,
+    .service_data_len = sizeof(improv_service_data),
+    .p_service_data = improv_service_data,
+    .service_uuid_len = sizeof(improv_service_uuid128),
+    .p_service_uuid = improv_service_uuid128,
+    .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
+};
+
+/* The two arrays above are the only variable-length parts of this payload, so
+ * their sizes are what an edit here would realistically change. The budget is
+ * asserted at compile time because the Bluetooth stack will not check it at
+ * runtime: esp_ble_gap_config_adv_data() returns ESP_OK whether or not the
+ * elements fitted. Each element costs 2 bytes of header (length + AD type) on
+ * top of its payload; flags carries 1 byte of payload, so 3 in total.
+ *
+ * This does not and cannot cover the fixed fields -- include_name,
+ * include_txpower, the interval pair, manufacturer data -- because reading a
+ * member of a static struct is not a constant expression in C. Those are
+ * guarded by the comments above and by ezpi_ble_gap_improv_adv_budget_ok()
+ * below, which re-checks them on the device at startup. */
+#define EZPI_IMPROV_ADV_BUDGET 31
+#define EZPI_IMPROV_ADV_USED (3u /* flags: len + type + 1 byte */              \
+                              + 2u + sizeof(improv_service_uuid128)            \
+                              + 2u + sizeof(improv_service_data))
+
+_Static_assert(EZPI_IMPROV_ADV_USED <= EZPI_IMPROV_ADV_BUDGET,
+               "Improv advertisement exceeds the 31-byte legacy payload; the "
+               "stack would silently drop the trailing service data element, "
+               "leaving the Improv UUID advertised with no state behind it.");
+
+/**
+ * @brief Re-check at runtime the advert fields a compile-time assert cannot see
+ *
+ * Returns false if any field that would add bytes to the payload has been set,
+ * which with an already-exact budget means the service data gets truncated
+ * away. Logged rather than fatal: a controller that advertises a slightly wrong
+ * Improv payload is still a working Ezlo controller, and bricking it over this
+ * would be the worse failure.
+ */
+static bool ezpi_ble_gap_improv_adv_budget_ok(void)
+{
+    uint32_t used = EZPI_IMPROV_ADV_USED;
+
+    if (improv_adv_data.include_name)
+    {
+        /* The name is set at runtime (esp_ble_gap_set_device_name), so its
+         * length is not knowable here. It does not need to be: the budget is
+         * already exact without it, so 2 bytes of header plus any name at all
+         * overflows. */
+        used += 3u;
+    }
+    if (improv_adv_data.include_txpower)
+    {
+        used += 3u;
+    }
+    if ((improv_adv_data.min_interval > 0) && (improv_adv_data.max_interval > 0) &&
+        (improv_adv_data.max_interval >= improv_adv_data.min_interval))
+    {
+        used += 6u;
+    }
+    if (improv_adv_data.manufacturer_len > 0)
+    {
+        used += 2u + improv_adv_data.manufacturer_len;
+    }
+    if (improv_adv_data.appearance != 0x00)
+    {
+        used += 4u;
+    }
+
+    if (used > EZPI_IMPROV_ADV_BUDGET)
+    {
+        TRACE_E("improv: advertisement is %u bytes, budget is %d -- the service "
+                "data will be silently dropped and clients will not offer "
+                "provisioning",
+                (unsigned)used, EZPI_IMPROV_ADV_BUDGET);
+        return false;
+    }
+
+    return true;
+}
+#endif // CONFIG_EZPI_BLE_ENABLE_IMPROV
 
 static esp_ble_adv_params_t adv_params = {
     .adv_int_min = 0x20,
@@ -171,12 +304,24 @@ void EZPI_core_ble_gap_start_advertising(void)
     esp_ble_gap_start_advertising(&adv_params);
 }
 
+/* Which advertisement this build advertises. Improv needs the whole 31-byte
+ * budget, so the two layouts are alternatives rather than something that can be
+ * merged -- see the comment on improv_adv_data. */
+static esp_ble_adv_data_t *ezpi_ble_gap_active_adv_data(void)
+{
+#ifdef CONFIG_EZPI_BLE_ENABLE_IMPROV
+    return &improv_adv_data;
+#else
+    return &adv_data;
+#endif
+}
+
 void EZPI_core_ble_gap_config_adv_data(void)
 {
 #ifndef CONFIG_EZPI_UTIL_TRACE_EN
-    esp_ble_gap_config_adv_data(&adv_data);
+    esp_ble_gap_config_adv_data(ezpi_ble_gap_active_adv_data());
 #else
-    esp_err_t ret = esp_ble_gap_config_adv_data(&adv_data);
+    esp_err_t ret = esp_ble_gap_config_adv_data(ezpi_ble_gap_active_adv_data());
     if (ESP_OK != ret)
     {
         TRACE_E("config adv data failed, error code = %x", ret);
@@ -186,12 +331,46 @@ void EZPI_core_ble_gap_config_adv_data(void)
     adv_config_done |= ADV_CONFIG_FLAG;
 }
 
+#ifdef CONFIG_EZPI_BLE_ENABLE_IMPROV
+void EZPI_core_ble_gap_improv_set_adv_state(uint8_t improv_state, uint8_t capabilities)
+{
+    /* Bytes [0..1] are the 0x4677 UUID and bytes [4..7] are reserved zeroes;
+     * only the state and capability bytes are ours to change. */
+    if ((improv_service_data[2] == improv_state) && (improv_service_data[3] == capabilities))
+    {
+        /* Re-advertising an unchanged payload would cost a config round trip and
+         * an advertising restart for nothing. */
+        return;
+    }
+
+    improv_service_data[2] = improv_state;
+    improv_service_data[3] = capabilities;
+
+    /* The controller keeps its own copy of the payload, so mutating the array is
+     * not enough -- the data has to be handed back to it. Advertising is then
+     * restarted, because esp_ble_gap_config_adv_data() does not itself take
+     * effect on an advertising set that is already running. */
+    esp_err_t ret = esp_ble_gap_config_adv_data(&improv_adv_data);
+    if (ESP_OK != ret)
+    {
+        TRACE_E("improv: config adv data failed, error code = %x", ret);
+        return;
+    }
+
+    TRACE_I("improv: advertising state %d, capabilities 0x%02x", (int)improv_state, (unsigned)capabilities);
+}
+#endif // CONFIG_EZPI_BLE_ENABLE_IMPROV
+
 void EZPI_core_ble_gap_config_scan_rsp_data(void)
 {
     /* The scan response carries only the device name and TX power. Service
      * UUIDs are deliberately left out of it: name (up to 26 bytes) plus TX
      * power (3) plus a UUID list (6) would exceed the 31-byte limit for
-     * longer provisioned names such as "ezlopi_generic_105200261". */
+     * longer provisioned names such as "ezlopi_generic_105200261".
+     *
+     * With CONFIG_EZPI_BLE_ENABLE_IMPROV the name here is the only copy, since
+     * the Improv advertisement has no room for it. Without Improv the name is
+     * in both, which is harmless and matches the long-standing behaviour. */
 #ifndef CONFIG_EZPI_UTIL_TRACE_EN
     esp_ble_gap_config_adv_data(&scan_rsp_data);
 #else
@@ -229,9 +408,13 @@ void EZPI_core_ble_gap_dissociate_bonded_devices(void)
 
 void EZPI_core_ble_setup_adv_config(void)
 {
-    /* adv_data already carries the curated service-UUID list; scan_rsp_data
-     * intentionally carries none (see EZPI_core_ble_gap_config_scan_rsp_data). */
-    esp_err_t ret = esp_ble_gap_config_adv_data(&adv_data);
+#ifdef CONFIG_EZPI_BLE_ENABLE_IMPROV
+    /* Checked here rather than left to review, because the stack reports
+     * success either way and the failure is invisible without a sniffer. */
+    (void)ezpi_ble_gap_improv_adv_budget_ok();
+#endif // CONFIG_EZPI_BLE_ENABLE_IMPROV
+
+    esp_err_t ret = esp_ble_gap_config_adv_data(ezpi_ble_gap_active_adv_data());
     if (!ret)
     {
         adv_config_done |= ADV_CONFIG_FLAG;

@@ -1,0 +1,14 @@
+# Config fragment used only by the "Build esp32 (Improv enabled)" CI job.
+#
+# Why this exists: CONFIG_EZPI_BLE_ENABLE_IMPROV is "not set" by default and
+# every line of ezlopi_service_ble_improv.c, plus the Improv advertisement in
+# ezlopi_core_ble_gap.c, sits behind it. The four target builds therefore
+# compile none of it, exactly as they compiled none of ezlopi_core_ota.c before
+# tests/ci/sdkconfig.ota_enabled existed.
+#
+# This fragment is not applied to the normal builds, so the shipped default
+# configuration is unchanged: Improv stays off unless someone turns it on. The
+# esp32 target is used because it is the one whose committed defaults already
+# have both CONFIG_EZPI_BLE_ENABLE=y and CONFIG_EZPI_ENABLE_WIFI=y, which are
+# the two symbols CONFIG_EZPI_BLE_ENABLE_IMPROV depends on.
+CONFIG_EZPI_BLE_ENABLE_IMPROV=y

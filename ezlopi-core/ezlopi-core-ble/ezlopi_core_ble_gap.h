@@ -109,6 +109,23 @@ extern "C"
      */
     void EZPI_core_ble_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
 
+#ifdef CONFIG_EZPI_BLE_ENABLE_IMPROV
+    /**
+     * @brief Publish the Improv provisioning state in the advertisement
+     *
+     * Improv clients read the current state from the 0x4677 service data in the
+     * advertisement, not only from the GATT characteristic, so the advertised
+     * copy has to be refreshed whenever the state changes. A call with values
+     * already being advertised is a no-op.
+     *
+     * @param improv_state  Improv current-state code (0x01 authorization
+     *                      required, 0x02 authorized, 0x03 provisioning,
+     *                      0x04 provisioned)
+     * @param capabilities  Improv capability bits (bit 0 = identify supported)
+     */
+    void EZPI_core_ble_gap_improv_set_adv_state(uint8_t improv_state, uint8_t capabilities);
+#endif // CONFIG_EZPI_BLE_ENABLE_IMPROV
+
 #ifdef __cplusplus
 }
 #endif

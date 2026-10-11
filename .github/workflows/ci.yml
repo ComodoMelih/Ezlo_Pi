@@ -207,3 +207,69 @@ jobs:
             exit 1
           fi
           echo "OTA compiled in"
+
+  # Same reasoning as firmware-ota: ezlopi_service_ble_improv.c and the Improv
+  # advertisement in ezlopi_core_ble_gap.c sit entirely behind
+  # CONFIG_EZPI_BLE_ENABLE_IMPROV, which is "not set" in all four committed
+  # sdkconfig.defaults.* files. Without this job a green CI run would say
+  # nothing about either of them.
+  #
+  # This job is also what exercises the _Static_assert guarding the 31-byte
+  # advertising payload, and that assert is the only automated check on the
+  # budget: esp_ble_gap_config_adv_data() returns ESP_OK whether or not the
+  # elements fitted, and an over-budget payload drops its trailing service data
+  # element silently. The symptom on a device is just "Improv clients do not
+  # offer provisioning", with nothing in the log. Compiling this configuration
+  # is what turns that into a build failure instead.
+  firmware-improv:
+    name: Build esp32 (Improv enabled)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v4.4.6
+    steps:
+      - uses: actions/checkout@v4
+
+      # Appended to the per-target defaults for the same reason the OTA job
+      # does it: -DSDKCONFIG_DEFAULTS builds fine but leaves the symbol unset,
+      # which would make this job compile as little as the other four. esp32 is
+      # the target because its committed defaults already carry both
+      # CONFIG_EZPI_BLE_ENABLE=y and CONFIG_EZPI_ENABLE_WIFI=y, the two symbols
+      # CONFIG_EZPI_BLE_ENABLE_IMPROV depends on.
+      - name: Enable Improv in the per-target defaults
+        shell: bash
+        run: |
+          cat tests/ci/sdkconfig.improv_enabled >> sdkconfig.defaults.esp32
+          echo "--- tail of sdkconfig.defaults.esp32 ---"
+          tail -5 sdkconfig.defaults.esp32
+
+      - name: Build with Improv enabled
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32
+          idf.py build
+
+      - name: Confirm Improv was actually compiled in
+        shell: bash
+        run: |
+          if ! grep -q '^CONFIG_EZPI_BLE_ENABLE_IMPROV=y' sdkconfig; then
+            echo "::error::CONFIG_EZPI_BLE_ENABLE_IMPROV did not get enabled; this job proved nothing."
+            echo "--- what the generated sdkconfig says instead ---"
+            grep -n 'EZPI_BLE_ENABLE\|EZPI_ENABLE_WIFI' sdkconfig || echo "(no matching lines at all)"
+            exit 1
+          fi
+          echo "Improv compiled in"
+
+      # The symbol in the ELF is the evidence that the guarded body was reached.
+      # The config assertion above only proves the Kconfig symbol was set; this
+      # proves the file behind it was compiled and linked rather than
+      # preprocessed away to nothing, which is how the whole of
+      # ezlopi_core_ota.c used to escape CI.
+      - name: Confirm the Improv service is linked into the image
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          if ! xtensa-esp32-elf-nm build/*.elf | grep -q 'EZPI_ble_service_improv_init'; then
+            echo "::error::EZPI_ble_service_improv_init is absent from the ELF; the service was not linked in."
+            exit 1
+          fi
+          echo "Improv service linked into the image"
