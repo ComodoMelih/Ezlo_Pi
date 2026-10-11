@@ -6,15 +6,13 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # idf_build_set_property(COMPILE_OPTIONS "-Wno-error" APPEND)
 
-# message(STATUS "current dir: ${CMAKE_CURRENT_SOURCE_DIR}")
-execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/update_device_list.sh"
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/xyz.txt"
-    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-)
-
-# ADD_CUSTOM_COMMAND( OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/output_ff.txt"
-# COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/update_device_list.sh
-# DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/update_device_list.sh)
+# Removed: an execute_process() call to update_device_list.sh with a DEPENDS on
+# xyz.txt. Neither file has ever been in the repository, so on every clean
+# checkout this ran a command that did not exist. It was invisible because
+# execute_process() without RESULT_VARIABLE or COMMAND_ERROR_IS_FATAL discards
+# the exit status -- configure still reported success -- and because
+# execute_process() has no DEPENDS option at all, so that argument was ignored.
+# The device list in ezlopi-core-devices is maintained by hand.
 
 # Scans directories in 'curdir' and returns the list in 'result'
 MACRO(SUBDIRLIST result curdir)
