@@ -36,6 +36,7 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
+#include <stdio.h>
 #include <string.h>
 
 #include "ezlopi_util_ha.h"
@@ -475,6 +476,232 @@ static bool ezpi_ha_class_allows_unit(const char *device_class, const char *unit
 
     /* A class with no entry here has no unit constraint to violate. */
     return true;
+}
+
+/* Both ids are written as exactly this many hex digits so that the tail of a
+ * command topic can be split by position rather than by searching for
+ * separators, which a device name containing underscores would defeat. */
+#define EZPI_HA_ID_DIGITS 8
+
+/* "<8 hex>_<8 hex>" */
+#define EZPI_HA_IDS_LEN ((EZPI_HA_ID_DIGITS * 2) + 1)
+
+size_t EZPI_ha_item_object_id(char *dst, size_t dst_size, const char *name,
+                              unsigned long device_id, unsigned long item_id)
+{
+    char ids[EZPI_HA_IDS_LEN + 1];
+    size_t name_len = 0;
+    int n;
+
+    if (NULL == dst || 0 == dst_size)
+    {
+        return 0;
+    }
+
+    dst[0] = '\0';
+
+    /* Masked to 32 bits because an EzloPi id is 32 bits wide, while unsigned
+     * long is 64 on the host this is tested on. Without the mask a stray high
+     * bit would widen the field past eight digits and shift everything the
+     * parser reads by position. */
+    n = snprintf(ids, sizeof(ids), "%08lx_%08lx",
+                 device_id & 0xFFFFFFFFUL, item_id & 0xFFFFFFFFUL);
+    if (n != (int)EZPI_HA_IDS_LEN)
+    {
+        return 0;
+    }
+
+    /* The ids are the part that must survive, so they are budgeted first and
+     * the name gets whatever is left. */
+    if (dst_size < EZPI_HA_IDS_LEN + 1)
+    {
+        return 0;
+    }
+
+    if (NULL != name && dst_size > EZPI_HA_IDS_LEN + 2)
+    {
+        name_len = EZPI_ha_object_id(dst, dst_size - EZPI_HA_IDS_LEN - 1, name);
+    }
+
+    if (name_len > 0)
+    {
+        dst[name_len++] = '_';
+    }
+
+    memcpy(dst + name_len, ids, EZPI_HA_IDS_LEN + 1);
+
+    return name_len + EZPI_HA_IDS_LEN;
+}
+
+bool EZPI_ha_parse_command_topic(const char *topic, size_t topic_len,
+                                 unsigned long *device_id, unsigned long *item_id)
+{
+    static const char suffix[] = "/set";
+    const size_t suffix_len = sizeof(suffix) - 1;
+    const size_t tail_len = EZPI_HA_IDS_LEN + suffix_len;
+    unsigned long parsed[2] = {0, 0};
+    const char *tail;
+    size_t half;
+
+    if (NULL != device_id)
+    {
+        *device_id = 0;
+    }
+
+    if (NULL != item_id)
+    {
+        *item_id = 0;
+    }
+
+    if (NULL == topic || NULL == device_id || NULL == item_id)
+    {
+        return false;
+    }
+
+    /* Strictly greater: the ids are always preceded by a separator in a topic
+     * this code generates, and requiring one is what stops a longer run of hex
+     * from being split at the wrong place. */
+    if (topic_len <= tail_len)
+    {
+        return false;
+    }
+
+    tail = topic + (topic_len - tail_len);
+
+    if ('_' != tail[-1] && '/' != tail[-1])
+    {
+        return false;
+    }
+
+    if (0 != memcmp(tail + EZPI_HA_IDS_LEN, suffix, suffix_len))
+    {
+        return false;
+    }
+
+    if ('_' != tail[EZPI_HA_ID_DIGITS])
+    {
+        return false;
+    }
+
+    for (half = 0; half < 2; half++)
+    {
+        const char *p = tail + (half * (EZPI_HA_ID_DIGITS + 1));
+        size_t i;
+
+        for (i = 0; i < EZPI_HA_ID_DIGITS; i++)
+        {
+            char c = p[i];
+            unsigned long digit;
+
+            if (c >= '0' && c <= '9')
+            {
+                digit = (unsigned long)(c - '0');
+            }
+            else if (c >= 'a' && c <= 'f')
+            {
+                digit = (unsigned long)(c - 'a') + 10UL;
+            }
+            else if (c >= 'A' && c <= 'F')
+            {
+                digit = (unsigned long)(c - 'A') + 10UL;
+            }
+            else
+            {
+                return false;
+            }
+
+            parsed[half] = (parsed[half] << 4) | digit;
+        }
+    }
+
+    *device_id = parsed[0];
+    *item_id = parsed[1];
+
+    return true;
+}
+
+size_t EZPI_ha_topic_discovery(char *dst, size_t dst_size,
+                               const char *discovery_prefix, const char *component,
+                               const char *node_id, const char *object_id)
+{
+    int n;
+
+    if (NULL == dst || 0 == dst_size)
+    {
+        return 0;
+    }
+
+    dst[0] = '\0';
+
+    if (NULL == discovery_prefix || '\0' == discovery_prefix[0] ||
+        NULL == component || '\0' == component[0] ||
+        NULL == node_id || '\0' == node_id[0] ||
+        NULL == object_id || '\0' == object_id[0])
+    {
+        return 0;
+    }
+
+    n = snprintf(dst, dst_size, "%s/%s/%s/%s/config",
+                 discovery_prefix, component, node_id, object_id);
+
+    /* A truncated topic is cleared rather than returned. Publishing to half a
+     * topic is not a smaller version of publishing to the right one: the
+     * config lands somewhere nothing is subscribed to, and the entity simply
+     * never appears, with no error anywhere to explain why. Emptying the
+     * buffer means a caller that ignores the return value publishes nothing. */
+    if (n < 0 || (size_t)n >= dst_size)
+    {
+        dst[0] = '\0';
+        return 0;
+    }
+
+    return (size_t)n;
+}
+
+size_t EZPI_ha_topic_build(char *dst, size_t dst_size, const char *prefix,
+                           const char *node_id, const char *object_id,
+                           const char *leaf)
+{
+    int n;
+
+    if (NULL == dst || 0 == dst_size)
+    {
+        return 0;
+    }
+
+    dst[0] = '\0';
+
+    if (NULL == prefix || '\0' == prefix[0] ||
+        NULL == node_id || '\0' == node_id[0] ||
+        NULL == leaf || '\0' == leaf[0])
+    {
+        return 0;
+    }
+
+    /* A NULL object id is the hub-wide form, which is how the availability
+     * topic is built. An object id that is present but empty is a caller bug,
+     * not a request for the hub-wide form, and would otherwise produce a
+     * double slash that silently becomes a different topic. */
+    if (NULL == object_id)
+    {
+        n = snprintf(dst, dst_size, "%s/%s/%s", prefix, node_id, leaf);
+    }
+    else if ('\0' == object_id[0])
+    {
+        return 0;
+    }
+    else
+    {
+        n = snprintf(dst, dst_size, "%s/%s/%s/%s", prefix, node_id, object_id, leaf);
+    }
+
+    if (n < 0 || (size_t)n >= dst_size)
+    {
+        dst[0] = '\0';
+        return 0;
+    }
+
+    return (size_t)n;
 }
 
 /*******************************************************************************

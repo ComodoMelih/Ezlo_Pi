@@ -574,6 +574,378 @@ static void test_object_id_truncation(void)
 }
 
 /*******************************************************************************
+ *                          Topics
+ *******************************************************************************/
+
+static void test_item_object_id(void)
+{
+    char buf[64];
+
+    CHECK(strlen("kitchen_sensor_200a0001_200a0002") ==
+              EZPI_ha_item_object_id(buf, sizeof(buf), "Kitchen Sensor", 0x200a0001UL, 0x200a0002UL),
+          "object id length");
+    CHECK(streq("kitchen_sensor_200a0001_200a0002", buf), "object id -> %s", buf);
+
+    /* Ids are always eight digits, including when they are small, because the
+     * command topic parser splits the tail by position. */
+    CHECK(0 < EZPI_ha_item_object_id(buf, sizeof(buf), "x", 1UL, 2UL), "small ids map");
+    CHECK(streq("x_00000001_00000002", buf), "small ids are still padded, got %s", buf);
+
+    /* A name that reduces to nothing leaves the ids alone rather than an
+     * object id that starts with a separator. */
+    CHECK(17 == EZPI_ha_item_object_id(buf, sizeof(buf), "!!!", 0xabcdef01UL, 0x23456789UL),
+          "unusable name leaves only the ids");
+    CHECK(streq("abcdef01_23456789", buf), "unusable name -> %s", buf);
+    CHECK(17 == EZPI_ha_item_object_id(buf, sizeof(buf), NULL, 0xabcdef01UL, 0x23456789UL),
+          "NULL name leaves only the ids");
+    CHECK(streq("abcdef01_23456789", buf), "NULL name -> %s", buf);
+}
+
+static void test_item_object_id_never_clips_the_ids(void)
+{
+    /* The whole point of the reservation: at every buffer size the function
+     * either refuses outright or produces ids that are still parseable. A
+     * clipped id would not fail visibly -- it would address a different item,
+     * or an item that does not exist, which looks like a device that ignores
+     * commands. */
+    const char *name = "A Very Long Device Name Indeed";
+    int clipped = 0;
+    int overran = 0;
+    int unparseable = 0;
+
+    for (size_t size = 1; size <= 64; size++)
+    {
+        char buf[80];
+        char topic[128];
+        unsigned long dev = 0;
+        unsigned long item = 0;
+        size_t len;
+
+        memset(buf, '@', sizeof(buf));
+        len = EZPI_ha_item_object_id(buf, size, name, 0x1234abcdUL, 0x5678ef90UL);
+
+        if (buf[size] != '@')
+        {
+            overran++;
+        }
+
+        if (0 == len)
+        {
+            /* Refusal must leave an empty string, not a half-written id. */
+            if ('\0' != buf[0])
+            {
+                clipped++;
+            }
+            continue;
+        }
+
+        if (len != strlen(buf))
+        {
+            clipped++;
+            continue;
+        }
+
+        /* Feed it through the real parser: that is the property that matters,
+         * not the exact bytes. */
+        snprintf(topic, sizeof(topic), "ezlopi/node/%s/set", buf);
+        if (!EZPI_ha_parse_command_topic(topic, strlen(topic), &dev, &item) ||
+            0x1234abcdUL != dev || 0x5678ef90UL != item)
+        {
+            unparseable++;
+        }
+    }
+
+    CHECK(0 == overran, "%d size(s) wrote past the end of the buffer", overran);
+    CHECK(0 == clipped, "%d size(s) left a malformed string", clipped);
+    CHECK(0 == unparseable, "%d size(s) produced ids the parser could not recover", unparseable);
+
+    /* Exactly enough for the ids and the NUL, and not a byte less. */
+    char exact[18];
+    CHECK(17 == EZPI_ha_item_object_id(exact, sizeof(exact), name, 1UL, 2UL),
+          "18 bytes is enough for the ids");
+    char one_short[17];
+    CHECK(0 == EZPI_ha_item_object_id(one_short, sizeof(one_short), name, 1UL, 2UL),
+          "17 bytes is refused rather than clipped");
+    CHECK(streq("", one_short), "a refusal leaves an empty string");
+}
+
+static void test_parse_command_topic(void)
+{
+    unsigned long dev = 0;
+    unsigned long item = 0;
+
+    CHECK(EZPI_ha_parse_command_topic("ezlopi/hub_aabbcc/lamp_200a0001_200a0002/set",
+                                      strlen("ezlopi/hub_aabbcc/lamp_200a0001_200a0002/set"),
+                                      &dev, &item),
+          "a well-formed command topic parses");
+    CHECK(0x200a0001UL == dev, "device id, got %08lx", dev);
+    CHECK(0x200a0002UL == item, "item id, got %08lx", item);
+
+    /* No device name in the object id: the ids are preceded by '/'. */
+    CHECK(EZPI_ha_parse_command_topic("ezlopi/hub/00000001_00000002/set",
+                                      strlen("ezlopi/hub/00000001_00000002/set"), &dev, &item),
+          "an object id of only ids parses");
+    CHECK(1UL == dev && 2UL == item, "ids recovered without a name");
+
+    /* A device name containing underscores must not confuse the split, which
+     * is the reason the tail is taken by position. */
+    CHECK(EZPI_ha_parse_command_topic("ezlopi/hub/a_b_c_d_deadbeef_cafe0001/set",
+                                      strlen("ezlopi/hub/a_b_c_d_deadbeef_cafe0001/set"), &dev, &item),
+          "underscores in the name do not confuse the split");
+    CHECK(0xdeadbeefUL == dev && 0xcafe0001UL == item, "ids recovered past underscores");
+}
+
+static void test_parse_command_topic_refuses_junk(void)
+{
+    /* Every one of these is a topic that must not be acted on. A command
+     * topic comes off the network and names an item about to be written, so
+     * guessing at a malformed one is how a broker typo turns into the wrong
+     * relay switching. */
+    static const char *const junk[] = {
+        "",
+        "/set",
+        "ezlopi/hub/lamp/set",                        /* no ids at all */
+        "ezlopi/hub/lamp_200a0001/set",               /* only one id */
+        "ezlopi/hub/lamp_200a001_200a0002/set",       /* seven digits */
+        "ezlopi/hub/lamp_200a00001_200a0002/set",     /* nine digits */
+        "ezlopi/hub/lamp_200a0001_200a0002/state",    /* wrong leaf */
+        "ezlopi/hub/lamp_200a0001_200a0002/set/more", /* leaf not last */
+        /* These two matter more than they look. Both ids sit exactly where the
+         * parser expects them and only the last four bytes are wrong, so the
+         * leaf check is the only thing that can refuse them. Every other
+         * wrong-leaf case above is a different length, which moves the ids
+         * off-position and gets caught by the separator check instead --
+         * leaving the leaf check itself unexercised, which is what mutation
+         * testing found here. */
+        "ezlopi/hub/lamp_200a0001_200a0002/get", /* four-byte wrong leaf */
+        "ezlopi/hub/lamp_200a0001_200a0002_set", /* separator instead of a slash */
+        "ezlopi/hub/lamp_200a0001-200a0002/set",      /* wrong separator */
+        "ezlopi/hub/lamp_200g0001_200a0002/set",      /* g is not hex */
+        "ezlopi/hub/lamp_200a0001_200a000z/set",      /* z is not hex */
+        "200a0001_200a0002/set",                      /* no separator before */
+        "ezlopi/hub/lampX200a0001_200a0002/set",      /* separator is a letter */
+    };
+
+    int accepted = 0;
+    int left_dirty = 0;
+
+    for (size_t i = 0; i < sizeof(junk) / sizeof(junk[0]); i++)
+    {
+        unsigned long dev = 0xdeadUL;
+        unsigned long item = 0xbeefUL;
+
+        if (EZPI_ha_parse_command_topic(junk[i], strlen(junk[i]), &dev, &item))
+        {
+            printf("  accepted junk: %s\n", junk[i]);
+            accepted++;
+        }
+
+        /* A refusal must not leave the caller holding the previous ids. */
+        if (0 != dev || 0 != item)
+        {
+            left_dirty++;
+        }
+    }
+
+    CHECK(0 == accepted, "%d malformed topic(s) were accepted", accepted);
+    CHECK(0 == left_dirty, "%d refusal(s) left a stale id behind", left_dirty);
+
+    /* The length is honoured rather than the NUL: a topic from esp-mqtt is a
+     * pointer and a length into a larger buffer and is not terminated. */
+    unsigned long dev = 0;
+    unsigned long item = 0;
+    const char *embedded = "ezlopi/hub/x_00000003_00000004/setTRAILING-GARBAGE";
+    CHECK(EZPI_ha_parse_command_topic(embedded, strlen("ezlopi/hub/x_00000003_00000004/set"),
+                                      &dev, &item),
+          "an unterminated topic parses at the given length");
+    CHECK(3UL == dev && 4UL == item, "ids recovered from an unterminated topic");
+
+    CHECK(!EZPI_ha_parse_command_topic(NULL, 40, &dev, &item), "NULL topic is refused");
+    CHECK(!EZPI_ha_parse_command_topic("ezlopi/hub/x_00000003_00000004/set",
+                                       strlen("ezlopi/hub/x_00000003_00000004/set"), NULL, &item),
+          "NULL output is refused");
+}
+
+static void test_object_id_and_topic_round_trip(void)
+{
+    /* The two functions are each other's inverse, so sweeping real device
+     * names through both is worth more than asserting either alone. */
+    static const char *const names[] = {
+        "Kitchen Sensor", "", "!!!", "a", "Bo\xC3\xAFler", "LED___Strip",
+        "_leading", "trailing_", "UPPER CASE", "123", "dev/with/slashes",
+        "a very long device name that will certainly be truncated somewhere",
+    };
+
+    int failed = 0;
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        for (unsigned long d = 0; d < 4; d++)
+        {
+            char object_id[48];
+            char topic[128];
+            unsigned long dev = 0;
+            unsigned long item = 0;
+
+            const unsigned long device_id = 0x200a0000UL + d;
+            const unsigned long item_id = 0x30bb0000UL + (d * 7UL);
+
+            if (0 == EZPI_ha_item_object_id(object_id, sizeof(object_id), names[i],
+                                            device_id, item_id))
+            {
+                failed++;
+                continue;
+            }
+
+            if (0 == EZPI_ha_topic_build(topic, sizeof(topic), "ezlopi", "hub_aabbcc",
+                                         object_id, "set"))
+            {
+                failed++;
+                continue;
+            }
+
+            if (!EZPI_ha_parse_command_topic(topic, strlen(topic), &dev, &item) ||
+                device_id != dev || item_id != item)
+            {
+                printf("  round trip failed for '%s' -> %s\n", names[i], topic);
+                failed++;
+            }
+        }
+    }
+
+    CHECK(0 == failed, "%d name/id pair(s) did not survive the round trip", failed);
+}
+
+static void test_topic_discovery(void)
+{
+    char buf[128];
+
+    CHECK(0 < EZPI_ha_topic_discovery(buf, sizeof(buf), "homeassistant", "sensor",
+                                      "hub_aabbcc", "kitchen_200a0001_200a0002"),
+          "discovery topic builds");
+    CHECK(streq("homeassistant/sensor/hub_aabbcc/kitchen_200a0001_200a0002/config", buf),
+          "discovery topic -> %s", buf);
+
+    /* Every argument is required: a missing one would produce a double slash,
+     * which is a different topic, not a shorter one. */
+    CHECK(0 == EZPI_ha_topic_discovery(buf, sizeof(buf), NULL, "sensor", "n", "o"),
+          "NULL prefix refused");
+    CHECK(0 == EZPI_ha_topic_discovery(buf, sizeof(buf), "", "sensor", "n", "o"),
+          "empty prefix refused");
+    CHECK(0 == EZPI_ha_topic_discovery(buf, sizeof(buf), "ha", NULL, "n", "o"),
+          "NULL component refused -- this is what EZPI_ha_component_str returns for NONE");
+    CHECK(0 == EZPI_ha_topic_discovery(buf, sizeof(buf), "ha", "sensor", "", "o"),
+          "empty node refused");
+    CHECK(0 == EZPI_ha_topic_discovery(buf, sizeof(buf), "ha", "sensor", "n", ""),
+          "empty object refused");
+}
+
+static void test_topic_build(void)
+{
+    char buf[128];
+
+    CHECK(0 < EZPI_ha_topic_build(buf, sizeof(buf), "ezlopi", "hub_aabbcc", "lamp_1_2", "state"),
+          "state topic builds");
+    CHECK(streq("ezlopi/hub_aabbcc/lamp_1_2/state", buf), "state topic -> %s", buf);
+
+    /* NULL object id is the hub-wide form, which is how availability works. */
+    CHECK(0 < EZPI_ha_topic_build(buf, sizeof(buf), "ezlopi", "hub_aabbcc", NULL, "status"),
+          "availability topic builds");
+    CHECK(streq("ezlopi/hub_aabbcc/status", buf), "availability topic -> %s", buf);
+
+    /* An empty object id is a bug, not a request for the hub-wide form. If it
+     * were treated as hub-wide, one item's state would be published over the
+     * hub's availability topic and the whole device would appear offline. */
+    CHECK(0 == EZPI_ha_topic_build(buf, sizeof(buf), "ezlopi", "hub", "", "state"),
+          "empty object id is refused, not treated as hub-wide");
+
+    CHECK(0 == EZPI_ha_topic_build(buf, sizeof(buf), "ezlopi", "hub", "o", NULL),
+          "NULL leaf refused");
+}
+
+static void test_topics_refuse_truncation(void)
+{
+    /* Truncation must clear the buffer, not return a prefix. A caller that
+     * ignores the return value then publishes nothing, which is recoverable;
+     * publishing a config to a truncated topic is not, because nothing
+     * reports it and the entity just never appears. */
+    int returned_prefix = 0;
+    int not_cleared = 0;
+    int overran = 0;
+
+    for (size_t size = 1; size < 70; size++)
+    {
+        char buf[80];
+        size_t len;
+
+        memset(buf, '@', sizeof(buf));
+        len = EZPI_ha_topic_discovery(buf, size, "homeassistant", "binary_sensor",
+                                      "hub_aabbcc", "kitchen_200a0001_200a0002");
+
+        if (buf[size] != '@')
+        {
+            overran++;
+        }
+
+        if (0 == len)
+        {
+            if ('\0' != buf[0])
+            {
+                not_cleared++;
+            }
+        }
+        else if (len != strlen(buf) ||
+                 !streq(buf, "homeassistant/binary_sensor/hub_aabbcc/kitchen_200a0001_200a0002"
+                             "/config"))
+        {
+            returned_prefix++;
+        }
+    }
+
+    CHECK(0 == overran, "%d size(s) wrote past the end of the buffer", overran);
+    CHECK(0 == not_cleared, "%d refusal(s) left the buffer non-empty", not_cleared);
+    CHECK(0 == returned_prefix, "%d size(s) returned a truncated topic as success", returned_prefix);
+
+    /* One byte short of the full topic, and exactly enough. */
+    const char *full = "homeassistant/sensor/hub/obj/config";
+    char tight[36]; /* strlen(full) + 1 */
+    CHECK(strlen(full) == sizeof(tight) - 1, "test buffer is sized to the topic");
+    CHECK(strlen(full) == EZPI_ha_topic_discovery(tight, sizeof(tight), "homeassistant",
+                                                  "sensor", "hub", "obj"),
+          "exactly enough room succeeds");
+    char short_by_one[35];
+    CHECK(0 == EZPI_ha_topic_discovery(short_by_one, sizeof(short_by_one), "homeassistant",
+                                       "sensor", "hub", "obj"),
+          "one byte short is refused");
+}
+
+static void test_component_str_feeds_the_topic(void)
+{
+    /* The discovery topic takes the component name from EZPI_ha_component_str,
+     * and NONE returns NULL there. Checking the two together is what proves an
+     * unmappable item cannot produce a topic at all. */
+    char buf[128];
+
+    CHECK(NULL == EZPI_ha_component_str(EZPI_HA_COMPONENT_NONE), "NONE has no platform name");
+    CHECK(0 == EZPI_ha_topic_discovery(buf, sizeof(buf), "homeassistant",
+                                       EZPI_ha_component_str(EZPI_HA_COMPONENT_NONE),
+                                       "hub", "obj"),
+          "an unmappable item cannot produce a discovery topic");
+
+    static const e_ezpi_ha_component_t mappable[] = {
+        EZPI_HA_COMPONENT_SENSOR, EZPI_HA_COMPONENT_BINARY_SENSOR,
+        EZPI_HA_COMPONENT_SWITCH, EZPI_HA_COMPONENT_NUMBER,
+    };
+
+    for (size_t i = 0; i < sizeof(mappable) / sizeof(mappable[0]); i++)
+    {
+        CHECK(0 < EZPI_ha_topic_discovery(buf, sizeof(buf), "homeassistant",
+                                          EZPI_ha_component_str(mappable[i]), "hub", "obj"),
+              "component %d produces a topic", (int)mappable[i]);
+    }
+}
+
+/*******************************************************************************
  *                          Main
  *******************************************************************************/
 int main(void)
@@ -590,6 +962,15 @@ int main(void)
     test_object_id_basics();
     test_object_id_nothing_usable();
     test_object_id_truncation();
+    test_item_object_id();
+    test_item_object_id_never_clips_the_ids();
+    test_parse_command_topic();
+    test_parse_command_topic_refuses_junk();
+    test_object_id_and_topic_round_trip();
+    test_topic_discovery();
+    test_topic_build();
+    test_topics_refuse_truncation();
+    test_component_str_feeds_the_topic();
 
     printf("%u check(s), %u failure(s)\n", tests_run, tests_failed);
 

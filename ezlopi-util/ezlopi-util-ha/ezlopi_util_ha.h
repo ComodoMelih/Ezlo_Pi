@@ -182,6 +182,92 @@ extern "C"
      */
     size_t EZPI_ha_object_id(char *dst, size_t dst_size, const char *src);
 
+    /**
+     * @brief Build the object id that identifies one item to Home Assistant.
+     *
+     * The result is the reduced device name followed by the device and item
+     * ids as eight hex digits each: "kitchen_sensor_200a0001_200a0002".
+     *
+     * The two ids are what make the id unique and what the command topic is
+     * parsed back into, so they are never truncated. If the buffer is too
+     * small it is the *name* that loses bytes, down to nothing -- an object id
+     * of just the two ids is ugly but correct, whereas a clipped item id would
+     * silently address the wrong item.
+     *
+     * @param dst       Destination buffer.
+     * @param dst_size  Size of @p dst including the NUL. Needs at least 18
+     *                  bytes for the ids and NUL; less than that writes an
+     *                  empty string and returns 0.
+     * @param name      Device name; NULL or unusable is fine, the ids remain.
+     * @param device_id Device id.
+     * @param item_id   Item id.
+     * @return Bytes written excluding the NUL, or 0 if @p dst_size was too
+     *         small to hold the ids.
+     */
+    size_t EZPI_ha_item_object_id(char *dst, size_t dst_size, const char *name,
+                                  unsigned long device_id, unsigned long item_id);
+
+    /**
+     * @brief Recover the device and item ids from a command topic.
+     *
+     * The inverse of EZPI_ha_item_object_id() for the topic Home Assistant
+     * publishes to. Only the tail is examined, so the prefix and node id may
+     * be anything and the device name inside the object id is ignored.
+     *
+     * This is strict on purpose. A command topic arrives from the network and
+     * names an item that is about to be written, so anything that does not
+     * end in exactly "_<8 hex>_<8 hex>/set" is refused rather than guessed at.
+     *
+     * @param topic      Topic as received; need not be NUL-terminated.
+     * @param topic_len  Length of @p topic in bytes.
+     * @param device_id  Set on success.
+     * @param item_id    Set on success.
+     * @return true when both ids were recovered, false otherwise. Both outputs
+     *         are zeroed on failure.
+     */
+    bool EZPI_ha_parse_command_topic(const char *topic, size_t topic_len,
+                                     unsigned long *device_id, unsigned long *item_id);
+
+    /**
+     * @brief Build a Home Assistant discovery topic.
+     *
+     * "<discovery_prefix>/<component>/<node_id>/<object_id>/config", the topic
+     * a retained config payload is published to.
+     *
+     * @param dst       Destination buffer.
+     * @param dst_size  Size of @p dst including the NUL.
+     * @param discovery_prefix Usually "homeassistant".
+     * @param component Platform name, from EZPI_ha_component_str().
+     * @param node_id   This hub's id.
+     * @param object_id This item's id, from EZPI_ha_item_object_id().
+     * @return Bytes written excluding the NUL, or 0 on failure. Truncation is
+     *         a failure here, not a clipped topic: a half-written topic would
+     *         publish a config payload where nothing is listening.
+     */
+    size_t EZPI_ha_topic_discovery(char *dst, size_t dst_size,
+                                   const char *discovery_prefix, const char *component,
+                                   const char *node_id, const char *object_id);
+
+    /**
+     * @brief Build one of this hub's own topics.
+     *
+     * "<prefix>/<node_id>/<object_id>/<leaf>", or "<prefix>/<node_id>/<leaf>"
+     * when @p object_id is NULL -- which is how the hub-wide availability
+     * topic is built.
+     *
+     * @param dst       Destination buffer.
+     * @param dst_size  Size of @p dst including the NUL.
+     * @param prefix    Topic prefix for this hub's own tree.
+     * @param node_id   This hub's id.
+     * @param object_id This item's id, or NULL for a hub-wide topic.
+     * @param leaf      Last segment: "state", "set" or "status".
+     * @return Bytes written excluding the NUL, or 0 on failure. As with
+     *         EZPI_ha_topic_discovery(), truncation is a failure.
+     */
+    size_t EZPI_ha_topic_build(char *dst, size_t dst_size, const char *prefix,
+                               const char *node_id, const char *object_id,
+                               const char *leaf);
+
 #ifdef __cplusplus
 }
 #endif
