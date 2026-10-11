@@ -138,10 +138,20 @@ static volatile uint32_t __ota_in_process = 0;
  * could be started until a power cycle. The two concerns are now separate, so
  * the reported state is unchanged while the guard clears correctly.
  *
- * It is also set *before* xTaskCreate rather than in the task body. Setting it
- * inside the task left a window in which two requests arriving close together
- * both passed the guard and spawned two concurrent OTA tasks. */
+ * Claimed under the spinlock below, and before xTaskCreate rather than in the
+ * task body. Setting it inside the task left a window spanning task creation
+ * and scheduling, in which two requests arriving close together both passed
+ * the guard and started two concurrent esp_https_ota() calls against the same
+ * OTA partition. */
 static volatile bool __ota_task_alive = false;
+
+/* Two different tasks can dispatch cloud methods -- the cloud websocket client
+ * in ezlopi_service_webprov.c and the local websocket server in
+ * ezlopi_service_ws_server.c both call EZPI_core_api_consume*(), and
+ * "hub.firmware.update.start" lands here from either. A plain read-then-write
+ * of the flag above is not atomic across them: both tasks could read false and
+ * both then set it. The claim is therefore done under a critical section. */
+static portMUX_TYPE __ota_guard_spinlock = portMUX_INITIALIZER_UNLOCKED;
 
 static void ezlopi_ota_process(void *pv);
 static esp_err_t _http_event_handler(esp_http_client_event_t *evt);
@@ -163,14 +173,6 @@ void EZPI_core_ota_start(cJSON *url)
 {
     if (url && url->valuestring)
     {
-        /* Check the guard before allocating, so the in-progress case does not
-         * allocate a buffer only to free it again. */
-        if (__ota_task_alive)
-        {
-            TRACE_W("Ota in progress...");
-            return;
-        }
-
         /* The URL length is measured rather than assumed. This was
          * memcpy(ota_url, url->valuestring, OTA_URL_SIZE) with OTA_URL_SIZE of
          * 512, copying a fixed 512 bytes out of a cJSON string allocated to
@@ -185,16 +187,27 @@ void EZPI_core_ota_start(cJSON *url)
             return;
         }
 
+        /* Atomic test-and-set: exactly one caller can observe the flag clear
+         * and claim it, even if both websocket tasks arrive together. */
+        bool claimed = false;
+        portENTER_CRITICAL(&__ota_guard_spinlock);
+        if (false == __ota_task_alive)
+        {
+            __ota_task_alive = true;
+            claimed = true;
+        }
+        portEXIT_CRITICAL(&__ota_guard_spinlock);
+
+        if (false == claimed)
+        {
+            TRACE_W("Ota in progress...");
+            return;
+        }
+
         char *ota_url = (char *)ezlopi_malloc(__FUNCTION__, url_len + 1);
         if (ota_url)
         {
             memcpy(ota_url, url->valuestring, url_len + 1);
-
-            /* Claimed before xTaskCreate, not inside the task body, so two
-             * requests arriving close together cannot both get past the guard.
-             * Cleared again below if the task fails to start, and by the task
-             * itself on the failure path. */
-            __ota_task_alive = true;
 
             TaskHandle_t ezlopi_core_ota_process_task_handle = NULL;
             if (pdPASS == xTaskCreate(ezlopi_ota_process, "EzpiOTAProcess", EZLOPI_CORE_OTA_PROCESS_TASK_DEPTH, ota_url, 3, &ezlopi_core_ota_process_task_handle))
@@ -209,10 +222,19 @@ void EZPI_core_ota_start(cJSON *url)
                  * return value. On failure the task never runs, so nothing
                  * would ever have released the guard or the buffer. */
                 TRACE_E("Failed to create OTA task");
-                __ota_task_alive = false;
                 ezlopi_free(__FUNCTION__, ota_url);
                 ota_url = NULL;
+                __ota_task_alive = false;
             }
+        }
+        else
+        {
+            /* The claim has to be released here too. Without this, a single
+             * failed allocation would leave the flag set with no task running
+             * to clear it -- reintroducing the permanent wedge this change
+             * exists to remove, just by a different route. */
+            TRACE_E("Failed to allocate OTA url buffer");
+            __ota_task_alive = false;
         }
     }
 }
