@@ -47,21 +47,40 @@ the flash will fail or the device will not boot.
 
 ## What the page does not do yet
 
-It does not set up Wi-Fi in the browser. ESP Web Tools does that over
-**Improv *Serial***, and this firmware currently implements Improv over **BLE**
-only (`CONFIG_EZPI_BLE_ENABLE_IMPROV`, off by default). The two are the same
-protocol over different transports and are not interchangeable.
+It does not set up Wi-Fi in the browser, and the reason has changed. ESP Web
+Tools does that over **Improv *Serial***, which the firmware now implements
+(`CONFIG_EZPI_ENABLE_IMPROV_SERIAL`, alongside the BLE transport under
+`CONFIG_EZPI_BLE_ENABLE_IMPROV`; the two are the same protocol over different
+transports and share one state machine). What is missing is not the code but
+the configuration: both options are off in every committed
+`sdkconfig.defaults.*`, and the merged images this page serves come from the
+plain `firmware` matrix, which applies no Kconfig fragment. So the published
+binaries contain no Improv at all.
 
-That is why the manifest sets `"new_install_improv_wait_time": 0`. The ESP Web
-Tools default is to wait 10 seconds after flashing for an Improv Serial
-response; with no Improv Serial in the firmware that is 10 seconds of waiting
-for a reply that cannot come, followed by a dead end. Setting it to `0`
-disables Improv Serial detection, so the install finishes immediately and the
-user is sent to the Ezlo app or the serial console, which is where provisioning
-actually happens today.
+That is why the manifest still sets `"new_install_improv_wait_time": 0`. The
+ESP Web Tools default is to wait 10 seconds after flashing for an Improv Serial
+response; with no Improv Serial in *the image that was just flashed*, that is 10
+seconds of waiting for a reply that cannot come, followed by a dead end. Setting
+it to `0` disables Improv Serial detection, so the install finishes immediately
+and the user is sent to the Ezlo app or the serial console.
 
-**When Improv Serial lands, delete that key** (or raise it) and the page gains
-in-browser Wi-Fi setup with no other change.
+**Two things have to be true before that key can go**, and "the code is merged"
+is only the first of them:
+
+1. The images this page serves must actually be built with
+   `CONFIG_EZPI_ENABLE_IMPROV_SERIAL=y`. That is a deliberate decision, not an
+   oversight — turning it on in the committed defaults would change what
+   everyone's `idf.py build` produces, so the alternative is to apply
+   `tests/ci/sdkconfig.improv_enabled` to the `firmware` matrix and accept that
+   the published binary is then not what a plain local build gives you.
+2. It must have been exercised on a board. Nothing in the Improv serial path
+   has run on hardware yet. Deleting the key points every browser installer at
+   an untested provisioning dialog; leaving it at `0` means the worst case is
+   the install flow we already have.
+
+Until both hold, the honest state is: the transport exists and is covered by
+the `Build esp32 (Improv enabled, both transports)` CI job, and this page does
+not use it.
 
 ## Why the binary is a single merged image
 

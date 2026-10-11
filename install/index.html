@@ -157,9 +157,9 @@
     <h2>After flashing</h2>
     <p>
       This page does not set up Wi-Fi yet. ESP Web Tools does that over Improv
-      <em>Serial</em>, and the firmware currently speaks Improv over
-      <em>Bluetooth</em> only, so the install finishes and hands you straight
-      back. Set the board up by:
+      <em>Serial</em>, which the firmware now implements — but the images
+      published here are built with it switched off, so the install finishes and
+      hands you straight back. Set the board up by:
     </p>
     <ol>
       <li>the EzloPi mobile app, which provisions over Bluetooth; or</li>
@@ -169,9 +169,14 @@
       </li>
     </ol>
     <p>
-      In-browser Wi-Fi setup arrives with the Improv Serial transport. At that
-      point this page gains it with no change other than removing one line from
-      the manifest.
+      In-browser Wi-Fi setup is one build option away, and is being held back
+      deliberately: the Improv Serial path has not yet been run on real
+      hardware, and enabling it here would point every installer at an untested
+      provisioning dialog. See
+      <a href="https://github.com/ezloteam/Ezlo_Pi/tree/master/install#what-the-page-does-not-do-yet"
+        >install/README.md</a
+      >
+      for exactly what has to be true first.
     </p>
 
     <h2>What this is not</h2>

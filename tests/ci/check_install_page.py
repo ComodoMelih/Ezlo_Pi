@@ -110,8 +110,9 @@ def main():
     # and "install appears to hang".
     wait = manifest.get("new_install_improv_wait_time")
     if wait == 0:
-        print("improv:   Improv Serial detection disabled (no Improv Serial in "
-              "the firmware yet)")
+        print("improv:   Improv Serial detection disabled (the firmware "
+              "implements it, but these images are built with "
+              "CONFIG_EZPI_ENABLE_IMPROV_SERIAL off)")
     else:
         print("improv:   will wait %s s for an Improv Serial reply"
               % (wait if wait is not None else "10 (default)"))
