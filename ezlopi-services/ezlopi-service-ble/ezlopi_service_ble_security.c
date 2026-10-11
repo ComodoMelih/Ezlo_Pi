@@ -103,7 +103,7 @@ typedef enum e_ble_security_commands
 /*******************************************************************************
  *                          Static Function Prototypes
  *******************************************************************************/
-#if (1 == CONFIG_EZPI_BLE_ENALBE_PASSKEY)
+#if (1 == CONFIG_EZPI_BLE_ENABLE_PASSKEY)
 /**
  * @brief Function to set new BLE pass key
  *
@@ -151,7 +151,7 @@ static void ezpi_serv_ble_factory_reset_write_func(esp_gatt_value_t *value, esp_
  *                          Extern Function Definitions
  *******************************************************************************/
 
-#if (1 == CONFIG_EZPI_BLE_ENALBE_PASSKEY)
+#if (1 == CONFIG_EZPI_BLE_ENABLE_PASSKEY)
 s_gatt_char_t *passkey_characterstic = NULL;
 static uint32_t start_tick = 0;
 static uint32_t authenticated_flag = 0;
@@ -169,7 +169,7 @@ void EZPI_ble_service_security_init(void)
     uuid.uuid.uuid16 = BLE_SECURITY_SERVICE_UUID;
     security_service = EZPI_core_ble_gatt_create_service(BLE_SECURITY_SERVICE_HANDLE, &uuid);
 
-#if (1 == CONFIG_EZPI_BLE_ENALBE_PASSKEY)
+#if (1 == CONFIG_EZPI_BLE_ENABLE_PASSKEY)
     uuid.uuid.uuid16 = BLE_SECURITY_CHAR_PASSKEY_UUID;
     uuid.len = ESP_UUID_LEN_16;
     permission = ESP_GATT_PERM_WRITE;
@@ -194,7 +194,7 @@ void EZPI_ble_service_security_init(void)
  *                          Static Function Definitions
  *******************************************************************************/
 
-#if (1 == CONFIG_EZPI_BLE_ENALBE_PASSKEY)
+#if (1 == CONFIG_EZPI_BLE_ENABLE_PASSKEY)
 static void ezpi_passkey_write_func(esp_gatt_value_t *value, esp_ble_gatts_cb_param_t *param)
 {
     if (param->write.len == 4)
@@ -283,7 +283,17 @@ static void ezpi_serv_ble_factory_reset_write_func(esp_gatt_value_t *value, esp_
                     break;
                 }
                 }
-                cJSON_Delete(__FUNCTION__, cj_sub_cmd);
+                /* No cJSON_Delete(cj_sub_cmd) here. cJSON_GetObjectItem hands
+                 * back a borrowed pointer that is still linked into 'root', and
+                 * cJSON_Delete walks the ->next sibling chain (cjext.c:158), so
+                 * deleting it freed cj_sub_cmd *and every member after it* while
+                 * root still referenced them -- then the cJSON_Delete(root)
+                 * below walked that freed chain. Heap corruption on any write
+                 * to this characteristic carrying a "sub_cmd" member.
+                 *
+                 * Deleting root alone is correct and sufficient; it owns the
+                 * whole tree. The same mistake is present-but-commented-out in
+                 * ezlopi_cloud_ota.c:162, where the comment describes it. */
             }
 
             cJSON_Delete(__FUNCTION__, root);
@@ -294,13 +304,13 @@ static void ezpi_serv_ble_factory_reset_write_func(esp_gatt_value_t *value, esp_
 static void ezpi_process_hard_reset_command(void)
 {
 
-#if (1 == CONFIG_EZPI_BLE_ENALBE_PASSKEY)
+#if (1 == CONFIG_EZPI_BLE_ENABLE_PASSKEY)
     uint32_t current_tick = xTaskGetTickCount();
     if ((1 == authenticated_flag) && (current_tick - start_tick) < (30 * 1000 / portTICK_RATE_MS)) // once authenticated, valid for 30 seconds only
     {
 #endif
         EZPI_core_reset_factory_restore();
-#if (1 == CONFIG_EZPI_BLE_ENALBE_PASSKEY)
+#if (1 == CONFIG_EZPI_BLE_ENABLE_PASSKEY)
     }
     else
     {
@@ -312,7 +322,7 @@ static void ezpi_process_hard_reset_command(void)
 
 static void ezpi_process_auth_command(cJSON *root)
 {
-#if (1 == CONFIG_EZPI_BLE_ENALBE_PASSKEY)
+#if (1 == CONFIG_EZPI_BLE_ENABLE_PASSKEY)
     uint32_t passkey = CJ_GET_NUMBER("passkey");
     uint32_t original_passkey = 0;
     EZPI_core_nvs_read_ble_passkey(&original_passkey);
