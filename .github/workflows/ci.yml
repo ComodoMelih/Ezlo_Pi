@@ -264,12 +264,27 @@ jobs:
       # proves the file behind it was compiled and linked rather than
       # preprocessed away to nothing, which is how the whole of
       # ezlopi_core_ota.c used to escape CI.
+      #
+      # The symbol table is written to a file rather than piped straight into
+      # grep. "shell: bash" means Actions runs the step as
+      # "bash --noprofile --norc -eo pipefail", and with pipefail set,
+      # "nm ... | grep -q" fails even when the symbol is present: grep -q exits
+      # the instant it matches, nm is still writing the other ~13800 symbols,
+      # so nm dies of SIGPIPE and the pipeline reports 141. That is exactly how
+      # this step failed on its first run, while the symbol was in the ELF the
+      # whole time. Redirecting to a file lets nm finish, keeps pipefail on for
+      # the rest of the step, and leaves the table available for the diagnostic
+      # dump below.
       - name: Confirm the Improv service is linked into the image
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
-          if ! xtensa-esp32-elf-nm build/*.elf | grep -q 'EZPI_ble_service_improv_init'; then
+          xtensa-esp32-elf-nm build/*.elf > improv-symbols.txt
+          if ! grep -q 'EZPI_ble_service_improv_init' improv-symbols.txt; then
             echo "::error::EZPI_ble_service_improv_init is absent from the ELF; the service was not linked in."
+            echo "--- every Improv symbol the image does contain ---"
+            grep -i improv improv-symbols.txt || echo "(none at all)"
             exit 1
           fi
           echo "Improv service linked into the image"
+          grep -i improv improv-symbols.txt
