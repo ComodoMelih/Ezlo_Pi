@@ -1,0 +1,25 @@
+# Base configuration defaults, applied to every target.
+#
+# ESP-IDF picks this file up automatically, then layers
+# sdkconfig.defaults.<IDF_TARGET> on top of it (see
+# tools/cmake/kconfig.cmake). So the whole build is just:
+#
+#     idf.py set-target esp32      # or esp32s2 / esp32s3 / esp32c3
+#     idf.py build
+#
+# The per-target files hold the real settings. This file has to exist even
+# though it is nearly empty: IDF only looks for the .<IDF_TARGET> variants of
+# entries that are already in SDKCONFIG_DEFAULTS, and that list starts out
+# containing this file and nothing else. Delete it and every per-target file is
+# silently ignored, which looks exactly like a build that worked.
+#
+# This replaces the old instruction to copy sdkconfig.<chip>.4mb over
+# `sdkconfig` by hand. That was easy to get wrong -- `sdkconfig` is generated
+# and git-ignored, so a build would quietly rewrite your copy, and switching
+# chips without remembering to re-copy produced a binary for the wrong target.
+#
+# Nothing is set here on purpose. Every option the project actually needs is
+# currently identical across all four targets but is already written out in
+# each per-target file, so hoisting any of it here would only create a second
+# place to look. Add a setting here when it genuinely applies to every target
+# and is not already stated per-target.

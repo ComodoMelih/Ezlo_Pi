@@ -156,11 +156,14 @@ CONFIG_PARTITION_TABLE_MD5=y
 # CONFIG_EZPI_DEV_TYPE_TEST is not set
 CONFIG_EZPI_UTIL_TRACE_EN=y
 CONFIG_EZPI_ENABLE_WIFI=y
-CONFIG_EZPI_ENABLE_OPENTELEMETRY=y
-CONFIG_EZPI_OPENTELEMETRY_CLOUD_ENDPOINT="wss://ot.review-staging-op-owkix8.ewr4.opentelemetry.ezlo.com/multi"
-CONFIG_EZPI_OPENTELEMETRY_ENABLE_LOGS=y
-CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES=y
-CONFIG_EZPI_ENABLE_OTA=y
+# CONFIG_EZPI_ENABLE_OPENTELEMETRY is not set
+# OTA was enabled here and on no other target, which made esp32s2 the only
+# target that failed to build from a clean clone: the OTA code needs
+# ca_mios.h, which is in .gitignore and so is not in the repository at all.
+# Nobody noticed because nobody was building esp32s2. Turned off to match
+# esp32/esp32s3/esp32c3; to re-enable it, supply your own ca_mios.h (see the
+# comment at the top of ezlopi-core/ezlopi-core-ota/ezlopi_core_ota.c).
+# CONFIG_EZPI_ENABLE_OTA is not set
 CONFIG_EZPI_SERV_MDNS_EN=y
 # CONFIG_EZPI_ENABLE_PING is not set
 CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER=y
