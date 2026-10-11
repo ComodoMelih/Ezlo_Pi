@@ -10,6 +10,7 @@
 
 CC      ?= cc
 SANITIZE_DIR := ../../ezlopi-util/ezlopi-util-sanitize
+IMPROV_DIR   := ../../ezlopi-util/ezlopi-util-improv
 CJEXT_DIR    := ../../ezlopi-components/cjext
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
@@ -28,11 +29,12 @@ SANITIZERS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
 CFLAGS  += -std=c99 -O1 -g \
            -Wall -Wextra -Werror \
            -I$(SANITIZE_DIR) \
+           -I$(IMPROV_DIR) \
            $(SANITIZERS)
 LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
-TESTS   := test_sanitize test_cjext
+TESTS   := test_sanitize test_cjext test_improv
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -49,6 +51,14 @@ test: $(BINARIES)
 	echo "HOST TESTS PASSED"
 
 $(BUILD)/test_sanitize: test_sanitize.c $(SANITIZE_DIR)/ezlopi_util_sanitize.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# The Improv codec is the one part of the Improv work that can be tested rather
+# than only linked, because it deliberately depends on nothing but the C
+# library. The frame parser acts on lengths chosen by whoever is on the other
+# end of the wire, so running it under ASan here is worth more than any amount
+# of reading it.
+$(BUILD)/test_improv: test_improv.c $(IMPROV_DIR)/ezlopi_util_improv.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # cjext.c is vendored third-party code, so it is compiled without -Werror and
