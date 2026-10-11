@@ -11,6 +11,7 @@
 CC      ?= cc
 SANITIZE_DIR := ../../ezlopi-util/ezlopi-util-sanitize
 IMPROV_DIR   := ../../ezlopi-util/ezlopi-util-improv
+HA_DIR       := ../../ezlopi-util/ezlopi-util-ha
 CJEXT_DIR    := ../../ezlopi-components/cjext
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
@@ -30,11 +31,12 @@ CFLAGS  += -std=c99 -O1 -g \
            -Wall -Wextra -Werror \
            -I$(SANITIZE_DIR) \
            -I$(IMPROV_DIR) \
+           -I$(HA_DIR) \
            $(SANITIZERS)
 LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
-TESTS   := test_sanitize test_cjext test_improv
+TESTS   := test_sanitize test_cjext test_improv test_ha
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -59,6 +61,14 @@ $(BUILD)/test_sanitize: test_sanitize.c $(SANITIZE_DIR)/ezlopi_util_sanitize.c |
 # end of the wire, so running it under ASan here is worth more than any amount
 # of reading it.
 $(BUILD)/test_improv: test_improv.c $(IMPROV_DIR)/ezlopi_util_improv.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# The Home Assistant mapping is pure lookup, so none of it can be observed from
+# the firmware: a device class Home Assistant rejects produces no error on the
+# device, just an entity that never appears. Here every item name and value
+# type the drivers in ezlopi-sensors-devices actually assign can be swept in a
+# few milliseconds.
+$(BUILD)/test_ha: test_ha.c $(HA_DIR)/ezlopi_util_ha.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # cjext.c is vendored third-party code, so it is compiled without -Werror and
