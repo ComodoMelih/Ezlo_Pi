@@ -3399,7 +3399,19 @@ bool cJSON_IsNull(const cJSON *const item)
 {
     if (item == NULL)
     {
-        return true;
+        /* false, matching upstream cJSON and the other nine type predicates
+         * in this file -- all of which return false for NULL. This one had
+         * been changed locally to return true, which made it the only
+         * predicate where "the node is absent" and "the node is JSON null"
+         * were indistinguishable. Since cJSON_GetObjectItem returns NULL for
+         * a missing member, cJSON_IsNull(cJSON_GetObjectItem(o, "k")) silently
+         * reported "k is null" for an object that never had a "k" at all.
+         *
+         * Behaviour in this tree is unchanged: the only caller is
+         * cjext_utils.c:1343, inside a "while (patch_child != NULL)" loop, so
+         * the NULL path was unreachable. Pinned by
+         * test_type_predicates_are_null_safe in tests/host/test_cjext.c. */
+        return false;
     }
 
     return (item->type & 0xFF) == cJSON_NULL;
