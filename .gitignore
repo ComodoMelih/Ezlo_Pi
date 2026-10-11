@@ -54,6 +54,12 @@ CMakeFiles
 CMakeScripts
 Testing
 Makefile
+# ...but tests/host/Makefile is hand-written and has to be in the repository:
+# the CI host-tests job is just `make -C tests/host`, which fails with "No
+# targets specified and no makefile found" on a fresh clone if this is ignored.
+# The pattern above is unanchored, so it matched at every depth. CMake's own
+# generated Makefiles live under build/, which `**/build/` already excludes.
+!tests/host/Makefile
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
@@ -77,6 +83,10 @@ kconfigs.in
 
 # Local History for Visual Studio Code
 **/.history/
+
+# Editor atomic-save leftovers, e.g. foo.c.tmp.35344.1791671076416
+**/*.tmp.*
+**/*.tmp
 
 **/shell_script/
 
