@@ -12,8 +12,13 @@ set(EZLOPI_CORE_COMPONENTS
         # ezlopi-user-config
 )
 
+set(EZLOPI_UTIL_COMPONENTS
+        ezlopi-util-sanitize
+)
+
 
 idf_component_register(SRCS "ezlopi_service_ble.c" "ezlopi_service_ble_security.c" "ezlopi_service_ble_dynamic_config.c" "ezlopi_service_ble_device_info.c" "ezlopi_service_ble_provisioning.c" "ezlopi_service_ble_wifi.c" "ezlopi_service_ble_ble_auth.c" "${src_files}"
     INCLUDE_DIRS "."
     REQUIRES    ${EZLOPI_CORE_COMPONENTS}
+                ${EZLOPI_UTIL_COMPONENTS}
     )

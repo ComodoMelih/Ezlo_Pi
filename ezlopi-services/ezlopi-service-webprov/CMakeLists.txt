@@ -2,6 +2,7 @@ file(GLOB_RECURSE provisioning_src "*.c*")
 
 set(EZLOPI_UTIL_COMPONENTS
         ezlopi-util-trace
+        ezlopi-util-sanitize
 )
 set(EZLOPI_CORE_COMPONENTS
         ezlopi-core-api

@@ -19,6 +19,9 @@ set(EZLOPI_CORE_COMPONENTS
 set(EZLOPI_HAL_COMPONENTS
         ezlopi-hal-sysinfo
 )
+set(EZLOPI_UTIL_COMPONENTS
+        ezlopi-util-sanitize
+)
 set(EZLOPI_CLOUD_COMPONENTS
         ezlopi-cloud-info
 )
@@ -33,4 +36,5 @@ idf_component_register(SRCS "ezlopi_service_uart.c" "${src_files}"
                 ${EZLOPI_HAL_COMPONENTS}
                 ${EZLOPI_CLOUD_COMPONENTS}
                 ${EZLOPI_SERVICE_COMPONENTS}
+                ${EZLOPI_UTIL_COMPONENTS}
 )

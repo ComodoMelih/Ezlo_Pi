@@ -3,6 +3,10 @@ file(GLOB_RECURSE config_src "*.c")
 set(EZLOPI_IDF_COMPONENTS
 )
 
+set(EZLOPI_UTIL_COMPONENTS
+        ezlopi-util-sanitize
+)
+
 set(EZLOPI_CORE_COMPONENTS 
         ezlopi-core-nvs
         ezlopi-core-cloud 
@@ -100,6 +104,7 @@ set(EZLOPI_SENSOR_DEVICE_COMPONENTS
 idf_component_register(SRCS "ezlopi_core_devices_list.c" "ezlopi_core_device_group.c" "ezlopi_core_devices.c" "ezlopi_core_device_value_updated.c" "${config_src}"
                         INCLUDE_DIRS "."
                         REQUIRES        ${EZLOPI_IDF_COMPONENTS}
+                                        ${EZLOPI_UTIL_COMPONENTS}
                                         ${EZLOPI_CORE_COMPONENTS}
                                         ${EZLOPI_HAL_COMPONENTS}
                                         ${EZLOPI_CLOUD_COMPONENTS}

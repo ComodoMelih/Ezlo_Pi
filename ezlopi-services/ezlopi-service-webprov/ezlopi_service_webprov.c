@@ -49,6 +49,7 @@
 #include <freertos/queue.h>
 
 #include "ezlopi_util_trace.h"
+#include "ezlopi_util_sanitize.h"
 #include "ezlopi_cloud_constants.h"
 
 #include "ezlopi_core_api.h"
@@ -432,6 +433,13 @@ static int __send_cjson_data_to_nma_websocket(cJSON *cj_data)
             {
                 // trace_warning("data-buffer: %s", data_buffer);
                 ret = __send_str_data_to_nma_websocket(data_buffer);
+
+                /* Deliberately after the send: the cloud gets the untouched
+                 * payload, only the trace copy is masked. hub.network.get
+                 * reports the Wi-Fi PSK as "key" (ezlopi_cloud_network.c) and
+                 * the trace below dumps every outgoing payload verbatim, which
+                 * is how the plaintext PSK reached the serial console. */
+                EZPI_util_redact_secrets_in_place(data_buffer);
 
                 if (EZPI_SUCCESS == ret)
                 {

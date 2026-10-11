@@ -42,6 +42,8 @@
 
 #include <ctype.h>
 
+#include "ezlopi_util_sanitize.h"
+
 #include "ezlopi_core_factory_info.h"
 #include "ezlopi_core_cjson_macros.h"
 #include "ezlopi_core_errors.h"
@@ -801,8 +803,13 @@ static ezlopi_error_t ezlopi_device_parse_json_v3(cJSON *cjson_config)
         {
             if (cJSON_IsString(cjson_chipset) && (cjson_chipset->valuestring != NULL))
             {
-                char chipset_name[10];
-                strncpy(chipset_name, cjson_chipset->valuestring, cjson_chipset->str_value_len);
+                /* The config this parses is written over BLE (0xE501) or UART,
+                 * so str_value_len is attacker-controlled: a chipset string of
+                 * 10 bytes or more overflowed this stack buffer, and an
+                 * exactly-10-byte one left it unterminated for the strncmp
+                 * below. Clamp, and always terminate. */
+                char chipset_name[16];
+                EZPI_util_copy_str_bounded(chipset_name, sizeof(chipset_name), cjson_chipset->valuestring, cjson_chipset->str_value_len);
 
 #if defined(CONFIG_IDF_TARGET_ESP32)
                 uint32_t compare_len = strlen(ezlopi_ESP32_str) > cjson_chipset->str_value_len ? strlen(ezlopi_ESP32_str) : cjson_chipset->str_value_len;
