@@ -130,6 +130,40 @@ jobs:
           grep -q '^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=' sdkconfig
           echo "configuration inherited from sdkconfig.defaults.${{ matrix.target }}"
 
+      # A flashable install is four images at four offsets: bootloader,
+      # partition table, OTA data, application. The artifact below uploads
+      # "build/*.bin", which is a non-recursive glob -- it matched the
+      # application and ota_data_initial.bin and missed
+      # build/bootloader/bootloader.bin and
+      # build/partition_table/partition-table.bin, both of which are in
+      # subdirectories. So the artifact could update a board already running
+      # EzloPi but could not bring up a blank one, and nothing said so.
+      #
+      # Merging also produces the only form ESP Web Tools accepts for an
+      # ESP-IDF v4 project: one image written at offset 0. See install/.
+      #
+      # The offsets are not written here. esptool reads them from
+      # build/flash_args, which the build itself generated, so this step cannot
+      # drift from the partition table -- and it has to not drift, because the
+      # bootloader is at 0x1000 on esp32 and esp32s2 but at 0x0 on esp32s3 and
+      # esp32c3.
+      - name: Merge the flashable image
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          cd build
+          esptool.py --chip ${{ matrix.target }} merge_bin \
+            -o merged-firmware.bin @flash_args
+
+      # "esptool exited 0" is not evidence. esptool is being asked to copy
+      # bytes to offsets, and the mistakes worth catching -- a wrong offset, a
+      # missing input -- are both successful esptool runs. This asserts every
+      # listed image is byte-identical inside the merged file at its own
+      # offset.
+      - name: Verify the merged image
+        shell: bash
+        run: python3 tests/ci/check_merged_bin.py build
+
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.target }}
@@ -137,6 +171,9 @@ jobs:
             build/*.bin
             build/*.elf
             build/*.map
+            build/flash_args
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
             sdkconfig
           if-no-files-found: error
 
@@ -288,3 +325,103 @@ jobs:
           fi
           echo "Improv service linked into the image"
           grep -i improv improv-symbols.txt
+
+  # Assembles install/ into a publishable directory: the static page plus the
+  # merged image from each of the four firmware builds. See install/README.md.
+  #
+  # This job runs on every push and pull request even though publishing does
+  # not, because the things that break an install page are all silent. A
+  # manifest pointing at a path that does not exist still renders a working
+  # button; it fails only once a user has plugged a board in and clicked it. A
+  # chipFamily typo means that chip is simply never offered a build. Checking it
+  # on every push is the only way those surface before a user hits them.
+  #
+  # It reuses the artifacts the firmware matrix already uploaded rather than
+  # rebuilding, so the published images are the same bytes CI tested.
+  install-page:
+    name: Browser install page
+    needs: firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: firmware-*
+          path: artifacts
+
+      - name: Assemble the page
+        shell: bash
+        run: |
+          mkdir -p site
+          cp install/index.html install/manifest.json site/
+
+          # The image is located by name rather than by an assumed path.
+          # upload-artifact roots an artifact at the least common ancestor of
+          # the files it was given, so the layout inside depends on the other
+          # paths in that upload list -- adding or removing one silently moves
+          # everything. Searching cannot drift that way.
+          for target in esp32 esp32s2 esp32s3 esp32c3; do
+            src=$(find "artifacts/firmware-$target" -name merged-firmware.bin -print -quit 2>/dev/null || true)
+            if [ -z "$src" ]; then
+              echo "::error::no merged-firmware.bin in the firmware-$target artifact"
+              echo "--- what that artifact does contain ---"
+              find "artifacts/firmware-$target" -type f 2>/dev/null || echo "(no such artifact)"
+              exit 1
+            fi
+            mkdir -p "site/$target"
+            cp "$src" "site/$target/merged-firmware.bin"
+            echo "$target <- $src"
+          done
+
+          # Stamp the commit over the committed placeholder, so the page and
+          # the manifest name the source they were built from. The checker
+          # below refuses to publish a page where this did not happen.
+          version="${GITHUB_SHA:0:7}"
+          sed -i "s/__VERSION__/$version/g" site/manifest.json site/index.html
+          echo "stamped version $version"
+
+      - name: Verify the page before it can be published
+        shell: bash
+        run: python3 tests/ci/check_install_page.py site
+
+      # Available on every run, so a maintainer can download and serve it over
+      # localhost to see exactly what would be published.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: install-page
+          path: site
+          if-no-files-found: error
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # Publishing is opt-in and off until a maintainer turns it on, for two
+  # reasons: deploying needs repository settings a pull request cannot change,
+  # and a job that goes red on master purely because Pages was never enabled
+  # would be worse than having no page. The job above still builds and checks
+  # the page on every push regardless, so nothing rots while this is off.
+  #
+  # To enable: set Settings -> Pages -> Source to "GitHub Actions", then add an
+  # Actions variable PUBLISH_INSTALL_PAGE = true. An unset variable evaluates to
+  # the empty string, so until both are done this job is skipped.
+  deploy-install-page:
+    name: Publish the install page
+    needs: install-page
+    # Folded (>-) rather than literal (|) so the expression reaches the
+    # evaluator as one line.
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/master' &&
+      vars.PUBLISH_INSTALL_PAGE == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

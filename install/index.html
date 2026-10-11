@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<!--
+  Browser install page for EzloPi. See README.md in this directory for why it
+  exists, how it is published, and what it deliberately does not do yet.
+
+  Deliberately a single static file with no build step: it is served from
+  GitHub Pages and has to keep working without anyone maintaining a toolchain
+  for it. The only external dependency is the ESP Web Tools custom element,
+  pinned to a major version so an upstream release cannot change the behaviour
+  of this page overnight.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Install EzloPi</title>
+    <meta
+      name="description"
+      content="Flash EzloPi firmware to an ESP32 board from your browser over USB."
+    />
+    <script
+      type="module"
+      src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"
+    ></script>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1a1a1a;
+        --muted: #595959;
+        --bg: #ffffff;
+        --line: #e0e0e0;
+        --warn-bg: #fff8e1;
+        --warn-line: #e6c000;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e8e8e8;
+          --muted: #a8a8a8;
+          --bg: #161616;
+          --line: #333333;
+          --warn-bg: #2a2410;
+          --warn-line: #7a6a00;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0 auto;
+        padding: 2.5rem 1.25rem 4rem;
+        max-width: 44rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+      }
+      h1 { font-size: 1.9rem; margin: 0 0 .25rem; }
+      h2 { font-size: 1.15rem; margin: 2.25rem 0 .5rem; }
+      .lede { color: var(--muted); margin: 0 0 2rem; }
+      a { color: inherit; }
+      .cta {
+        padding: 1.5rem;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        text-align: center;
+      }
+      .cta p { margin: .75rem 0 0; color: var(--muted); font-size: .9rem; }
+      .note {
+        background: var(--warn-bg);
+        border-left: 3px solid var(--warn-line);
+        padding: .85rem 1rem;
+        margin: 1rem 0;
+        border-radius: 0 6px 6px 0;
+      }
+      table { border-collapse: collapse; width: 100%; margin: .5rem 0 0; }
+      th, td {
+        text-align: left;
+        padding: .5rem .6rem;
+        border-bottom: 1px solid var(--line);
+        font-size: .95rem;
+      }
+      th { font-weight: 600; }
+      td.no { font-weight: 600; }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: .9em;
+      }
+      ol, ul { padding-left: 1.3rem; }
+      li { margin: .3rem 0; }
+      footer {
+        margin-top: 3rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: .85rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Install EzloPi</h1>
+    <p class="lede">
+      Flash an ESP32 board from this page over USB. No toolchain, no esptool, no
+      Python.
+    </p>
+
+    <div class="cta">
+      <esp-web-install-button manifest="manifest.json">
+        <span slot="unsupported">
+          This browser cannot talk to serial devices. Use Chrome, Edge or Opera
+          on a desktop — Safari and Firefox do not implement the Web Serial
+          API, and no mobile browser does.
+        </span>
+        <span slot="not-allowed">
+          This page has to be served over HTTPS (or from
+          <code>localhost</code>) before the browser will allow serial access.
+        </span>
+      </esp-web-install-button>
+      <p>
+        Plug the board in first. The browser will ask you which serial port to
+        use — that permission is per-site and you can revoke it at any time.
+      </p>
+    </div>
+
+    <div class="note">
+      <strong>A 4&nbsp;MB flash part is assumed on every target.</strong> The
+      partition table allocates two roughly 2&nbsp;MB application slots and
+      cannot be shrunk. On a 2&nbsp;MB board the flash will fail outright or
+      the device will not boot.
+    </div>
+
+    <h2>Which chips this works on</h2>
+    <p>
+      The chip identifies itself over serial, so there is one button rather than
+      four and the right image is chosen for you. What has actually been
+      <em>tried</em> differs by chip, and that is worth knowing before you
+      flash:
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Target</th>
+          <th>Builds in CI</th>
+          <th>Flashed and booted by a human</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>ESP32</td><td>yes</td><td>yes</td></tr>
+        <tr><td>ESP32-S2</td><td>yes</td><td class="no">no</td></tr>
+        <tr><td>ESP32-S3</td><td>yes</td><td class="no">no</td></tr>
+        <tr><td>ESP32-C3</td><td>yes</td><td class="no">no</td></tr>
+      </tbody>
+    </table>
+    <p class="lede" style="margin-top: .75rem">
+      For three of the four, all that has been demonstrated is that the firmware
+      links and the image is well formed. Treat those as untested rather than
+      broken — and please report what happens if you try one.
+    </p>
+
+    <h2>After flashing</h2>
+    <p>
+      This page does not set up Wi-Fi yet. ESP Web Tools does that over Improv
+      <em>Serial</em>, and the firmware currently speaks Improv over
+      <em>Bluetooth</em> only, so the install finishes and hands you straight
+      back. Set the board up by:
+    </p>
+    <ol>
+      <li>the EzloPi mobile app, which provisions over Bluetooth; or</li>
+      <li>
+        the serial console at 115200 baud, which prints the boot log and the
+        device identity.
+      </li>
+    </ol>
+    <p>
+      In-browser Wi-Fi setup arrives with the Improv Serial transport. At that
+      point this page gains it with no change other than removing one line from
+      the manifest.
+    </p>
+
+    <h2>What this is not</h2>
+    <p>
+      <a href="https://config.ezlopi.com/">config.ezlopi.com</a> is the hosted
+      configurator: it flashes a binary Ezlo maintains and then walks you
+      through describing your wiring. For most people that is the better
+      starting point and this page does not replace it.
+    </p>
+    <p>
+      This page flashes the binaries built by CI from a specific commit of the
+      source tree, which is what you want if you are running a fork, a patched
+      tree, or one of the three targets the hosted configurator does not offer.
+    </p>
+
+    <footer>
+      Built from
+      <a
+        href="https://github.com/ezloteam/Ezlo_Pi"
+        >ezloteam/Ezlo_Pi</a
+      >
+      at <code>__VERSION__</code>. Nothing is uploaded anywhere: the image is
+      fetched from this page's own origin and written straight to the board by
+      your browser.
+    </footer>
+  </body>
+</html>

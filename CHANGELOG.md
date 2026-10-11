@@ -11,6 +11,7 @@ Severity markers:
 
 - **[sec]** — reachable from an unauthenticated BLE or UART client.
 - **[bug]** — incorrect behaviour, not a security issue.
+- **[feat]** — new capability. Off by default unless an entry says otherwise.
 - **[infra]** — build, test, packaging or documentation.
 
 ---
@@ -210,6 +211,51 @@ failure.
   generated config directory on every component's include path, so this is now
   just `#include "sdkconfig.h"`.
 
+### Provisioning — [feat]
+
+- **Improv Wi-Fi over BLE, as an opt-in sixth GATT service.** Guarded by
+  `CONFIG_EZPI_BLE_ENABLE_IMPROV`, which is `default n`: with it off, not one
+  line of the new code is compiled and the advertisement is byte-identical to
+  upstream's. Verified by building both ways — the feature costs 2,576 bytes
+  when on, and `origin/master`'s advertisement struct was diffed field by field
+  against the one this tree emits with the feature off.
+
+  [Improv](https://www.improv-wifi.com/) is the protocol Home Assistant and ESP
+  Web Tools speak, so a board can be put on Wi-Fi by a generic client instead of
+  only by the Ezlo mobile app. The Ezlo path is untouched: the service is added
+  *after* the existing five, so every handle the app relies on keeps the value
+  it has always had.
+
+  Provisioning is refused unless the hub is unclaimed, re-checked at the moment
+  credentials arrive rather than only when the client connects. RPC frames are
+  length- and checksum-validated before any byte of them is indexed, and the
+  passphrase is logged by length only.
+
+  Only the mandatory `0x01` (send Wi-Fi) command is implemented, and the
+  capability bits advertise exactly that, so a conforming client never offers
+  the optional commands and `UNKNOWN_RPC` is the correct answer to them.
+
+- **The advertisement budget is now a build error rather than a silent
+  truncation.** Improv's advertisement has to carry a 128-bit service UUID *and*
+  6 bytes of service data, which together with the flags element comes to
+  exactly 31 bytes — the whole legacy payload, with nothing spare.
+
+  Nothing in the stack reports an overflow. `esp_ble_gap_config_adv_data()`
+  returns `ESP_OK` either way, and `btm_ble_build_adv_data()` guards each element
+  with a length test and simply stops emitting when it runs out of room. Service
+  data is emitted last, so it is the first thing lost. The symptom on a device is
+  "Improv clients do not offer provisioning", with nothing in the log.
+
+  So there is a `_Static_assert` on the payload size, and a runtime check for
+  the fields whose sizes are not constant expressions (device name, TX power,
+  the interval pair, manufacturer data). The assert was mutation-tested: growing
+  the service data by one byte makes the build fail with the intended message.
+  Enabling the interval pair *and* Improv would need 37 bytes, which is why the
+  Improv advertisement serves the device name from the scan response instead.
+
+  Neither check can run unless something compiles this configuration, hence the
+  `firmware-improv` CI job below.
+
 ### Build and configuration — [infra]
 
 - **Switching chips no longer requires copying a file by hand.** The four
@@ -285,13 +331,51 @@ failure.
   evidence of nothing.
 
 - **New CI workflow, [`.github/workflows/ci.yml`](.github/workflows/ci.yml).**
-  Nothing in this repository was checked automatically before. Three jobs:
+  Nothing in this repository was checked automatically before.
 
   | Job | What it does |
   | --- | --- |
   | `host-tests` | `make -C tests/host` under ASan + UBSan |
-  | `hygiene` | no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present |
-  | `firmware` | builds all four targets in `espressif/idf:v4.4.6`, asserts the generated config was actually inherited from the per-target defaults, uploads `bin`/`elf`/`map`/`sdkconfig` |
+  | `hygiene` | no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised |
+  | `firmware` | builds all four targets in `espressif/idf:v4.4.6`, asserts the generated config was actually inherited from the per-target defaults, merges and verifies a flashable image, uploads `bin`/`elf`/`map`/`sdkconfig` |
+  | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled |
+  | `firmware-improv` | builds esp32 with `CONFIG_EZPI_BLE_ENABLE_IMPROV=y` and asserts both that the symbol got enabled and that the service is in the ELF |
+  | `install-page` | assembles and verifies [`install/`](install/) from the firmware artifacts |
+  | `deploy-install-page` | publishes it, once a maintainer opts in |
+
+- **Two jobs exist only to compile code the other builds skip.**
+  `ezlopi_core_ota.c` is wrapped in `#ifdef CONFIG_EZPI_ENABLE_OTA`, and the
+  Improv service and advertisement sit behind `CONFIG_EZPI_BLE_ENABLE_IMPROV`.
+  Neither symbol is set in any committed `sdkconfig.defaults.*`, so the four
+  target builds compile *none* of either and a green run said nothing about
+  them. Each job turns one feature on for one target.
+
+  Both assert afterwards that the symbol was actually enabled, because the
+  first attempt at this used `-DSDKCONFIG_DEFAULTS`, which builds perfectly and
+  leaves the symbol unset — the job passed while compiling exactly as little as
+  the others. The config fragment is now appended to the per-target defaults
+  file, the same mechanism the four firmware jobs already use, so it cannot
+  diverge from them.
+
+  `firmware-improv` goes one step further and greps the ELF for
+  `EZPI_ble_service_improv_init`. A set Kconfig symbol only proves the
+  configuration took; the symbol proves the file behind it was compiled and
+  linked rather than preprocessed away to nothing, which is precisely how the
+  whole of `ezlopi_core_ota.c` used to escape CI.
+
+- **That ELF check then failed on its own `SIGPIPE`, which is worth recording.**
+  `shell: bash` makes Actions run a step as
+  `bash --noprofile --norc -eo pipefail`. Under `pipefail`,
+  `nm build/*.elf | grep -q <symbol>` reports *failure on success*: `nm` sorts
+  by symbol name, so the match is found almost immediately, `grep -q` exits at
+  once, and `nm` dies writing the other ~13,800 symbols into a closed pipe.
+  `pipefail` takes that 141 as the pipeline's status.
+
+  Reproduced against the real ELF — exit 141 with `pipefail`, 0 without — which
+  is also why the same check passed when run by hand. The symbol table is now
+  written to a file first. The rewritten step was re-run under the same shell
+  flags and confirmed to exit 0 for the real symbol and 1 for a deliberately
+  misspelled one, so it is known to be able to fail and not merely to pass.
 
   All four hygiene checks were tested both ways — each was confirmed to fail
   when its regression is reintroduced, not merely to pass today.
@@ -306,6 +390,84 @@ failure.
   being built by anyone routinely, so target-specific breakage could sit in the
   tree indefinitely. `fail-fast` is off so one chip failing does not hide the
   state of the other three.
+
+### Packaging — [infra]
+
+- **The uploaded firmware artifacts could not flash a blank board.** The
+  firmware jobs uploaded `build/*.bin`, a *non-recursive* glob. It matched the
+  application image and `ota_data_initial.bin`, and silently missed
+  `build/bootloader/bootloader.bin` and
+  `build/partition_table/partition-table.bin`, because both live in
+  subdirectories. The artifact was therefore enough to update a board already
+  running EzloPi and not enough to bring up a new one — and nothing anywhere
+  said so, because a partial set of images is not an error until someone tries
+  to flash it.
+
+  CI now also runs `esptool.py merge_bin` and publishes one
+  `merged-firmware.bin` per target, written at offset 0.
+
+  The offsets are not restated anywhere. `esptool` reads them from
+  `build/flash_args`, which the build generates, so the merge cannot drift from
+  the partition table — and it must not, because the bootloader is at `0x1000`
+  on ESP32 and ESP32-S2 but at `0x0` on ESP32-S3 and ESP32-C3. A merge step
+  with offsets written into it would have quietly produced an unbootable image
+  for half the targets.
+
+- **New check, [`tests/ci/check_merged_bin.py`](tests/ci/check_merged_bin.py).**
+  `esptool` exiting 0 is not evidence here: it is being asked to copy bytes to
+  offsets, and the mistakes worth catching — a wrong offset, a missing input —
+  are both *successful* `esptool` runs. The check asserts every image listed in
+  `flash_args` is byte-identical inside the merged file at its own offset, and
+  that the merged file ends exactly where the last one does, which is what
+  catches a dropped trailing image.
+
+  Tested both ways against a real build: it passes on a correct merge and fails
+  on a single flipped byte, on one appended byte, on truncation, and on a
+  missing file.
+
+- **New browser install page, [`install/`](install/).** A static page driven by
+  [ESP Web Tools](https://esphome.github.io/esp-web-tools/): open it in Chrome
+  or Edge, plug a board in over USB, press one button. No ESP-IDF, no esptool,
+  no Python. The chip identifies itself over serial, so one button covers all
+  four targets. It is the merged image above that makes this possible — ESP Web
+  Tools will not accept a set of separate images for an ESP-IDF v4 project.
+
+  The page states per target whether anyone has actually flashed and booted it,
+  because for three of the four the honest answer is no, and that belongs where
+  someone about to flash will see it rather than only in a README.
+
+  It deliberately sets `"new_install_improv_wait_time": 0`. ESP Web Tools
+  provisions Wi-Fi over Improv **Serial**, and this firmware implements Improv
+  over **BLE** only — same protocol, different transport, not interchangeable.
+  The default behaviour would be to wait 10 seconds after flashing for a reply
+  that cannot come. Removing that one line is all the page needs once Improv
+  Serial exists.
+
+- **New check,
+  [`tests/ci/check_install_page.py`](tests/ci/check_install_page.py).** Every
+  way this page can break is silent. A manifest pointing at a path that does
+  not exist still renders a working-looking button, and fails only once a user
+  has plugged in a board and clicked it. A `chipFamily` typo means that chip is
+  never offered a build and its owner is told the board is unsupported. So the
+  check refuses to publish unless every advertised image exists, carries an ESP
+  image magic byte, is flashed at offset 0, and has a `chipFamily` matching the
+  build directory it came from; it also rejects an image that *no* build
+  references, which is what would happen if a target were added to the CI
+  matrix and not to the manifest.
+
+  Tested both ways: it passes on a correctly assembled page and fails on a
+  missing image, a mismatched `chipFamily`, a duplicate `chipFamily`, an
+  unreferenced image, a non-image file, and an unstamped version placeholder.
+  The CI step that assembles the page was itself tested by extracting the
+  `run` body out of the workflow and executing it against simulated artifacts,
+  rather than against a retyped copy of it.
+
+- **Publishing is opt-in and off.** Deploying to GitHub Pages needs repository
+  settings that a pull request cannot change, and a job that goes red on
+  `master` purely because Pages was never enabled would be worse than no page.
+  The page is assembled and checked on every push regardless, so it cannot rot
+  while this is off. Enabling it is two steps, both in
+  [`install/README.md`](install/README.md).
 
 ### Documentation — [infra]
 

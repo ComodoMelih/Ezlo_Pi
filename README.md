@@ -79,6 +79,15 @@ binary over USB from the browser and walks through describing your wiring.
 
 ![EzloPi web configurator](ezlopi-doc/ezlopi_web_flasher.png)
 
+To flash **this tree's** binaries instead — if you are running a fork, a
+patched checkout, or one of the three targets the hosted configurator does not
+offer — there is a browser install page in [`install/`](install/). CI builds and
+checks it on every push; publishing it is
+[two settings a maintainer has to turn on](install/README.md#publishing-it).
+Every CI run also attaches a ready-to-flash `merged-firmware.bin` per target to
+its `firmware-<target>` artifact, which `esptool.py write_flash 0x0
+merged-firmware.bin` will take directly.
+
 Worked examples live at [ezlopi.com/examples](https://www.ezlopi.com/examples/):
 
 1. [AC lamp with a relay](https://www.ezlopi.com/examples/relay-circuitry-and-lamp-circuit-setup/)
