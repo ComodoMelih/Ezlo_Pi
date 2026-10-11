@@ -39,9 +39,35 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
-#include "../../build/config/sdkconfig.h"
+/* ESP-IDF puts the generated config directory on every component's include
+ * path, so the plain name is correct here. The previous
+ * "../../build/config/sdkconfig.h" hard-coded both the build directory name
+ * and its position relative to this file, so it broke for any build directory
+ * other than <project>/build -- including `idf.py -B <dir>` and the
+ * out-of-tree builds CI runs. */
+#include "sdkconfig.h"
 
 #ifdef CONFIG_EZPI_ENABLE_OTA
+
+/* The CA chain for the OTA host is NOT in this repository: ca_mios.h is listed
+ * in .gitignore, so a clean clone does not have it. Enabling OTA therefore
+ * requires you to supply your own ca_mios.h defining:
+ *
+ *     static const char ca_mios[] = "-----BEGIN CERTIFICATE-----\n...";
+ *
+ * Without this guard the build failed with "ca_mios.h: No such file or
+ * directory" pointing at a line in the middle of a function body, which gives
+ * no hint that a file is expected to be supplied by hand. */
+#if defined(__has_include)
+#if !__has_include("ca_mios.h")
+#error "CONFIG_EZPI_ENABLE_OTA is enabled but ezlopi-core-ota/ca_mios.h is missing. That header holds the CA chain for the OTA server and is deliberately not in this repository (see .gitignore); supply your own, or disable OTA in sdkconfig.defaults.<target>."
+#endif
+#endif
+
+/* Was included inside ezlopi_ota_process()'s body, between statements. It
+ * defines a variable, so at block scope it became a per-call local; at file
+ * scope, where an include belongs, it is static storage as intended. */
+#include "ca_mios.h"
 
 #include <string.h>
 #include <sys/socket.h>
@@ -160,7 +186,8 @@ static void ezlopi_ota_process(void *pv)
     TRACE_S("Bind interface name is %s", ifr.ifr_name);
 #endif
 
-#include "ca_mios.h"
+    /* ca_mios.h is now included at the top of this file, with the other
+     * includes, rather than here in the middle of a function body. */
     esp_http_client_config_t config = {
         .url = url,
         .event_handler = _http_event_handler,
