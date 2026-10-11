@@ -134,6 +134,16 @@ int ezlopi_service_otel_add_trace_to_telemetry_queue(s_otel_trace_t *trace_obj)
 
 void ezlopi_service_otel_init(void)
 {
+    /* __otel_task retries EZPI_core_websocket_client_init in an uncapped loop,
+     * so with no endpoint configured it would reconnect-fail forever and fill
+     * the console. Open-telemetry is opt-in and has no default URL, so simply
+     * do not start the service unless one was supplied. */
+    if ((NULL == __ot_logs_endpoint) || ('\0' == __ot_logs_endpoint[0]))
+    {
+        TRACE_W("Open-telemetry is enabled but no endpoint is configured, skipping otel-service.");
+        return;
+    }
+
     bootloader_random_enable();
 #ifdef CONFIG_EZPI_OPENTELEMETRY_ENABLE_LOGS
     ezlopi_util_set_otel_log_upcall(__otel_add_log_to_queue, 100);

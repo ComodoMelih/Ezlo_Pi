@@ -63,9 +63,15 @@ menu "EzloPi User Config"
         config EZPI_OPENTELEMETRY_CLOUD_ENDPOINT
             depends on EZPI_ENABLE_OPENTELEMETRY
             string "Cloud URL"
-            default "wss://ot.review-staging-op-owkix8.ewr4.opentelemetry.ezlo.com/multi"
+            default ""
             help
-                Enter the websocket cloud url. Both logs and trace are sent on same ulr.
+                Websocket URL that Open-telemetry logs and traces are sent to.
+                Both logs and traces go to the same URL.
+
+                There is deliberately no default: if you enable Open-telemetry
+                you must supply your own collector endpoint. This used to default
+                to an Ezlo internal review-staging host, which meant every build
+                shipped pointing at a server nobody outside Ezlo can reach.
         
 
         config EZPI_OPENTELEMETRY_ENABLE_LOGS
