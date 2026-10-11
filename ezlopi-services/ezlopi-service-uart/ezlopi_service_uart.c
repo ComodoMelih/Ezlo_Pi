@@ -49,6 +49,8 @@
 #include "tusb_cdc_acm.h"
 #endif // NOT defined CONFIG_IDF_TARGET_ESP32 or CONFIG_IDF_TARGET_ESP32C3
 
+#include <string.h>
+
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
@@ -60,6 +62,7 @@
 #include "cjext.h"
 #include "ezlopi_util_trace.h"
 #include "ezlopi_util_version.h"
+#include "ezlopi_util_sanitize.h"
 
 #include "ezlopi_hal_uart.h"
 #include "ezlopi_hal_system_info.h"
@@ -177,6 +180,13 @@ static ezlopi_error_t ezpi_service_uart_process_provisioning_api(const cJSON *cj
  * @return int
  */
 static int ezpi_service_uart_parser(const char *data);
+/**
+ * @brief Dispatch a single, complete JSON command object.
+ *
+ * @param data NUL-terminated text holding exactly one JSON object
+ * @return int
+ */
+static int ezpi_service_uart_dispatch_one(const char *data);
 /**
  * @brief Function to add firmware information to the cj_parent JSON
  *
@@ -375,7 +385,11 @@ static int ezpi_service_uart_reset(cJSON *cj_root)
             break;
         }
         }
-        cJSON_Delete(__FUNCTION__, cj_sub_cmd);
+        /* cj_sub_cmd was borrowed from cj_root via cJSON_GetObjectItem, so it is
+         * still linked into that tree. Deleting it here left cj_root holding a
+         * freed child, and the caller then deletes cj_root -- a double free.
+         * The two handled sub_cmds reboot before reaching this point, which is
+         * why it went unnoticed; any other sub_cmd hit it. */
     }
 
     return ret;
@@ -693,6 +707,69 @@ static void ezpi_service_uart_task(void *arg)
 }
 
 static int ezpi_service_uart_parser(const char *data)
+{
+    int ret = 0;
+    const char *at = data;
+
+    if (NULL == data)
+    {
+        return 0;
+    }
+
+    /* The UART task hands over everything that accumulated in the driver's RX
+     * buffer, so two commands sent back to back arrive as a single buffer, e.g.
+     * {"cmd":4}{"cmd":3,...}. cJSON_Parse stops after the first value and still
+     * reports success, so every command after the first was silently dropped --
+     * no error to the sender, nothing in the log. Walk the buffer instead and
+     * dispatch each object in turn. */
+    while ('\0' != *at)
+    {
+        const char *end = NULL;
+        uint32_t len = 0;
+        char *one = NULL;
+
+        /* Whitespace, and any separator a sender may have put between objects. */
+        while (('\0' != *at) && (NULL != strchr(" \t\r\n,;", *at)))
+        {
+            at++;
+        }
+
+        if ('\0' == *at)
+        {
+            break;
+        }
+
+        end = EZPI_util_json_value_end(at);
+        if (NULL == end)
+        {
+            TRACE_E("Failed to parse json!");
+            TRACE_OTEL(ENUM_EZLOPI_TRACE_SEVERITY_ERROR, "UART: Failed to parse json!.");
+            break;
+        }
+
+        len = (uint32_t)(end - at);
+        one = (char *)ezlopi_malloc(__FUNCTION__, len + 1);
+        if (NULL == one)
+        {
+            TRACE_E("Out of memory handling UART command.");
+            break;
+        }
+
+        memcpy(one, at, len);
+        one[len] = '\0';
+
+        /* Several handlers re-parse the raw text themselves, so each must be
+         * given only its own object rather than the whole buffer. */
+        ret = ezpi_service_uart_dispatch_one(one);
+
+        ezlopi_free(__FUNCTION__, one);
+        at = end;
+    }
+
+    return ret;
+}
+
+static int ezpi_service_uart_dispatch_one(const char *data)
 {
     cJSON *cj_root = cJSON_Parse(__FUNCTION__, data);
 
