@@ -149,12 +149,6 @@ menu "EzloPi User Config"
         help
             Enable indicator LED available in the device
 
-    config EZPI_ENABLE_CAPTIVE_PORTAL
-        bool "Enable captive portal"
-        default n
-        help
-            Enable captive portal in EzloPi firmware
-
     config EZPI_ENABLE_SYSTEM_TEMPERATURE
         depends on IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32S2
         bool "Enable system temperature monitoring uisng inbuilt temperature sensor"
