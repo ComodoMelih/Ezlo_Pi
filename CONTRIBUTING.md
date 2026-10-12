@@ -63,21 +63,47 @@ can let CI tell you — but running it locally is faster.
 make -C tests/host
 ```
 
-This needs only a C compiler. It compiles the untrusted-input helpers in
-[`ezlopi-util/ezlopi-util-sanitize`](ezlopi-util/ezlopi-util-sanitize/) with
-`-Wall -Wextra -Werror` under AddressSanitizer and UndefinedBehaviorSanitizer
-and runs the assertions in [`tests/host/`](tests/host/). It should end with:
+This needs only a C compiler. It compiles the real firmware sources — no copies
+— for five areas that handle untrusted input: the helpers in
+[`ezlopi-util/ezlopi-util-sanitize`](ezlopi-util/ezlopi-util-sanitize/), the
+vendored cJSON extensions, the Improv state machine, the Home Assistant
+discovery builder and the ZE08-CH2O frame parser. Everything is built under
+AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
+-Werror` except where [`tests/host/Makefile`](tests/host/Makefile) documents a
+scoped exemption for vendored or third-party code. Then it runs the assertions
+in [`tests/host/`](tests/host/). It should end with:
 
 ```
+=== build/test_sanitize ===
 72 check(s), 0 failure(s)
+=== build/test_cjext ===
+62 check(s), 0 failure(s)
+=== build/test_improv ===
+2302 check(s), 0 failure(s)
+=== build/test_ha ===
+183 check(s), 0 failure(s)
+=== build/test_ze08 ===
+26 check(s), 0 failure(s)
 HOST TESTS PASSED
 ```
 
+The per-binary counts will drift as tests are added; `HOST TESTS PASSED` on the
+last line is the part that matters, and the `Makefile` only prints it when every
+binary exited 0.
+
 **If you touch any code that parses input arriving over BLE, UART or the
-network, add tests here.** That component is deliberately dependency-free —
-`idf_component_register` is called with an empty `REQUIRES` — precisely so it
-can be compiled by a plain host compiler. Please keep it that way; adding an
-ESP-IDF dependency to it makes the whole suite unbuildable off-target.
+network, add tests here.** `ezlopi-util-sanitize` is deliberately
+dependency-free — `idf_component_register` is called with an empty `REQUIRES` —
+precisely so it can be compiled by a plain host compiler. Please keep it that
+way; adding an ESP-IDF dependency to it makes the whole suite unbuildable
+off-target.
+
+Note what makes the ZE08 case the pattern to copy: its dependency on ESP-IDF is
+confined to type declarations in one header, so `tests/host/stubs/` can supply
+the handful of headers underneath it and the *real* driver gets compiled. The
+other four UART drivers cannot join yet — they reach into cJSON, the device and
+item core, FreeRTOS tasks and GPIO — which is the concrete argument for giving
+them the same parser/hardware seam.
 
 When you add a test, check that it would actually have caught the bug: break
 the fix on purpose, confirm the suite goes red, then put it back. A test that
@@ -93,6 +119,12 @@ idf.py build
 Use **ESP-IDF v4.4.6** exactly; the project does not build on v5.x. CI builds
 all four targets, so a change that only compiles on one of them will be caught
 even if you cannot build the others locally.
+
+If you were thinking of sending a patch towards v5 or v6: please read
+[docs/esp-idf-migration.md](docs/esp-idf-migration.md) first. It has the
+measured error count broken down by root cause, and most of the work turns out
+to be four or five mechanical sweeps rather than a per-file slog — so
+uncoordinated per-file patches will conflict with each other for no gain.
 
 ### Repository hygiene
 

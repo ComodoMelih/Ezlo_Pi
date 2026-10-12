@@ -921,6 +921,42 @@ failure.
   factory-info partition and NVS, so the serial number, MAC and certificates
   are unrecoverable — whereas `{"cmd":0,"sub_cmd":1}` is a plain reboot. They
   differ by one character and the destructive one is `0`.
+- **Measured what migrating off ESP-IDF v4.4.6 would actually cost**, in
+  [docs/esp-idf-migration.md](docs/esp-idf-migration.md). The README said the
+  tree "does not build on v5.x" without saying why or how much, which is not
+  something a contributor can plan against. v5.5.5 and v6.0.3 were installed
+  alongside v4.4.6 and the tree pushed through each: 276 errors across 73 files
+  on v5.5.5, 208 across 20 on v6.0.3, with every error classified into
+  mutually exclusive root-cause buckets. Four findings worth having before
+  anyone starts:
+  - **v6.0.3's lower number is the build dying earlier, not less work.** 185 of
+    its 208 errors are one message, `driver/uart.h: No such file`, because
+    v5.5.5's `driver` component still re-exports `esp_driver_uart` "for
+    backward compatibility" (its own comment) and v6.0.3 dropped that list.
+    Same for the legacy ADC API, which v5.5.5 still ships under
+    `esp_adc/deprecated/` and v6.0.3 deleted. Hence the recommendation to go to
+    5.5.5 first rather than straight to 6.x.
+  - **Most of the count is a handful of sweeps, not a per-file slog.** 78
+    errors are one toolchain typedef (`uint32_t` is `unsigned int` on the
+    v4.4.6 compiler and `long unsigned int` on 14.2.0); 90 are one macro,
+    `CJSON_GET_VALUE_INT`, taking the address of an enum lvalue; 58 are
+    `portTICK_RATE_MS`. Counting errors overstates the work — e.g. four
+    `pms5003.c` errors vanish by adding one `#include`.
+  - **The `CJSON_GET_VALUE_INT` cluster is not a live memory bug**, despite
+    being an `int *` write through a pointer to something else. All three enums
+    involved are 4 bytes on the target, confirmed by a `_Static_assert`
+    compiled with the actual target compiler, with a `-fshort-enums`
+    counterfactual to show the assert can fail.
+  - **One capability is lost either way:** `hall_sensor_read()` exists in
+    v4.4.6 and in neither candidate, so `sensor-0018-other-internal-hall-effect`
+    has no replacement API. Also `CONFIG_SDK_TOOLPREFIX`, which
+    `ezlopi_cloud_info.c` reports to the cloud as `architecture`, no longer
+    exists. Both need a decision rather than a fix.
+
+  Also recorded: zero of this project's own `CONFIG_EZPI_*` keys are dropped by
+  either version, which is the one class of breakage a compiler cannot catch;
+  and the pin is v4.4.6 while the branch ended at v4.4.8, so two patch releases
+  of fixes are available without touching a line of source.
 - Added this file and [SECURITY.md](SECURITY.md).
 
 ---
@@ -990,3 +1026,17 @@ Listed because a changelog that only mentions what was finished is misleading.
   ESP-IDF dependency happens to be confined to type declarations. Separating
   each driver's frame parser from its hardware setup — the same seam the UART
   HAL itself needs — is what would make the rest testable.
+- **The ESP-IDF migration is measured, not attempted.** v4.4.6 is still the
+  only supported version. Every number in
+  [docs/esp-idf-migration.md](docs/esp-idf-migration.md) comes from a compile:
+  nothing was linked, nothing was run, nothing was flashed, and only the
+  `esp32` target was surveyed. A clean compile on v5.5.5 would still leave the
+  link stage, the image size and all runtime behaviour unknown. The error
+  counts are also a floor rather than a total, because a translation unit that
+  fails on a header never reaches its body — `portTICK_RATE_MS` reports 20
+  errors against 58 real uses.
+- **The repo still cannot declare a dependency outside the ESP-IDF tree.**
+  There is no `idf_component.yml` anywhere, which is why `mdns` and
+  `esp_websocket_client` — both moved to the component registry in v5 — are a
+  blocker rather than a one-line fix. Adding the manifest is a prerequisite for
+  any version bump, not a separate feature.

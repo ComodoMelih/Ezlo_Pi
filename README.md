@@ -109,6 +109,11 @@ compile against v5. Follow the
 [v4.4.6 getting-started guide](https://docs.espressif.com/projects/esp-idf/en/v4.4.6/esp32/get-started/index.html),
 or use the Docker image CI uses, `espressif/idf:v4.4.6`.
 
+"Will not compile against v5" is measured, not assumed: v5.5.5 and v6.0.3 were
+both installed and the tree pushed through each. What breaks, why, and what a
+migration would actually cost is in
+[docs/esp-idf-migration.md](docs/esp-idf-migration.md).
+
 Verify what you have before filing a build issue:
 
 ```bash
