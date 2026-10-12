@@ -86,6 +86,34 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
         uint8_t comma_count = 0; // or 'i'th word number
         uint8_t start_index = 0;
         uint8_t diff = 0;
+
+        /* One pass over the copy, with comma_count naming the field the current
+           character belongs to and start_index holding the position of the
+           delimiter that opened it. Every field is filled by writing single
+           bytes at an absolute index derived from diff = (i - start_index), so
+           nothing in the fill path shortens a field -- which is why each field
+           has to be cleared when it starts.
+
+           That clear is the "diff == 0" branch in each case below. diff == 0
+           holds exactly once per field, at the delimiter character itself,
+           where the "diff > 0" fill guard already has nothing to write. So the
+           field is cleared once and then filled, and an empty field still ends
+           up cleared because nothing follows the delimiter.
+
+           The branch used to test dummy_container[start_index + 1] == ','
+           instead, and that was wrong twice over. It only fired when the
+           incoming field was *empty*, so a non-empty value shorter than the
+           previous sentence's left the previous value's tail in place: "12"
+           satellites followed by "9" read back as "92", and since
+           GPS_FIX = ((total_sat > 2) && (gps_quality != 0)) the inflated count
+           made the device claim a valid fix on 1 or 2 satellites. And for a
+           sentence ending in ',' or '*' the index start_index + 1 is len,
+           which is the one byte of the (len + 1)-byte copy that the strncpy
+           above never writes -- in bounds, so no sanitiser flags it, but
+           uninitialised. Both are gone with the read.
+
+           tests/host/test_gps6mv2.c covers this; it fails against the old
+           form. */
         for (uint8_t i = 0; i < len; i++)
         {
             if (dummy_container[i] == '$')
@@ -108,10 +136,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
                 break;
             case 1: // UTC time
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.UTC_time, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.UTC_time));
-                    break;
                 }
                 else
                 {
@@ -138,10 +165,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 2: // Latitude
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Latitude, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Latitude));
-                    break;
                 }
                 else
                 {
@@ -163,10 +189,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 3: // North/South indicator
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.N_S_indicator, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.N_S_indicator));
-                    break;
                 }
                 else
                 {
@@ -179,10 +204,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 4: // Longitude
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Longitude, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Longitude));
-                    break;
                 }
                 else
                 {
@@ -204,10 +228,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 5: // East/West indicator
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.E_W_indicator, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.E_W_indicator));
-                    break;
                 }
                 else
                 {
@@ -220,10 +243,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 6: // Positon_Fix_Indicator
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Positon_fix_quality, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Positon_fix_quality));
-                    break;
                 }
                 else
                 {
@@ -236,10 +258,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 7: // Satellites_used
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Satellites_used, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Satellites_used));
-                    break;
                 }
                 else
                 {
@@ -256,10 +277,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 8: // HDOP
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.HDOP, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.HDOP));
-                    break;
                 }
                 else
                 {
@@ -276,10 +296,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 9: // Mean_sea_lvl
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Mean_sea_level, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Mean_sea_level));
-                    break;
                 }
                 else
                 {
@@ -296,10 +315,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 10: // MSL_Unit
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.MSL_Unit, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.MSL_Unit));
-                    break;
                 }
                 else
                 {
@@ -312,10 +330,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 11: // Geoid_Separation
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Geoid_Separation, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Geoid_Separation));
-                    break;
                 }
                 else
                 {
@@ -332,10 +349,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 12: // Goid Seperation_Unit
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GS_Unit, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GS_Unit));
-                    break;
                 }
                 else
                 {
@@ -356,10 +372,9 @@ void GYGPS6MV2_parse_gpgga_mesg(GPS6MV2_t *sensor_0053_UART_gps6mv2_data)
             }
             case 15: // Checksum
             {
-                if (dummy_container[start_index + 1] == ',')
-                { // applies only once
+                if ((diff = (i - start_index)) == 0)
+                { // new field: clear once (see the note above the loop)
                     memset(&sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Checksum, 0, sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.Checksum));
-                    break;
                 }
                 else
                 {

@@ -17,6 +17,7 @@ UART_HAL_DIR := ../../ezlopi-hal/ezlopi-hal-uart
 ZE08_DIR     := ../../ezlopi-sensors-devices/sensor-0069-UART-ze08-ch02-gas-sensor
 PMS_DIR      := ../../ezlopi-sensors-devices/sensor-0037-pms5003-sensor
 MB1013_DIR   := ../../ezlopi-sensors-devices/sensor-0021-UART-MB1013
+GPS_DIR      := ../../ezlopi-sensors-devices/sensor-0053-UART-GYGPS6MV2
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -48,7 +49,7 @@ LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
-           test_mb1013
+           test_mb1013 test_gps6mv2
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -143,6 +144,25 @@ $(BUILD)/test_mb1013: MB1013_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
                                        $(SANITIZERS)
 $(BUILD)/test_mb1013: test_mb1013.c $(MB1013_DIR)/mb1013_parse.c | $(BUILD)
 	$(CC) $(MB1013_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# The GY-GPS6MV2 parser was the cheapest seam of the four, and not because it
+# was split: GYGPS6MV2_parse_gpgga_mesg() was already a standalone function in a
+# file whose only other includes are <string.h> and the trace macros. The one
+# thing keeping it off a host compiler was its header, which declared the NMEA
+# layout and a cloud-action prototype together, so including it dragged in three
+# ezlopi_core_* headers for a prototype this file never uses. gps6mv2_parse.h is
+# that layout on its own; sensor_0053_UART_GYGPS6MV2.h still includes it, so
+# nothing downstream changed.
+#
+# Unlike MB1013 this one does need -Istubs, for the two headers the driver file
+# includes directly: ezlopi_util_trace.h and EZLOPI_USER_CONFIG.h. The latter is
+# load-bearing here rather than incidental -- it is where ezlopi_malloc() comes
+# from, and the parser allocates a working copy of the sentence.
+$(BUILD)/test_gps6mv2: GPS_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                     -I$(GPS_DIR) -I$(STUBS_DIR) \
+                                     $(SANITIZERS)
+$(BUILD)/test_gps6mv2: test_gps6mv2.c $(GPS_DIR)/gyGPS6MV2.c | $(BUILD)
+	$(CC) $(GPS_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

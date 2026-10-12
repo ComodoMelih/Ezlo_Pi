@@ -64,10 +64,10 @@ make -C tests/host
 ```
 
 This needs only a C compiler. It compiles the real firmware sources — no copies
-— for seven areas that handle untrusted input: the helpers in
+— for eight areas that handle untrusted input: the helpers in
 [`ezlopi-util/ezlopi-util-sanitize`](ezlopi-util/ezlopi-util-sanitize/), the
 vendored cJSON extensions, the Improv state machine, the Home Assistant
-discovery builder, and the ZE08-CH2O, PMS5003 and MB1013 frame parsers. Everything is built under
+discovery builder, and the ZE08-CH2O, PMS5003, MB1013 and GY-GPS6MV2 parsers. Everything is built under
 AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
 -Werror` except where [`tests/host/Makefile`](tests/host/Makefile) documents a
 scoped exemption for vendored or third-party code. Then it runs the assertions
@@ -90,6 +90,9 @@ in [`tests/host/`](tests/host/). It should end with:
 === build/test_mb1013 ===
   swept 10000 four-digit frames: 0 unrecognised, 0 mismatched
 50 check(s), 0 failure(s)
+=== build/test_gps6mv2 ===
+  swept 100 satellite counts after a 2-digit count: 0 wrong
+146 check(s), 0 failure(s)
 HOST TESTS PASSED
 ```
 
@@ -129,8 +132,25 @@ that turns the raw reading into metres. Aim for that. When a parser takes a
 buffer and a length and returns a value, the ESP-IDF surface it needs tends to
 be zero.
 
-The remaining two UART drivers still reach into cJSON, the device and item
-core, and the GPIO ISR service, so they need the same treatment before they can
+GY-GPS6MV2 is a third case, and the cheapest of the three: look for it before
+assuming you need to move any code. `GYGPS6MV2_parse_gpgga_mesg()` was already a
+standalone function in a file whose only other includes are `<string.h>` and the
+trace macros. The single thing keeping it off a host compiler was its *header*,
+which declared the NMEA layout and one cloud-action prototype together, so
+including it dragged in the device and item core, cJSON and the actions list —
+for a prototype `gyGPS6MV2.c` never calls. Splitting the layout into
+`gps6mv2_parse.h`, with `sensor_0053_UART_GYGPS6MV2.h` including it rather than
+the reverse, took that file's header closure from 170 headers to 123, its
+`ezlopi_core_*` headers from eight to two, and its cJSON headers to none —
+measured with `ninja -C build -t deps`, which is also how to check your own
+split did what you think. No function moved.
+
+So before splitting a `.c` file, check whether the dependency is really in the
+code or only in the header it includes. Two headers — one for the layout and the
+parser, one for the cloud plumbing — is often the whole job.
+
+The remaining UART driver (R307) still reaches into cJSON, the device and item
+core, and the GPIO ISR service, so it needs the same treatment before it can
 join.
 
 When you add a test, check that it would actually have caught the bug: break
@@ -147,6 +167,16 @@ MB1013's payload-scan bound can be widened with no effect, because the scan stop
 at the first non-digit and the caller has already established the byte after the
 payload is `'\r'`. That is a sound argument, but it rests on the terminator
 check, which is why `test_terminator_is_required()` exists.
+
+And sometimes a survivor is simply a hole, so do the work of deciding which.
+GY-GPS6MV2 has one branch that is not reached by a comma — `'*'` opens the
+checksum field by assigning `comma_count` a literal rather than incrementing it
+— and a mutation changing that literal from 15 to 14 survived. The reason was
+not subtle once looked at: field 14 is an empty `case`, the suite asserted every
+other field's *value* but only the checksum's *termination*, and a field that is
+never written is trivially terminated. One `check_str` closed it. The suite was
+weak in exactly one place and the mutation found it, which is the entire point —
+treat a survivor as a question, not as a result.
 
 ### Firmware build
 

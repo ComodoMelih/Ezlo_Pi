@@ -778,10 +778,10 @@ failure.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 2787 assertions across
-  seven binaries, no framework, no hardware. `make -C tests/host` builds and runs
-  the lot from scratch in about four and a half seconds; the binaries themselves take a
-  tenth of that, so there is no reason not to run it on every edit. Built under
+- **New host test suite, [`tests/host/`](tests/host/)**: 2933 assertions across
+  eight binaries, no framework, no hardware. `make -C tests/host` builds and runs
+  the lot from scratch in about five seconds; running the already-built binaries
+  takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
   -Werror` except for two scoped exemptions the `Makefile` documents at the
   point of use (vendored `cjext.c`, and one stale `#warning` in `ze08_ch2o.c`).
@@ -872,6 +872,101 @@ failure.
 
   **This converts a second of the four previously untestable clamps into a
   tested one**, leaving R307 and GY-GPS6MV2.
+
+- **The GY-GPS6MV2 GPGGA parser was brought in by splitting a header, not code
+  — and it reported a GPS fix the device did not have** —
+  `tests/host/test_gps6mv2.c`, 146 checks.
+
+  **The defect.** Each of the 13 parsed GPGGA fields is filled by writing single
+  bytes at an absolute index derived from the field's own start — `FIELD[diff -
+  1] = c` — so nothing in the fill path ever shortens a field. The `memset` that
+  was supposed to handle that ran only when the incoming field was *empty*:
+
+  ```c
+  if (dummy_container[start_index + 1] == ',')
+  { // applies only once
+      memset(&FIELD, 0, sizeof(FIELD));
+      break;
+  }
+  ```
+
+  So a non-empty value shorter than the previous sentence's inherited the
+  previous value's tail. Measured, not reasoned: feeding `12` satellites and
+  then `9` reads `Satellites_used` back as `"92"`; `1300.8` then `999.5` reads
+  as `999.58`; `-41.3` then `-9.3` reads as `-9.33`.
+
+  **Why that matters more than a wrong number on a dashboard.** The driver
+  computes `GPS_FIX = ((total_sat > 2) && (gps_quality != 0))` from
+  `atoi(Satellites_used)`. A retained digit can only make the count *larger*, so
+  the error is not symmetric — it biases towards claiming a fix. After a good fix
+  on 12 satellites, a drop to 1 satellite parses as 11 and **the device keeps
+  reporting a valid GPS fix with one satellite in view**. A fresh handle fed the
+  identical sentence reports no fix, which isolates retained state rather than
+  the threshold as the cause. And because `prev_GPS_FIX` broadcasts only on
+  change, the false fix is never corrected — it just persists.
+
+  **The fix** replaces the empty-field test with a clear at the start of every
+  field: `if ((diff = (i - start_index)) == 0)`. That holds exactly once per
+  field, at the delimiter character itself, where the `diff > 0` fill guard
+  already has nothing to write — so each field is cleared once and then filled,
+  and an empty field still ends up cleared because nothing follows the delimiter.
+
+  It also removes a second defect for free. `dummy_container[start_index + 1]`
+  is, for a sentence ending in `','` or `'*'`, index `len` of a `len + 1`-byte
+  `ezlopi_malloc` filled by `strncpy(dst, src, len)` — which writes no
+  terminator when `strlen(src) == len`. The old guard read a byte that was never
+  initialised. It is in bounds, so neither AddressSanitizer nor
+  UndefinedBehaviorSanitizer says anything; it is gone regardless.
+
+  **The split was a header move, and that is worth recording because the
+  opposite was assumed.** The entry under known gaps below used to say this
+  driver needed its parsing lifted out of the cloud reporting it was interleaved
+  with. That is true of `__uart_gps6mv2_upcall()` in the registration file, but
+  not of `GYGPS6MV2_parse_gpgga_mesg()`, which was already standalone in a file
+  whose only other includes are `<string.h>` and the trace macros. The one thing
+  keeping it off a host compiler was `sensor_0053_UART_GYGPS6MV2.h`, which
+  declared the NMEA layout and a single cloud-action prototype together. Moving
+  the layout to `gps6mv2_parse.h` — with the sensor header including it, so
+  nothing downstream changed — took `gyGPS6MV2.c` from 170 headers to 123, from
+  eight `ezlopi_core_*` headers to two, and from two cJSON headers to none,
+  measured with `ninja -t deps`. No function moved. `GPS6MV2_t` is typedef'd in
+  exactly one header, which is the thing that actually has to hold for a header
+  split: two definitions would build green and disagree about field offsets.
+
+  **The tests were confirmed red first** — 10 failures against the unfixed
+  parser — then green after. They cover all 16 fields of a well-formed sentence,
+  every field shrinking, the real power-up sentence `$GPGGA,,,,,,0,00,99.99,,,,,,*48`,
+  every truncated prefix of a sentence, 50 repetitions of an identical sentence,
+  a sweep of satellite counts 0..99 each following a two-digit count, and the
+  `GPS_FIX` computation copied verbatim from the driver. Nine of nine mutations
+  caught, including a full revert to the pre-fix parser taken straight from git
+  rather than synthesised. One mutation initially survived and was a genuine
+  hole, not an equivalent mutant: the suite asserted every field's value except
+  the checksum's, of which it asserted only termination — and a field that is
+  never written is trivially terminated.
+
+  **Also asserted, and not a defect:** the five `atoi()` calls on these fields
+  are *not* the MB1013 unterminated-`atoi()` bug. `GPS6MV2_t` is memset at
+  allocation and every fill guard stops at least one byte short of its array, so
+  the last byte of each is never written. That is a property of the guards rather
+  than anything enforced, which is why `test_fields_stay_terminated()` checks the
+  final byte of all 14 character arrays across nine hostile inputs on both fresh
+  and reused handles, instead of the argument being left in a comment. MB1013 is
+  the reason: it had this exact shape of argument in a comment, and the argument
+  was wrong.
+
+  Verified on the pinned v4.4.6 toolchain: both GPS objects compiled, the driver
+  still imports the parser and the parser still defines it, one definition in the
+  ELF, no warnings from any GPS file, and the whole-build warning count unchanged
+  at 144. The image is 80 bytes *smaller* than before the fix.
+
+  **This does *not* convert the GY-GPS6MV2 clamp into a tested one, and it would
+  be easy to claim otherwise.** The clamp added in this release is in
+  `__uart_gps6mv2_upcall()` in the registration file — the 255-byte copy and the
+  bounded `strlen` into `gps_cir_buf` — and that function is still outside the
+  suite, for the header-entanglement reason given under known gaps. What is now
+  tested is the GPGGA field parser downstream of it. Two of the four clamps
+  remain verified only by an esp32 build: R307's and this one.
 
 - **New CI workflow, [`.github/workflows/ci.yml`](.github/workflows/ci.yml).**
   Nothing in this repository was checked automatically before.
@@ -1135,29 +1230,45 @@ Listed because a changelog that only mentions what was finished is misleading.
   against a real sensor; its checksum fix means that sensor should start
   reporting readings for the first time, and *should* is the operative word.
   The PMS5003 and MB1013 clamps now have 92 and 50 host checks behind them on
-  the same terms. The R307 and GY-GPS6MV2 clamps are verified only by an esp32
-  build — and MB1013 is the reason that distinction is worth taking seriously
+  the same terms. The R307 and GY-GPS6MV2 clamps are still verified only by an
+  esp32 build: GY-GPS6MV2 gained 146 host checks in this release, but they cover
+  the GPGGA field parser, not `__uart_gps6mv2_upcall()` where that driver's clamp
+  actually sits — and MB1013 is the reason that distinction is worth taking seriously
   rather than treating a reviewed clamp as settled: its clamp was reviewed,
   documented and wrong, and only writing the tests showed it.
-- **The R307 and GY-GPS6MV2 parsers still cannot be host-tested.**
-  ZE08-CH2O is in the suite because its ESP-IDF dependency happens to be
-  confined to type declarations, and PMS5003 and MB1013 because their parsers
-  were moved into their own translation units. The remaining two are harder for
-  a specific reason worth recording: their UART upcalls —
-  `__uart_0066_fingerprint_upcall` and `__uart_gps6mv2_upcall`, the functions
-  that hold the clamps added here — live in the `sensor_00XX_*.c` registration
-  file alongside `ezlopi_core_cloud.h`, `ezlopi_cloud_items.h` and the device
-  value-updated path, not in the adjacent `gyGPS6MV2.c` / `R307_AS606.c` driver
-  file, which is itself nearly dependency-free. So the split is not a file move
-  as it was for PMS5003; the parsing has to be lifted out of the cloud
-  reporting it is interleaved with first. MB1013 shows that is tractable — its
-  upcall had the same entanglement, and only the frame scan needed to move.
-- **GY-GPS6MV2 has five `atoi()` calls not yet checked for the MB1013 defect.**
-  `gyGPS6MV2.c` calls `atoi` on GPGGA fields and `strchr`/`strstr`/`strlen` on
-  `gps_cir_buf`. The `strlen` over-read there is fixed, but the MB1013 finding
-  is that a clamp around a string function is not the same as bounding it, so
-  those five calls need the same treatment this entry describes before that
-  driver can be called clean.
+- **The R307 parser still cannot be host-tested, and the reason recorded here
+  for GY-GPS6MV2 turned out to be wrong about GY-GPS6MV2.** ZE08-CH2O is in the
+  suite because its ESP-IDF dependency happens to be confined to type
+  declarations, PMS5003 and MB1013 because their parsers were moved into their
+  own translation units, and GY-GPS6MV2 because one *header* was split in two.
+
+  This entry previously claimed both remaining drivers were hard for the same
+  reason: that their UART upcalls — `__uart_0066_fingerprint_upcall` and
+  `__uart_gps6mv2_upcall` — live in the `sensor_00XX_*.c` registration file
+  alongside `ezlopi_core_cloud.h` and the device value-updated path, so the
+  parsing would have to be lifted out of the cloud reporting it is interleaved
+  with before any file could move. That is still true of those two upcalls. It
+  was not true of the thing actually worth testing in the GPS driver:
+  `GYGPS6MV2_parse_gpgga_mesg()` in `gyGPS6MV2.c` was already standalone, and
+  only its header was entangled. The lesson is to check whether a dependency
+  lives in the code or in the header before costing the work — the estimate here
+  was wrong by a whole category.
+
+  R307 may well be the same shape, since `R307_AS606.c` is likewise nearly
+  dependency-free; that has not been checked yet. What has *not* been brought in
+  for either driver is the upcall itself: `__uart_gps6mv2_upcall`, its
+  `gps_cir_buf` write-overflow path (clamped, never host-tested) and the
+  `strstr`/`strchr` navigation of that buffer remain outside the suite.
+- **RESOLVED — GY-GPS6MV2's five `atoi()` calls are not the MB1013 defect.**
+  This entry previously flagged them as unchecked, on the reasoning that a clamp
+  around a string function is not the same as bounding it. They were checked.
+  `GPS6MV2_t` is memset at allocation and every GPGGA fill guard stops at least
+  one byte short of its array, so the last byte of each is never written and the
+  fields are NUL-terminated by construction. Kept here as a resolved item rather
+  than deleted, because the audit that produced this negative result is also what
+  exposed the stale-tail defect fixed above — the same code, a different bug.
+  `test_fields_stay_terminated()` now asserts the termination rather than leaving
+  it to this paragraph.
 - **The ESP-IDF migration is measured, not attempted.** v4.4.6 is still the
   only supported version. Every number in
   [docs/esp-idf-migration.md](docs/esp-idf-migration.md) comes from a compile:

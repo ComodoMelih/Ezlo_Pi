@@ -41,7 +41,13 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
-#include "sensor_0053_UART_GYGPS6MV2.h"
+
+/* gps6mv2_parse.h, not sensor_0053_UART_GYGPS6MV2.h. Only GPS6MV2_t and the
+   NMEA layout are needed here, and the sensor header also drags in the three
+   ezlopi_core_* headers for its one action prototype -- which is what kept
+   gyGPS6MV2.c, a file whose only other includes are <string.h> and the trace
+   macros, from being compiled by a host compiler. */
+#include "gps6mv2_parse.h"
 
 /*******************************************************************************
  *                          C++ Declaration Wrapper
