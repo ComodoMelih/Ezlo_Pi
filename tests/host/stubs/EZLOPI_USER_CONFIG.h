@@ -21,6 +21,14 @@
  * that ever stops being true the build breaks here rather than silently
  * testing something else.)
  *
+ * test_ze08 reaches this header too, transitively: the real
+ * ezlopi_hal_uart.h includes it. That path needs nothing from here either --
+ * the HAL header uses it only for stdint/stdbool -- so the same stub serves
+ * both. It does matter that the allocator macros map to plain libc, because
+ * test_ze08 hands the driver exact-size heap blocks and relies on ASan seeing
+ * their bounds; routing them through the heap-tracing branch would hide
+ * exactly the over-reads being tested.
+ *
  * The definitions below mirror the real header's !CONFIG_EZPI_HEAP_ENABLE
  * branch (lines 104-113), which is the branch that maps onto the plain C
  * library. Using the libc allocator directly is also what lets the suite run

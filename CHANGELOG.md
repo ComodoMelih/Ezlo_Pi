@@ -94,6 +94,43 @@ the parsers involved. All four are covered by regression tests in
   drifts. Covering this needs the HAL seam tracked in
   [Known gaps](#known-gaps).
 
+- **The ZE08-CH2O checksum rejected 99.6% of valid frames, so that sensor has
+  never reported a reading.** `ze08_ch2o_sensor_checksum()` was two nested
+  loops with identical bounds and the same induction variable name, the inner
+  shadowing the outer, with the accumulate line written twice in the body. It
+  summed every byte fourteen times, computing `(~(14·S))+1` instead of
+  `(~S)+1`. Those agree only when `13·S ≡ 0 (mod 256)`, and 13 is coprime to
+  256, so only when `S` is itself a multiple of 256.
+
+  Measured, not argued: sweeping all 65536 concentration/range pairs and
+  installing the datasheet-correct checksum in each frame, 65280 of 65536 were
+  rejected. `ze08_ch2o_parse()` gates every reading on that comparison, so
+  `data->available` was essentially never set. Now a single loop.
+
+  **This one is covered by a host test.** `tests/host/test_ze08.c` compiles the
+  real `ze08_ch2o.c` — the only UART driver whose ESP-IDF dependency is
+  confined to type declarations — by stubbing the five ESP-IDF headers
+  underneath `ezlopi_hal_uart.h` rather than copying that header, so the real
+  one is compiled and its callback signature cannot drift. The parser and its
+  upcall are both `static`, so the test supplies `EZPI_hal_uart_init()` and
+  keeps the pointer the driver registers; every case runs the real
+  registration path. 26 checks, including a 65536-frame sweep and every short
+  length from 1 to 8 fed through exact-size heap blocks so ASan can see the
+  bounds.
+
+  Six deliberate defects were reintroduced one at a time to confirm the suite
+  goes red — the doubled checksum loop, the length guard disabled, both NULL
+  guards disabled, the length guard turned into an equality test (the
+  plausible wrong fix, which would drop coalesced reads), and an
+  accept-everything checksum. All six were caught; the length-guard mutation
+  reports as an ASan `heap-buffer-overflow`, which is what establishes the
+  over-read was real rather than theoretical.
+
+  The other four drivers cannot join the suite yet: they pull in cJSON, the
+  device/item core, FreeRTOS tasks and GPIO. That is the concrete argument for
+  the parser seam tracked in [Known gaps](#known-gaps), and their clamps are
+  verified only by an esp32 build.
+
 ### BLE provisioning — [bug]
 
 The BLE provisioning flow worked only if everything succeeded on the first
@@ -906,3 +943,17 @@ Listed because a changelog that only mentions what was finished is misleading.
   and checked on every CI run, and the images it serves are verified
   byte-for-byte against the build outputs, but no one has opened it in a
   browser and driven it end to end against hardware.
+- **No ZE08-CH2O has been connected since the checksum fix.** The part is not
+  on hand. Its frame parsing is covered by 26 host checks under ASan, proven
+  able to fail by six mutations, but "tested" there means "against frames this
+  repo constructs from the datasheet rule", not against a real sensor. The fix
+  means this sensor should start reporting readings for the first time, and
+  *should* is the operative word: nothing has confirmed a real part's frames
+  now validate.
+- **Four of the six UART drivers cannot be host-tested at all.** MB1013,
+  PMS5003, R307 and GY-GPS6MV2 pull in cJSON, the device/item core, FreeRTOS
+  tasks and GPIO, so `tests/host/` cannot compile them and their parsing is
+  unreachable from any test. ZE08-CH2O is in the suite only because its
+  ESP-IDF dependency happens to be confined to type declarations. Separating
+  each driver's frame parser from its hardware setup — the same seam the UART
+  HAL itself needs — is what would make the rest testable.

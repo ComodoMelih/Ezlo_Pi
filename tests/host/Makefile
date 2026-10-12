@@ -13,12 +13,21 @@ SANITIZE_DIR := ../../ezlopi-util/ezlopi-util-sanitize
 IMPROV_DIR   := ../../ezlopi-util/ezlopi-util-improv
 HA_DIR       := ../../ezlopi-util/ezlopi-util-ha
 CJEXT_DIR    := ../../ezlopi-components/cjext
+UART_HAL_DIR := ../../ezlopi-hal/ezlopi-hal-uart
+ZE08_DIR     := ../../ezlopi-sensors-devices/sensor-0069-UART-ze08-ch02-gas-sensor
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
 # ezlopi_util_trace.h (esp_log.h, FreeRTOS). stubs/ supplies both. cjext
 # references no CONFIG_* symbol and no TRACE_* macro, which is the only reason
 # a shim this thin is enough -- see stubs/EZLOPI_USER_CONFIG.h.
+#
+# stubs/ also carries driver/gpio.h, driver/uart.h, freertos/FreeRTOS.h,
+# freertos/queue.h and esp_err.h. Those exist so that the *real*
+# ezlopi_hal_uart.h can be compiled on a host rather than copied into stubs/.
+# That distinction matters: a host copy of the HAL header would let the UART
+# callback signature and struct s_ezlopi_uart_object drift away from what the
+# tests assume, and the tests would keep passing while doing so.
 STUBS_DIR    := stubs
 
 # -fsanitize is where the value is for this particular suite: the defects being
@@ -36,7 +45,7 @@ CFLAGS  += -std=c99 -O1 -g \
 LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
-TESTS   := test_sanitize test_cjext test_improv test_ha
+TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -82,6 +91,30 @@ $(BUILD)/test_cjext: test_cjext.c $(CJEXT_DIR)/cjext.c | $(BUILD)
 	$(CC) $(CJEXT_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_cjext_main.o test_cjext.c
 	$(CC) $(CJEXT_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_cjext_main.o $(BUILD)/cjext.o $(LDFLAGS) -lm
+
+# The ZE08-CH2O driver is the first sensor driver in this suite, and it is here
+# because it is the only UART one whose dependency on ESP-IDF is confined to the
+# type declarations in ezlopi_hal_uart.h. stubs/ supplies the five ESP-IDF
+# headers underneath that one, so the real HAL header gets compiled; the test
+# then supplies EZPI_hal_uart_init() itself and keeps the upcall pointer the
+# driver registers, which is how it reaches a parser that is entirely static.
+#
+# -Wno-error=cpp is needed for one reason only: ze08_ch2o.c contains a
+# "#warning "DO NOT user printf"" left behind by its author, and -Werror
+# promotes #warning to an error. The note is deliberately left in place rather
+# than deleted as a drive-by, so the exemption is scoped to this one file and
+# the warning still prints.
+#
+# The other four UART drivers cannot join yet -- they pull in cJSON, the device
+# and item core, FreeRTOS tasks and GPIO -- which is the concrete argument for
+# the HAL/parser seam those drivers still need.
+$(BUILD)/test_ze08: ZE08_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                   -I$(ZE08_DIR) -I$(UART_HAL_DIR) -I$(STUBS_DIR) \
+                                   $(SANITIZERS)
+$(BUILD)/test_ze08: test_ze08.c $(ZE08_DIR)/ze08_ch2o.c | $(BUILD)
+	$(CC) $(ZE08_CFLAGS) -c -o $(BUILD)/test_ze08_main.o test_ze08.c
+	$(CC) $(ZE08_CFLAGS) -Wno-error=cpp -c -o $(BUILD)/ze08_ch2o.o $(ZE08_DIR)/ze08_ch2o.c
+	$(CC) -o $@ $(BUILD)/test_ze08_main.o $(BUILD)/ze08_ch2o.o $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)
