@@ -338,6 +338,38 @@ CI will fail your PR if:
   Stripping `0x0D` bytes from one of those corrupts the object code and the
   link fails with `error adding symbols: malformed archive`, which reads like a
   project bug but is not.
+- **On Windows, set `core.autocrlf=false` in the clone before you do anything
+  else.** Git for Windows ships `core.autocrlf = true` in its *system* config
+  (`/etc/gitconfig` inside the install, not your `--global`), so checking out
+  this repo with it rewrites the working tree with CRLF. Nothing appears wrong
+  until a second Git disagrees: a clone used from both Git for Windows and WSL
+  will show hundreds of files as modified to whichever one has `autocrlf`
+  unset. In this tree that was 773 files whose only difference from `HEAD` was
+  one `0x0D` per line.
+
+  The hazard is not the noise, it is what the noise hides. Staging one of those
+  files commits a whole-file line-ending change with your real edit buried
+  inside it, and `git diff` on a 120-line file reports `@@ -1,121 +1,121 @@`
+  either way. Fix it per clone:
+
+  ```sh
+  git config --local core.autocrlf false
+  git config --local core.eol lf
+  git checkout -- .          # only after confirming nothing real is pending
+  ```
+
+  Two traps if you go looking at this yourself. `git diff --name-only
+  --ignore-cr-at-eol` still lists every CRLF-only file — the filter applies to
+  `--numstat` and to the patch text, not to the decision about which names to
+  print, so the name list looks like 777 real changes. And in `bash`,
+  `grep -c $"\r"` is i18n quoting, not an escape: it counts lines containing the
+  letter `r`. Use `tr -dc '\r' < file | wc -c`.
+
+  A repo-wide `.gitattributes` would be the general fix, but it is not a safe
+  one-line addition here: some blobs are already committed with CRLF — the
+  vendored `bme280`, `lib8tion`, `color` and `led_strip` components among them —
+  so `* text=auto eol=lf` renormalises them and produces exactly the tree-wide
+  rewrite the bullet above warns about. Left alone deliberately.
 
 ### Reporting a security problem
 
