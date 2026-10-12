@@ -38,7 +38,7 @@
  */
 
 #ifndef __EZLOPI_VALUES_STR_H__
-#define __EZLIPI_VALUES_STR_H__
+#define __EZLOPI_VALUES_STR_H__
 #pragma once
 
 /*******************************************************************************

@@ -66,7 +66,16 @@ static int __hex2dec(char c);
 /*******************************************************************************
  *                          Static Data Definitions
  *******************************************************************************/
-const unsigned char hex[16] = "0123456789abcdef";
+/* Was `const unsigned char hex[16]`, which is legal C99 -- an array initialised
+   from a string literal of exactly its own length drops the NUL (6.7.8p14) --
+   but gcc 15 added -Wunterminated-string-initialization, which this would trip
+   on the day the toolchain moves. Letting the compiler size it keeps the NUL
+   and costs one byte of rodata. Nothing here reads it: both call sites index
+   with (uuid[j] >> 4) and (0xf & uuid[j]) on a uint8_t, and __hex2dec() stops
+   at i < 16, so index 16 was unreachable either way. Static because no header
+   declares this and no other translation unit refers to it, so a name this
+   generic has no business in the firmware's global namespace. */
+static const unsigned char hex[] = "0123456789abcdef";
 
 /*******************************************************************************
  *                          Extern Data Definitions
