@@ -513,7 +513,7 @@ static void ezpi_start_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 
     config.task_priority = 8;
-    config.server_port = 17001;
+    config.server_port = EZPI_SERV_WS_SERVER_PORT;
     config.stack_size = 1024 * 4;
 
     TRACE_I("Starting ws-server on port: '%d'", config.server_port);

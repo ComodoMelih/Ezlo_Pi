@@ -83,7 +83,12 @@
 static ezlopi_error_t __ezlopi_mdns_add_service_context(l_ezlopi_mdns_context_t *new_context);
 static l_ezlopi_mdns_context_t *__ezlopi_mdns_get_service_context();
 static ezlopi_error_t __ezlopi_mdns_init_service_context();
+#if defined(CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER)
+/* Only called when the _ezlo._tcp record is advertised, which is only when
+ * there is a local websocket server for it to point at. Guarded so that a
+ * build without one does not carry an unused static function. */
 static mdns_txt_item_t *__prepare_mdns_item_service_context(int *service_size);
+#endif // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
 static void __ezlopi_free_mdns_service_context(l_ezlopi_mdns_context_t *mdns_context_head);
 static void __mdns_init(void *pv);
 
@@ -347,6 +352,7 @@ static ezlopi_error_t __ezlopi_mdns_init_service_context()
     return error;
 }
 
+#if defined(CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER)
 static mdns_txt_item_t *__prepare_mdns_item_service_context(int *service_size)
 {
     mdns_txt_item_t *mdns_context = NULL;
@@ -385,6 +391,7 @@ static mdns_txt_item_t *__prepare_mdns_item_service_context(int *service_size)
     }
     return mdns_context;
 }
+#endif // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
 
 static void __ezlopi_free_mdns_service_context(l_ezlopi_mdns_context_t *mdns_context_head)
 {
@@ -410,7 +417,6 @@ static void __ezlopi_free_mdns_service_context(l_ezlopi_mdns_context_t *mdns_con
 static void __mdns_init(void *pv)
 {
     int mdns_retries = 0;
-    int service_size;
     __ezlopi_mdns_init_service_context();
 
 #warning "NABIN: mdns_init() is called in a continuous while loop"
@@ -456,6 +462,37 @@ static void __mdns_init(void *pv)
         }
 
         TRACE_I("mDNS instance initialization finished, %s", esp_err_to_name(err));
+
+        /* The _ezlo._tcp record below points at the port the local websocket
+         * server listens on, and that server only exists when
+         * CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER is on: with it off, ezlopi_main.c
+         * calls EZPI_service_ws_server_dummy() instead of
+         * EZPI_service_ws_server_start(), and the dummy does nothing -- it
+         * never registers the IP event handler that would start the server, so
+         * httpd_start() is never reached and the port has no listener.
+         *
+         * This advert used to be unconditional, so a hub built without the
+         * local websocket server still announced _ezlo._tcp on that port and
+         * any client that discovered it got a refused connection. That is the
+         * configuration a Home Assistant user who only wants MQTT builds, so
+         * it is worth being honest about.
+         *
+         * mdns_init() and the hostname above are deliberately left outside
+         * this guard: resolving <hostname>.local is useful in every build, and
+         * is all this service can truthfully offer when there is no local API.
+         *
+         * Note on what is NOT advertised here: no _http._tcp record is added.
+         * The server on this port registers exactly one URI, "/", with
+         * is_websocket = true, so there is no HTTP resource to fetch. Worse,
+         * a plain GET is not rejected -- esp_http_server only performs the
+         * websocket handshake when an "Upgrade: websocket" header has set
+         * ws_handshake_detect, and otherwise still invokes the handler, which
+         * takes its HTTP_GET branch, files the connection in the websocket
+         * client table and returns without ever writing a response body. So
+         * anything that followed an _http._tcp advert here would hang rather
+         * than render. */
+#if defined(CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER)
+        int service_size;
         mdns_txt_item_t *mdns_context = __prepare_mdns_item_service_context(&service_size);
         if (!mdns_context)
         {
@@ -474,13 +511,18 @@ static void __mdns_init(void *pv)
             TRACE_I("\t%s\t\t%s", mdns_context[i].key, mdns_context[i].value);
         }
 
-        err = mdns_service_add("EzloPi", "_ezlo", "_tcp", 17001, mdns_context, service_size);
+        err = mdns_service_add("EzloPi", "_ezlo", "_tcp", EZPI_SERV_WS_SERVER_PORT, mdns_context, service_size);
         ezlopi_free(__FUNCTION__, mdns_context);
         if (ESP_OK == err)
         {
             __ezlopi_free_mdns_service_context(__ezlopi_mdns_get_service_context());
             break;
         }
+#else  // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
+        TRACE_I("No local websocket server in this build, so no _ezlo._tcp record is advertised; hostname resolution only.");
+        __ezlopi_free_mdns_service_context(__ezlopi_mdns_get_service_context());
+        break;
+#endif // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
 
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }

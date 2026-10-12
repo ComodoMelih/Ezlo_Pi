@@ -138,6 +138,15 @@ extern "C"
 // Service
 #define EZPI_SERV_ENABLE_MESHBOTS
 
+// Port the local websocket server listens on, and the port the mDNS
+// _ezlo._tcp record points at. It lives here because those two are in
+// different components -- ezlopi-service-ws-server and ezlopi-core-mdns --
+// and core must not depend on a service, so neither header can own it.
+// It was previously the bare literal 17001 in both files, which is the kind
+// of pair that drifts silently: changing the server's port would have left
+// mDNS advertising the old one with nothing listening.
+#define EZPI_SERV_WS_SERVER_PORT 17001
+
 // EzloPi BLE Service Pass key
 #define EZPI_SERV_BLE_PASSKEY_EN 0
 #define EZPI_SERV_BLE_PAIRING_EN 1

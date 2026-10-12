@@ -130,6 +130,48 @@ jobs:
           grep -q '^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=' sdkconfig
           echo "configuration inherited from sdkconfig.defaults.${{ matrix.target }}"
 
+      # All four shipped configurations have CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
+      # on, so all four must advertise the _ezlo._tcp record that points at it.
+      # That advert is now behind an #if, and the failure this guards against
+      # is the guard being wrong in the other direction: if it were inverted or
+      # its symbol renamed, every shipped image would silently stop announcing
+      # itself and only the MQTT job -- which asserts the opposite -- would
+      # still pass. A hub that no Ezlo client can discover is a serious
+      # regression that produces no error message anywhere.
+      #
+      # mdns_service_add is the right symbol to look for because the linker
+      # drops it when nothing calls it, which is exactly what the MQTT job
+      # relies on. Note this has to use nm: the symbol also appears in the
+      # linker map's discarded-sections and cross-reference lists even when it
+      # is not linked in, so grepping the .map would pass either way.
+      - name: Confirm this build advertises itself over mDNS
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          case "${{ matrix.target }}" in
+            esp32)   NM=xtensa-esp32-elf-nm ;;
+            esp32s2) NM=xtensa-esp32s2-elf-nm ;;
+            esp32s3) NM=xtensa-esp32s3-elf-nm ;;
+            esp32c3) NM=riscv32-esp-elf-nm ;;
+            *) echo "::error::no nm mapping for ${{ matrix.target }}"; exit 1 ;;
+          esac
+          grep -q '^CONFIG_EZPI_SERV_MDNS_EN=y' sdkconfig || {
+            echo "::error::CONFIG_EZPI_SERV_MDNS_EN is off, so this check is meaningless."
+            exit 1
+          }
+          grep -q '^CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER=y' sdkconfig || {
+            echo "::error::CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER is off in the shipped"
+            echo "::error::defaults for ${{ matrix.target }}; that is a change in its own right."
+            exit 1
+          }
+          "$NM" build/*.elf > mdns-symbols.txt
+          if ! grep -q 'mdns_service_add' mdns-symbols.txt; then
+            echo "::error::mdns_service_add is absent, so this image announces no service."
+            echo "::error::Check the #if around mdns_service_add() in ezlopi_core_mdns.c."
+            exit 1
+          fi
+          echo "mDNS service advert is linked in for ${{ matrix.target }}."
+
       # A flashable install is four images at four offsets: bootloader,
       # partition table, OTA data, application. The artifact below uploads
       # "build/*.bin", which is a non-recursive glob -- it matched the
@@ -484,6 +526,45 @@ jobs:
 
           echo "MQTT linked in: service, mapping, topic parser, non-blocking publish, broadcast pump"
           grep -iE 'EZPI_service_mqtt_init|EZPI_ha_|EZPI_service_broadcast_init' mqtt-symbols.txt
+
+      # The mirror image of the check in the four-target job, and the reason
+      # this configuration is worth building. mDNS is still on here, but there
+      # is no local websocket server: with CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
+      # off, ezlopi_main.c calls EZPI_service_ws_server_dummy() instead of
+      # EZPI_service_ws_server_start(), and the dummy does nothing, so the IP
+      # event handler that would call httpd_start() is never registered and
+      # nothing ever listens on the port.
+      #
+      # The advert used to be unconditional, so this build announced
+      # _ezlo._tcp on a port with no listener and any client that discovered
+      # the hub got a refused connection. Asserting the absence rather than
+      # the presence is deliberate: the bug being guarded is advertising a
+      # service that does not exist, and the only way to catch its return is
+      # to require the symbol be gone.
+      - name: Confirm no service is advertised on a port with no listener
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          # The assertion is only meaningful if mDNS is actually compiled in;
+          # otherwise "no advert" would be true for an uninteresting reason.
+          grep -q '^CONFIG_EZPI_SERV_MDNS_EN=y' sdkconfig || {
+            echo "::error::CONFIG_EZPI_SERV_MDNS_EN is off, so this check proves nothing."
+            exit 1
+          }
+          if grep -q 'mdns_service_add' mqtt-symbols.txt; then
+            echo "::error::mdns_service_add is linked in, but nothing listens on that port"
+            echo "::error::in this configuration. The _ezlo._tcp advert in"
+            echo "::error::ezlopi_core_mdns.c must stay behind CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER."
+            exit 1
+          fi
+          # EZPI_init_mdns itself must survive: the hostname is still set, so
+          # <hostname>.local still resolves. If this vanished it would mean the
+          # whole service had been guarded out, which is more than intended.
+          if ! grep -q 'EZPI_init_mdns' mqtt-symbols.txt; then
+            echo "::error::EZPI_init_mdns is absent; mDNS hostname resolution was lost too."
+            exit 1
+          fi
+          echo "no _ezlo._tcp advert in this build, and hostname resolution is retained"
 
   # Assembles install/ into a publishable directory: the static page plus the
   # merged image from each of the four firmware builds. See install/README.md.
