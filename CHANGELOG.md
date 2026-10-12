@@ -126,6 +126,42 @@ the parsers involved. All four are covered by regression tests in
   the end of the buffer and into the rest of `GPS6MV2_t` — a write overflow,
   not only an over-read. The copy is now clamped and terminated.
 
+- **The MB1013 clamp above was not sufficient, and the comment claiming it was
+  is wrong.** Clamping the loop bounded which indices were *tested*; it did not
+  bound the `atoi()` call inside the loop body:
+
+  ```c
+  atoi((const char *)&buffer[idx + 1]) / 10.0
+  ```
+
+  That reads a `char *` from a heap block containing no NUL anywhere. The
+  comment added with the clamp argued it was safe because the payload "starts at
+  a digit and stops at the first non-digit, and `buffer[idx + 5]` is known to be
+  `'\r'`". Both halves are false. Nothing checked that the four payload bytes
+  were digits, and `'\r'` is a **whitespace** character, which `strtol` — which
+  `atoi` is — *skips* rather than stopping at. So a frame whose payload is
+  whitespace made the conversion step over the frame's own terminator and keep
+  walking off the end of the allocation.
+
+  Confirmed, not reasoned: against exact-size heap blocks under
+  AddressSanitizer, `"R"` + four spaces + `"\r"` gives
+  `heap-buffer-overflow ... 0 bytes after 6-byte region` inside
+  `StrtolFixAndCheck`. Tabs and newlines do the same. Well-formed four-digit
+  frames were never affected, which is why this survived the clamp review;
+  `"Rzzzz\r"` and `"R   -\r"` were also safe, because `strtol` does stop at a
+  letter or a sign.
+
+  Fixed by removing the class rather than the instance: the frame scan moved to
+  a new `mb1013_parse.c` and reads exactly the four payload bytes, never calling
+  a string function on unterminated memory. Two behaviour changes, both only on
+  malformed input and both documented in `mb1013_parse.h`: a payload with no
+  digit now yields *no* reading instead of a fabricated `0.0`, and the scan
+  continues past it, so a junk frame no longer masks a good frame later in the
+  same buffer. Every input the old code read correctly still reads the same —
+  verified against `atoi()` on a NUL-terminated copy across all 10000
+  four-digit frames, 0 unrecognised and 0 mismatched, with space-padded payloads
+  and the `"12z3"` → `12` truncation point preserved deliberately.
+
 - **The ZE08-CH2O checksum rejected 99.6% of valid frames, so that sensor has
   never reported a reading.** `ze08_ch2o_sensor_checksum()` was two nested
   loops with identical bounds and the same induction variable name, the inner
@@ -742,9 +778,9 @@ failure.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 2737 assertions across
-  six binaries, no framework, no hardware. `make -C tests/host` builds and runs
-  the lot from scratch in about four seconds; the binaries themselves take a
+- **New host test suite, [`tests/host/`](tests/host/)**: 2787 assertions across
+  seven binaries, no framework, no hardware. `make -C tests/host` builds and runs
+  the lot from scratch in about four and a half seconds; the binaries themselves take a
   tenth of that, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
   -Werror` except for two scoped exemptions the `Makefile` documents at the
@@ -797,6 +833,45 @@ failure.
   *compiler*, not the test, was doing the catching. Rewritten to leave the
   parameter referenced and the condition unreachable, it now aborts under
   AddressSanitizer, which is the actual claim being made.
+
+- **The MB1013 parser was split out the same way, and doing it found a live
+  bug** — `tests/host/test_mb1013.c`, 50 checks. The split was undertaken to
+  make an existing clamp testable; re-reading the comment justifying that clamp
+  while writing the tests is what exposed the unterminated `atoi()` over-read
+  described above. That is the argument for this work in one sentence: the clamp
+  had been reviewed and documented, and the hole was still there until something
+  executed it.
+
+  `mb1013_parse.c` is the cleanest of the three driver rules in the `Makefile`:
+  no `-Istubs` at all, and its complete set of undefined symbols is `__divdf3`,
+  `__floatunsidf` and `__truncdfsf2` — libgcc soft-float, for the one `/ 10.0`.
+  Nothing from libc, nothing from ESP-IDF. Verified on the pinned v4.4.6
+  toolchain that the object is produced, that the driver imports
+  `EZPI_mb1013_parse_range` from it, that the symbol reaches the ELF, and that
+  no MB1013 object imports `atoi` or `strtol` any more.
+
+  The tests allocate every frame at its exact length, so the byte after the
+  terminator is poisoned and a one-byte over-read aborts rather than landing
+  harmlessly in a scratch array — without that, the original defect passes. They
+  sweep all 10000 real frames against `atoi()` on a terminated copy as an
+  independent oracle, slide a frame through every offset 0..31, reject every
+  length 0..5 while accepting exactly 6, and cover whitespace payloads at
+  several offsets.
+
+  **Eight of eight mutations caught**, with two worth recording. The one that
+  matters most — restoring the original `atoi()` — was initially caught by the
+  *compiler*, because the mutation orphaned the payload helper and
+  `-Werror=unused-function` fired; it was rewritten to keep the call and discard
+  only its result, and now aborts under ASan. Separately, widening the payload
+  scan bound is **not** caught, and that is correct: it is an equivalent mutant,
+  because the scan stops at the first non-digit and the caller has already
+  established that the following byte is `'\r'`. It is still run and reported,
+  counted in neither direction, because the reasoning depends on the terminator
+  check — and noticing that dependency is what added
+  `test_terminator_is_required()`, which had been missing.
+
+  **This converts a second of the four previously untestable clamps into a
+  tested one**, leaving R307 and GY-GPS6MV2.
 
 - **New CI workflow, [`.github/workflows/ci.yml`](.github/workflows/ci.yml).**
   Nothing in this repository was checked automatically before.
@@ -1059,20 +1134,30 @@ Listed because a changelog that only mentions what was finished is misleading.
   means "against frames this repo constructs from the datasheet rule", not
   against a real sensor; its checksum fix means that sensor should start
   reporting readings for the first time, and *should* is the operative word.
-  The PMS5003 clamp now has 92 host checks behind it on the same terms. The
-  MB1013, R307 and GY-GPS6MV2 clamps are verified only by an esp32 build.
-- **The MB1013, R307 and GY-GPS6MV2 parsers still cannot be host-tested.**
+  The PMS5003 and MB1013 clamps now have 92 and 50 host checks behind them on
+  the same terms. The R307 and GY-GPS6MV2 clamps are verified only by an esp32
+  build — and MB1013 is the reason that distinction is worth taking seriously
+  rather than treating a reviewed clamp as settled: its clamp was reviewed,
+  documented and wrong, and only writing the tests showed it.
+- **The R307 and GY-GPS6MV2 parsers still cannot be host-tested.**
   ZE08-CH2O is in the suite because its ESP-IDF dependency happens to be
-  confined to type declarations, and PMS5003 because its parser was moved into
-  its own translation unit. The other three are harder for a specific reason
-  worth recording: their UART upcalls — `__uart_data_upcall`,
+  confined to type declarations, and PMS5003 and MB1013 because their parsers
+  were moved into their own translation units. The remaining two are harder for
+  a specific reason worth recording: their UART upcalls —
   `__uart_0066_fingerprint_upcall` and `__uart_gps6mv2_upcall`, the functions
   that hold the clamps added here — live in the `sensor_00XX_*.c` registration
   file alongside `ezlopi_core_cloud.h`, `ezlopi_cloud_items.h` and the device
   value-updated path, not in the adjacent `gyGPS6MV2.c` / `R307_AS606.c` driver
   file, which is itself nearly dependency-free. So the split is not a file move
   as it was for PMS5003; the parsing has to be lifted out of the cloud
-  reporting it is interleaved with first.
+  reporting it is interleaved with first. MB1013 shows that is tractable — its
+  upcall had the same entanglement, and only the frame scan needed to move.
+- **GY-GPS6MV2 has five `atoi()` calls not yet checked for the MB1013 defect.**
+  `gyGPS6MV2.c` calls `atoi` on GPGGA fields and `strchr`/`strstr`/`strlen` on
+  `gps_cir_buf`. The `strlen` over-read there is fixed, but the MB1013 finding
+  is that a clamp around a string function is not the same as bounding it, so
+  those five calls need the same treatment this entry describes before that
+  driver can be called clean.
 - **The ESP-IDF migration is measured, not attempted.** v4.4.6 is still the
   only supported version. Every number in
   [docs/esp-idf-migration.md](docs/esp-idf-migration.md) comes from a compile:

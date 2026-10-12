@@ -16,6 +16,7 @@ CJEXT_DIR    := ../../ezlopi-components/cjext
 UART_HAL_DIR := ../../ezlopi-hal/ezlopi-hal-uart
 ZE08_DIR     := ../../ezlopi-sensors-devices/sensor-0069-UART-ze08-ch02-gas-sensor
 PMS_DIR      := ../../ezlopi-sensors-devices/sensor-0037-pms5003-sensor
+MB1013_DIR   := ../../ezlopi-sensors-devices/sensor-0021-UART-MB1013
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -46,7 +47,8 @@ CFLAGS  += -std=c99 -O1 -g \
 LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
-TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003
+TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
+           test_mb1013
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -129,6 +131,18 @@ $(BUILD)/test_pms5003: PMS_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
                                      $(SANITIZERS)
 $(BUILD)/test_pms5003: test_pms5003.c $(PMS_DIR)/pms5003_parse.c | $(BUILD)
 	$(CC) $(PMS_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# The MB1013 parser needs no stubs at all -- not even the UART HAL headers that
+# ze08 and pms5003 pull in -- because the split left it taking a buffer and a
+# length and returning a value, with the item and user_arg handling kept in the
+# driver. It is the cheapest of the three rules here, which is the argument for
+# the seam: the ESP-IDF surface a parser needs is usually zero once the
+# hardware plumbing is on the other side of a function call.
+$(BUILD)/test_mb1013: MB1013_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                       -I$(MB1013_DIR) \
+                                       $(SANITIZERS)
+$(BUILD)/test_mb1013: test_mb1013.c $(MB1013_DIR)/mb1013_parse.c | $(BUILD)
+	$(CC) $(MB1013_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

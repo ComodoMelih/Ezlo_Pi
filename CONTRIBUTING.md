@@ -64,10 +64,10 @@ make -C tests/host
 ```
 
 This needs only a C compiler. It compiles the real firmware sources — no copies
-— for six areas that handle untrusted input: the helpers in
+— for seven areas that handle untrusted input: the helpers in
 [`ezlopi-util/ezlopi-util-sanitize`](ezlopi-util/ezlopi-util-sanitize/), the
 vendored cJSON extensions, the Improv state machine, the Home Assistant
-discovery builder, and the ZE08-CH2O and PMS5003 frame parsers. Everything is built under
+discovery builder, and the ZE08-CH2O, PMS5003 and MB1013 frame parsers. Everything is built under
 AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
 -Werror` except where [`tests/host/Makefile`](tests/host/Makefile) documents a
 scoped exemption for vendored or third-party code. Then it runs the assertions
@@ -87,6 +87,9 @@ in [`tests/host/`](tests/host/). It should end with:
 26 check(s), 0 failure(s)
 === build/test_pms5003 ===
 92 check(s), 0 failure(s)
+=== build/test_mb1013 ===
+  swept 10000 four-digit frames: 0 unrecognised, 0 mismatched
+50 check(s), 0 failure(s)
 HOST TESTS PASSED
 ```
 
@@ -118,13 +121,32 @@ around, because the stub would then hide the dependency instead of forcing this
 split. If you find yourself wanting to add function declarations to that stub,
 the seam is what you actually want.
 
-The remaining three UART drivers still reach into cJSON, the device and item
-core, and the GPIO ISR service, so they need the PMS5003 treatment before they
-can join.
+MB1013 is the same split, and it shows how little the parser usually needs once
+the hardware plumbing is on the other side of a function call: its rule in the
+`Makefile` passes no `-Istubs` at all, and `mb1013_parse.c` imports nothing from
+libc or ESP-IDF — only three libgcc soft-float helpers, for the one division
+that turns the raw reading into metres. Aim for that. When a parser takes a
+buffer and a length and returns a value, the ESP-IDF surface it needs tends to
+be zero.
+
+The remaining two UART drivers still reach into cJSON, the device and item
+core, and the GPIO ISR service, so they need the same treatment before they can
+join.
 
 When you add a test, check that it would actually have caught the bug: break
 the fix on purpose, confirm the suite goes red, then put it back. A test that
 passes against the broken code is evidence of nothing.
+
+Two traps there, both of which this suite hit for real. First, if your deliberate
+break stops the file *compiling* — deleting a bounds check often removes the
+only use of the length parameter, and `-Werror=unused-parameter` then fails the
+build — the compiler caught it and your test is still unproven. Make the
+condition unreachable instead of deleting it. Second, if a break is *not* caught,
+work out whether it is actually unobservable before assuming the test is weak:
+MB1013's payload-scan bound can be widened with no effect, because the scan stops
+at the first non-digit and the caller has already established the byte after the
+payload is `'\r'`. That is a sound argument, but it rests on the terminator
+check, which is why `test_terminator_is_required()` exists.
 
 ### Firmware build
 

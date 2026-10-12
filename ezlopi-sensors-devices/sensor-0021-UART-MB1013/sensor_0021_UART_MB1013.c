@@ -51,6 +51,7 @@
 #include "ezlopi_cloud_constants.h"
 
 #include "sensor_0021_UART_MB1013.h"
+#include "mb1013_parse.h"
 #include "EZLOPI_USER_CONFIG.h"
 
 /*******************************************************************************
@@ -157,36 +158,22 @@ static void __uart_data_upcall(uint8_t *buffer, uint32_t output_len, s_ezlopi_ua
             s_mb1013_args_t *s_mb1013_args = (s_mb1013_args_t *)item->user_arg;
             if (s_mb1013_args)
             {
-                uint32_t idx = 0;
                 TRACE_D("BUFFER-DATA-LEN: %d", output_len);
-                // A reading is the six bytes 'R', four digits, '\r'. The loop
-                // condition used to be "idx < output_len" while the body reads
-                // buffer[idx + 5], so the last five iterations read up to five
-                // bytes past the end of the heap block the UART HAL sized to
-                // the bytes that actually arrived. Requiring the whole
-                // six-byte frame to fall inside output_len fixes that and
-                // loses nothing: an 'R' within the final five bytes cannot be
-                // a complete reading, and matching one there against whatever
-                // happened to follow the allocation was the one way a
-                // truncated frame could be mistaken for a good one.
+
+                // The frame scan moved to mb1013_parse.c so it could be
+                // compiled and tested by a host compiler; this file cannot be,
+                // because of the cloud and item includes above. What stays
+                // here is the part that is specific to this driver's plumbing:
+                // unwrapping user_arg and storing the result.
                 //
-                // idx is unsigned to match output_len. It was int, which the
-                // comparison promoted to unsigned anyway, so this only removes
-                // the sign-compare rather than changing any outcome.
-                while ((idx + 5) < output_len)
+                // The clamp added in cecf5da bounded the loop but not the
+                // atoi() inside it, which read off the end of the allocation
+                // for a frame padded with whitespace. See mb1013_parse.h.
+                float range_m = 0.0f;
+                if (EZPI_mb1013_parse_range(buffer, output_len, &range_m))
                 {
-                    // dump("rx-buffer", buffer, idx, 6);
-                    if ('R' == buffer[idx] && '\r' == buffer[idx + 5])
-                    {
-                        // atoi on a buffer with no terminator is safe only
-                        // because of the test above: it starts at a digit and
-                        // stops at the first non-digit, and buffer[idx + 5] is
-                        // known to be '\r' and known to be inside output_len.
-                        s_mb1013_args->current_value = atoi((const char *)&buffer[idx + 1]) / 10.0;
-                        TRACE_D("range: %f", s_mb1013_args->current_value);
-                        break;
-                    }
-                    idx++;
+                    s_mb1013_args->current_value = range_m;
+                    TRACE_D("range: %f", s_mb1013_args->current_value);
                 }
             }
         }
