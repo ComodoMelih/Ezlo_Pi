@@ -18,6 +18,7 @@ ZE08_DIR     := ../../ezlopi-sensors-devices/sensor-0069-UART-ze08-ch02-gas-sens
 PMS_DIR      := ../../ezlopi-sensors-devices/sensor-0037-pms5003-sensor
 MB1013_DIR   := ../../ezlopi-sensors-devices/sensor-0021-UART-MB1013
 GPS_DIR      := ../../ezlopi-sensors-devices/sensor-0053-UART-GYGPS6MV2
+UUID_DIR     := ../../ezlopi-util/ezlopi-util-uuid
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -49,7 +50,7 @@ LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
-           test_mb1013 test_gps6mv2
+           test_mb1013 test_gps6mv2 test_uuid
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -163,6 +164,28 @@ $(BUILD)/test_gps6mv2: GPS_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
                                      $(SANITIZERS)
 $(BUILD)/test_gps6mv2: test_gps6mv2.c $(GPS_DIR)/gyGPS6MV2.c | $(BUILD)
 	$(CC) $(GPS_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# ezlopi-util-uuid ties MB1013 for the shortest command line here -- one -I,
+# its own directory, and no stubs -- but it got there differently, and the
+# difference is the point. MB1013 needed a split: mb1013_parse.c was carved out
+# of a driver that configures GPIOs. This file needed nothing at all.
+# ezlopi_util_uuid.c includes <stdlib.h>, <string.h> and <time.h>, its header
+# includes nothing, and the whole translation unit compiles against the system
+# compiler unmodified.
+#
+# Which is the uncomfortable part: this component could have been tested from
+# the day it was written, and was not. ezlopi_util_uuid_parse() turned out to
+# have four defects, including a read past the end of its input buffer that
+# ASan reports on any string shorter than 32 hex digits. None of them was
+# reachable, because nothing in the repository calls this component -- it is
+# dead code that compiles into the image. The argument for a seam is usually
+# about ESP-IDF dependencies; this one needed no seam and no argument, just
+# somebody writing the file.
+$(BUILD)/test_uuid: UUID_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                   -I$(UUID_DIR) \
+                                   $(SANITIZERS)
+$(BUILD)/test_uuid: test_uuid.c $(UUID_DIR)/ezlopi_util_uuid.c | $(BUILD)
+	$(CC) $(UUID_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

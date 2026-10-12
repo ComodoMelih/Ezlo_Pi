@@ -57,6 +57,12 @@ extern "C"
  *******************************************************************************/
 #define RAND_LENGTH 4
 
+/* Bytes needed for the canonical string form: 32 hex digits + 4 hyphens + the
+   terminator. ezlopi_util_uuid_unparse() writes out[36] unconditionally, so a
+   caller passing char[36] is one byte short. That requirement was previously
+   not stated anywhere. */
+#define EZLOPI_UUID_STR_SIZE 37
+
     typedef unsigned char ezlopi_uuid_t[16];
 
 #define uuid_generate(out) ezlopi_util_uuid_generate_random(out)
@@ -75,10 +81,16 @@ extern "C"
      */
     void ezlopi_util_uuid_generate_random(ezlopi_uuid_t out);
     /**
-     * @brief Function to unparse uuid
+     * @brief Writes uuid as the canonical 8-4-4-4-12 hyphenated form.
      *
      * @param uuid Target uuid
-     * @param out pointer to destination
+     * @param out Destination. MUST have room for at least
+     *            EZLOPI_UUID_STR_SIZE (37) bytes: 32 hex digits, 4 hyphens
+     *            and the terminator. This was previously undocumented and the
+     *            function writes out[36] unconditionally, so a 36-byte buffer
+     *            is one byte short.
+     *
+     * Emits lowercase hex.
      */
     void ezlopi_util_uuid_unparse(const ezlopi_uuid_t uuid, char *out);
     /**
@@ -89,10 +101,23 @@ extern "C"
      */
     void ezlopi_util_uuid_copy(ezlopi_uuid_t dst, const ezlopi_uuid_t src);
     /**
-     * @brief Function to parse uuid
+     * @brief Parses the canonical hyphenated form, or 32 bare hex digits.
      *
-     * @param in
-     * @param uuid
+     * @param in NUL-terminated input. Hyphens may appear anywhere and are
+     *           skipped; hex digits may be upper or lower case. May be NULL.
+     * @param uuid Destination, always fully written.
+     *
+     * Stops at the terminator, so a short string is not read past its end.
+     *
+     * KNOWN LIMITATION: there is no way to report failure. Malformed, short
+     * or NULL input yields the nil UUID (all zero), which a caller cannot
+     * distinguish from successfully parsing the string
+     * "00000000-0000-0000-0000-000000000000". The signature was left alone
+     * rather than changed to return a bool, because nothing in this
+     * repository calls this function and the change was not worth making in
+     * the same commit that fixed the parsing itself. If you are about to rely
+     * on this in a context where the input is untrusted, add the return value
+     * first.
      */
     void ezlopi_util_uuid_parse(const char *in, ezlopi_uuid_t uuid);
 

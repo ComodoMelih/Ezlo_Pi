@@ -41,6 +41,7 @@
  *                          Include Files
  *******************************************************************************/
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 // #include "config.h"
@@ -118,29 +119,99 @@ void ezlopi_util_uuid_generate_random(ezlopi_uuid_t out)
     out[8] = (out[8] & 0x0f) | 0xa0;
 }
 
+/* Rewritten. The previous version had four defects, none of them reachable --
+   nothing in this repository calls any function in this component -- but all
+   four demonstrated by compiling this file on a host and running it, because
+   it depends on nothing but <stdlib.h> and <time.h>:
+
+     - It read past the end of its input. The only bounds were j < 16 and
+       i < 36 and the body read in[i + 1], so nothing consulted the
+       terminator. Parsing a 9-byte heap buffer holding "550e8400" gave
+       AddressSanitizer "heap-buffer-overflow READ of size 1 ... 0 bytes after
+       9-byte region". That is the serious one: a UUID arriving from the cloud
+       or a scene is attacker-influenced in both contents and length.
+
+     - It advanced by 2 on the iteration that saw a '-'. A hyphen is one
+       character, so that consumed the hyphen and the first digit after it,
+       and every byte from there on was read one nibble out of step. The
+       canonical form this component's own unparse() emits,
+       "550e8400-e29b-41d4-a716-446655440000", came back as
+       550e840029ff41d471ff446655440000 -- wrong from byte [4], which is
+       exactly where the first hyphen sits. So the two halves of this
+       component did not round-trip through each other.
+
+     - __hex2dec() compared against a lowercase-only table with ==, so 'A'
+       through 'F' returned -1. Verified to be an independent defect rather
+       than a knock-on of the hyphen skip by parsing uppercase with the
+       hyphens already removed, which was still wrong. RFC 4122 s3 requires a
+       reader to accept both cases.
+
+     - The -1 that __hex2dec() returns for an unrecognised character went
+       straight into (x << 4) | y unchecked. Left-shifting a negative value is
+       undefined behaviour, and UndefinedBehaviorSanitizer duly reported
+       "left shift of negative value -1"; the result was stored as 0xff, so
+       malformed input silently produced plausible-looking bytes.
+
+   The signature is deliberately unchanged. Returning a bool would be
+   source-compatible, since every call would be a statement that ignores it,
+   but this is a published header in a library with no callers and an API
+   change is not worth arguing about in review. Instead the failure mode is at
+   least made deterministic: malformed or short input now yields the nil UUID
+   (all zero) rather than a half-written buffer. A caller still cannot tell
+   "the input was the nil UUID" from "the input was rejected", which is a real
+   limitation and is noted in the header rather than papered over. */
 void ezlopi_util_uuid_parse(const char *in, ezlopi_uuid_t uuid)
 {
-    int i, j;
+    int i = 0;
+    int j = 0;
+    int bad = 0;
 
-    i = j = 0;
-
-    do
+    if (NULL == uuid)
     {
-        switch (in[i])
+        return;
+    }
+
+    if (NULL == in)
+    {
+        bad = 1;
+    }
+
+    while ((0 == bad) && (j < 16) && ('\0' != in[i]))
+    {
+        /* A hyphen is one character, so advance by one. Advancing by two here
+           was the misalignment bug: it consumed the hyphen and the first digit
+           after it. */
+        if ('-' == in[i])
         {
-        case '-':
+            i++;
+            continue;
+        }
+
+        /* Check for the terminator before looking at the second digit, so a
+           string ending mid-byte stops here rather than being read past its
+           NUL. This is the test the old loop did not have. */
+        const int hi = __hex2dec(in[i]);
+        const int lo = ('\0' == in[i + 1]) ? -1 : __hex2dec(in[i + 1]);
+
+        if ((hi < 0) || (lo < 0))
         {
+            bad = 1;
             break;
         }
-        default:
-        {
-            uuid[j++] = (__hex2dec(in[i]) << 4) | __hex2dec(in[i + 1]);
-        }
-        }
 
+        uuid[j++] = (unsigned char)((hi << 4) | lo);
         i += 2;
+    }
 
-    } while (j < 16 && i < 36);
+    /* Anything short of a complete 16 bytes is a failure. Zero all of it
+       rather than leaving the bytes that did parse in place: a half-written
+       UUID is the worst of the three options, because it looks like a
+       successful parse of a different UUID. All-zero is at least a value a
+       caller can recognise as suspicious. */
+    if ((0 != bad) || (16 != j))
+    {
+        memset(uuid, 0, sizeof(ezlopi_uuid_t));
+    }
 }
 
 void ezlopi_util_uuid_unparse(const ezlopi_uuid_t uuid, char *out)
@@ -171,7 +242,11 @@ void ezlopi_util_uuid_unparse(const ezlopi_uuid_t uuid, char *out)
 
 void ezlopi_util_uuid_copy(ezlopi_uuid_t dst, const ezlopi_uuid_t src)
 {
-    int i;
+    /* Was `int i`, compared against sizeof -- a signed/unsigned comparison
+       that -Wextra reports and that the host test suite's -Werror rejects.
+       Harmless in itself; fixed because this file now compiles under those
+       flags rather than only under the firmware build's looser ones. */
+    size_t i;
     for (i = 0; i < sizeof(ezlopi_uuid_t); i++)
     {
         dst[i] = src[i];
@@ -185,6 +260,16 @@ void ezlopi_util_uuid_copy(ezlopi_uuid_t dst, const ezlopi_uuid_t src)
 static int __hex2dec(char c)
 {
     int i;
+
+    /* hex[] holds lowercase digits only and the comparison below is exact, so
+       'A' through 'F' used to fall through to the -1 return. RFC 4122 s3 says
+       a reader must accept either case. Folded with an explicit range rather
+       than tolower() to avoid pulling in <ctype.h> and its locale dependency
+       for six characters. */
+    if ((c >= 'A') && (c <= 'F'))
+    {
+        c = (char)(c - 'A' + 'a');
+    }
 
     for (i = 0; i < 16; i++)
     {

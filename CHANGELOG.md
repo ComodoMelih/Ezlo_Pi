@@ -726,6 +726,81 @@ failure.
   unsynchronised walks in `ezlopi-cloud`. It belongs in the core, for all of
   them at once. See [Known gaps](#known-gaps).
 
+### UUID utility — [bug]
+
+**None of this is reachable.** Nothing in the repository calls any function in
+`ezlopi-util-uuid` — not `parse`, not `unparse`, not `generate_random`, not
+`copy`, not the `uuid_generate` macro. That is not just a `grep` result: the
+component's object file defines all four as global text symbols, and the linker
+discards every one of them, so `nm` on `Ezlo_Pi_v4x.elf` matches
+`ezlopi_util_uuid` zero times and the image is byte-identical before and after
+this change at `0x18fca0`. The code is fixed because it is a published utility
+header in an open-source project and the next person to call it would have
+inherited all of the below — not because anything was failing on a device. Read
+the rest of this entry with that in front of it.
+
+- **`ezlopi_util_uuid_parse()` read past the end of its input.** The loop's only
+  bounds were `j < 16` and `i < 36`, and the body read `in[i + 1]`. Nothing
+  consulted the terminator, so any string shorter than 32 hex digits was walked
+  past its NUL. Parsing a 9-byte heap buffer holding `"550e8400"` gives
+  AddressSanitizer `heap-buffer-overflow READ of size 1 ... 0 bytes after
+  9-byte region`; an 8-character string *literal* gives
+  `global-buffer-overflow ... 0 bytes after global ... of size 9`, so it is
+  visible on either storage class. This is the one that would have mattered: a
+  UUID arriving from a cloud payload or a scene definition is attacker-
+  influenced in both content and length.
+
+- **It did not round-trip through its own `unparse()`.** `parse()` advanced `i`
+  by two on the iteration that saw a `'-'`. A hyphen is one character, so that
+  consumed the hyphen *and* the first digit after it, and every byte from there
+  on was read one nibble out of step. Feeding `unparse()`'s own output
+  `550e8400-e29b-41d4-a716-446655440000` straight back in returned
+  `550e840029ff41d471ff446655440000` — wrong from byte `[4]`, which is exactly
+  where the first hyphen sits. The two halves of the component disagreed with
+  each other. `unparse()` was and is correct; only `parse()` was changed.
+
+- **Uppercase hex did not parse.** `__hex2dec()` compared against a
+  lowercase-only table with `==`, so `'A'` through `'F'` returned `-1`. RFC 4122
+  §3 requires a reader to accept either case. Confirmed to be an independent
+  defect rather than a knock-on of the hyphen bug by parsing uppercase input
+  with the hyphens already removed, which was still wrong — worth stating
+  because the obvious assumption was that one bug explained both symptoms.
+
+- **Undefined behaviour on malformed input.** The `-1` from `__hex2dec()` went
+  straight into `(x << 4) | y` unchecked. Left-shifting a negative value is
+  undefined, and UndefinedBehaviorSanitizer reports `left shift of negative
+  value -1`; the result landed as `0xff`, so garbage input produced
+  plausible-looking bytes rather than any kind of error.
+
+  Malformed, short or `NULL` input now yields the nil UUID. **The signature was
+  deliberately left as `void`**, so a caller still cannot distinguish a rejected
+  string from a successful parse of
+  `00000000-0000-0000-0000-000000000000`. Returning a `bool` would have been
+  source-compatible — every call site would be a statement ignoring it — but
+  there are no call sites to be compatible with, and an API change did not
+  belong in the same commit as the parsing fix. The limitation is documented in
+  the header instead of being left for someone to discover.
+
+- **Also in this component, and also not bugs:** the `hex` lookup table was
+  `const unsigned char hex[16]` initialised from a 16-character literal, which
+  legally drops the NUL (C99 §6.7.8p14) and would trip gcc 15's
+  `-Wunterminated-string-initialization`; it is `static const unsigned char
+  hex[]` now, static because nothing outside the file referred to it.
+  `ezlopi_util_uuid_copy()` compared an `int` against `sizeof`.
+  `ezlopi_util_uuid_unparse()` writes `out[36]` unconditionally and never
+  documented that it needs 37 bytes — there is now an `EZLOPI_UUID_STR_SIZE`
+  for that.
+
+- **Not fixed, and the more serious weakness of the two:**
+  `ezlopi_util_uuid_generate_random()` uses `srand(time(NULL))` and `rand()`.
+  That is seeded once per boot at one-second resolution, so two devices powering
+  up in the same second generate identical UUIDs, and the sequence is
+  predictable to anyone who knows roughly when a device booted. ESP-IDF provides
+  `esp_fill_random()` for exactly this. It is left alone here because adding it
+  would give this component its first ESP-IDF dependency and cost it the host
+  tests added below — the fix is a seam, not a one-liner, and it is listed in
+  [Known gaps](#known-gaps).
+
 ### Dead null checks — [bug]
 
 - **31 checks that compared an array's own address against NULL.** Across seven
@@ -859,8 +934,8 @@ failure.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 2933 assertions across
-  eight binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 3364 assertions across
+  nine binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
@@ -876,6 +951,31 @@ failure.
   the suite fail, by assertion or by ASan. A green suite that would also pass
   against the original buggy code is worse than no suite, because it is
   evidence of nothing.
+
+- **`ezlopi-util-uuid` joined the suite** — `tests/host/test_uuid.c`, 431
+  checks. It ties MB1013 for the shortest build rule in the `Makefile` — one
+  `-I`, its own directory, no stubs — but it reached that point differently,
+  and the difference is the point: MB1013 needed a parser split, and this
+  needed nothing. The whole translation unit compiles unmodified against the
+  system compiler. Every other entry in this suite needed either a split or a
+  shim; this one needed neither and had simply never been tested. It could have
+  been covered from the day it was written. `ezlopi_util_uuid_parse()` turned
+  out to have four defects, described under **UUID utility — [bug]** above, one
+  of which ASan reports as a buffer overflow — so the cost of leaving a dependency-free file untested was
+  four real defects sitting in a published header. Checking the includes before
+  reaching for the dependency argument is now the first paragraph of that
+  section in `CONTRIBUTING.md`.
+
+  **This one was mutation-tested against real history rather than an invented
+  break.** The suite was compiled against the pre-fix file taken straight from
+  the previous commit (`git show HEAD:...`), which fails it loudly: the
+  canonical round trip fails, UBSan reports `left shift of negative value -1`,
+  and ASan aborts the run on `global-buffer-overflow`. One number from that run
+  is worth keeping — of the 256 swept round-trip patterns, 240 failed and **16
+  passed**. A nibble-level misalignment is invisible whenever the adjacent
+  nibbles repeat, so a single hard-coded UUID had roughly a one-in-sixteen
+  chance of turning this bug into a green run. That is the argument for
+  sweeping inputs instead of picking one, in numbers rather than in principle.
 
 - **The PMS5003 frame parser was split out so it could be tested at all** —
   `tests/host/test_pms5003.c`, 92 checks. This is the first driver brought into
@@ -1314,6 +1414,18 @@ failure.
 ## Known gaps
 
 Listed because a changelog that only mentions what was finished is misleading.
+
+- **`ezlopi_util_uuid_generate_random()` is not random.** It calls
+  `srand(time(NULL))` once and then `rand()`. The seed has one-second
+  resolution, so two devices powering up in the same second produce identical
+  UUIDs, and the sequence is predictable to anyone who knows roughly when a
+  device booted. ESP-IDF ships `esp_fill_random()`, backed by the hardware RNG,
+  for precisely this. It was left alone while fixing the four `parse()` defects
+  above because switching to it gives `ezlopi-util-uuid` its first ESP-IDF
+  dependency and would immediately cost the component the 431 host checks just
+  added — it needs the same HAL/parser seam the UART drivers needed, not a
+  one-line substitution. Nothing calls this function today, which is the only
+  reason it is a gap and not a defect.
 
 - **Only `esp32` has been run on hardware.** All four targets now compile
   cleanly, but compiling is not running. `esp32s2`, `esp32s3` and `esp32c3`

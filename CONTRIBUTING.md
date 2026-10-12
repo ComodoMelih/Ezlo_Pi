@@ -180,9 +180,34 @@ packet was moved into an oversized slab, because ASan aborted on the over-read
 first. Neither would have been noticed by reading the code. Delete the program
 afterwards; record the numbers.
 
+The opposite failure is worth the same warning, and it is more embarrassing:
+code that needed no seam at all and still had no tests. `ezlopi-util-uuid` ties
+MB1013 for the shortest build rule in `tests/host/Makefile` — one `-I`, its own
+directory, no stubs — but MB1013 got there by being split, and this needed
+nothing: `ezlopi_util_uuid.c` includes `<stdlib.h>`, `<string.h>` and
+`<time.h>`, its header includes nothing, and the whole file compiles unmodified.
+It could have been tested from the day it was written. When somebody finally did, `ezlopi_util_uuid_parse()` had
+four defects, including a read past the end of its input buffer on any string
+shorter than 32 hex digits, and a round trip through the component's own
+`unparse()` that did not return the original UUID. So before reaching for the
+dependency argument, check whether there is a dependency: `grep` the includes
+first. The answer is sometimes that nobody has written the file.
+
+That component is also a reminder to check *reachability* before writing
+"fixed a bug" anywhere. Nothing in this repository calls any function in
+`ezlopi-util-uuid`; it compiles into the image as dead code. The defects were
+real and are now tested, but they were never reachable, and the CHANGELOG
+entry says so in those words.
+
 When you add a test, check that it would actually have caught the bug: break
 the fix on purpose, confirm the suite goes red, then put it back. A test that
 passes against the broken code is evidence of nothing.
+
+Sweep inputs rather than picking one, and the uuid suite shows why in numbers.
+Run its 256 round-trip patterns against the old parser and 240 fail — but 16
+*pass*, because a nibble-level misalignment is invisible whenever the adjacent
+nibbles happen to repeat. A single hard-coded UUID had about a one-in-sixteen
+chance of turning that bug into a green run.
 
 Two traps there, both of which this suite hit for real. First, if your deliberate
 break stops the file *compiling* — deleting a bounds check often removes the
