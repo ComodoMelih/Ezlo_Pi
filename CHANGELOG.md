@@ -61,6 +61,39 @@ the parsers involved. All four are covered by regression tests in
   field, and changing the wire format is out of scope for a hardening pass. See
   the privacy note in the README.
 
+### UART sensor dispatch — [sec]
+
+- **The UART receive task invoked its callback with a NULL buffer on every
+  non-data event.** In `ezlopi_hal_uart.c` the `upcall(buffer, data_len, ...)`
+  call sits *outside* the event `switch`, so it also ran for `UART_BREAK`,
+  `UART_BUFFER_FULL`, `UART_FIFO_OVF`, any unrecognised event type, a
+  zero-length buffered read, and a failed `ezlopi_malloc` — in all of which
+  `buffer` is NULL and `data_len` is 0.
+
+  Three of the six registered callbacks dereference the buffer without testing
+  it: `pms_read_upcall()` reads `buffer[0]` as its first statement,
+  `ze08_ch2o_parse()` passes it straight to its checksum helper, and
+  `__uart_gps6mv2_upcall()` `memcpy()`s 256 bytes out of it. So a break
+  condition on the line — RX held low, which requires no cooperation from the
+  attached device and no authentication — was enough to panic a hub with a
+  PMS5003, ZE08-CH2O or GY-GPS6MV2 configured. The callback is now invoked only
+  when there is data. `uart_read_bytes()` also returns `-1` on failure, which
+  the old code widened into a huge `uint32_t`; the same guard covers that.
+
+- **Heap overflow in the UART read.** The buffer was allocated with the length
+  from `uart_get_buffered_data_len()` but filled with `event.size` bytes, and
+  those are two different numbers — `event.size` is this event's count, while
+  more bytes can arrive on the line between the two calls. Whenever `event.size`
+  was the larger, `uart_read_bytes()` wrote past the end of the allocation. Now
+  reads the smaller of the two.
+
+  **Not covered by a host test.** `ezlopi-hal-uart` needs `driver/uart.h` and
+  FreeRTOS, so it cannot compile in `tests/host/`, which deliberately builds
+  only IDF-free sources. Writing a test against a *copy* of the dispatch loop
+  was rejected for the reason given at the top of that Makefile — a copy
+  drifts. Covering this needs the HAL seam tracked in
+  [Known gaps](#known-gaps).
+
 ### BLE provisioning — [bug]
 
 The BLE provisioning flow worked only if everything succeeded on the first

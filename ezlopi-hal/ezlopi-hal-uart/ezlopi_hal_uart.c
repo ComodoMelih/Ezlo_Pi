@@ -285,7 +285,17 @@ static void ezlopi_uart_channel_task(void *args)
                     buffer = ezlopi_malloc(__FUNCTION__, bufferred_data_len);
                     if (buffer)
                     {
-                        data_len = uart_read_bytes(ezlopi_uart_object->ezlopi_uart.channel, buffer, event.size, 100 / portTICK_PERIOD_MS);
+                        // Read no more than was allocated. The allocation is
+                        // sized from uart_get_buffered_data_len(), but the read
+                        // length used event.size, and those are two different
+                        // numbers -- more bytes can arrive on the line between
+                        // the two calls, and event.size is this event's count
+                        // rather than what is currently buffered. Whenever
+                        // event.size was the larger of the two, uart_read_bytes
+                        // wrote past the end of the block, so this was a heap
+                        // overflow and not merely an inconsistency.
+                        const size_t to_read = (event.size < bufferred_data_len) ? event.size : bufferred_data_len;
+                        data_len = uart_read_bytes(ezlopi_uart_object->ezlopi_uart.channel, buffer, to_read, 100 / portTICK_PERIOD_MS);
                     }
                     else
                     {
@@ -309,7 +319,27 @@ static void ezlopi_uart_channel_task(void *args)
             }
             }
         }
-        ezlopi_uart_object->upcall(buffer, data_len, ezlopi_uart_object);
+        // Deliver only when there is actually data. This call sits outside the
+        // switch, so before this guard it also ran for UART_BREAK, UART_BUFFER_FULL,
+        // UART_FIFO_OVF, every unrecognised event type, a zero-length buffered
+        // read, and a failed malloc -- in all of which buffer is NULL and
+        // data_len is 0.
+        //
+        // That was reachable as a crash, not just untidy. Three of the six
+        // registered callbacks dereference buffer without testing it:
+        // pms_read_upcall() reads buffer[0] immediately, ze08_ch2o_parse()
+        // hands it straight to its checksum helper, and __uart_gps6mv2_upcall()
+        // memcpy()s 256 bytes out of it. A break condition on the line -- RX
+        // held low, which needs no cooperation from the attached device -- was
+        // enough to panic a hub with any of those three sensors configured.
+        //
+        // data_len is also signed and uart_read_bytes() returns -1 on failure,
+        // which this used to widen into a huge uint32_t for the callback. The
+        // "> 0" covers that too.
+        if (buffer && (data_len > 0))
+        {
+            ezlopi_uart_object->upcall(buffer, (uint32_t)data_len, ezlopi_uart_object);
+        }
         if (buffer)
         {
             ezlopi_free(__FUNCTION__, buffer);
