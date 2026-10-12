@@ -53,6 +53,11 @@ set(EZLOPI_SERVICES
         ezlopi-service-ws-server
         ezlopi-service-broadcast
         ezlopi-service-led-indicator
+        # Listed even though the service compiles to nothing with
+        # CONFIG_EZPI_ENABLE_MQTT off, so that the header resolves either way
+        # and the only difference between the two builds is the guard in the
+        # source rather than whether this line is reachable.
+        ezlopi-service-mqtt
 )
 
 # Register the components

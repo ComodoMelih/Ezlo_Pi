@@ -100,6 +100,101 @@ menu "EzloPi User Config"
             Off by default because it is new, and because anything that shares
             the console port deserves to be opted into rather than inherited.
 
+    config EZPI_ENABLE_MQTT
+        bool "Publish items to an MQTT broker for Home Assistant"
+        default n
+        help
+            Publish every item this controller has to an MQTT broker, with
+            Home Assistant MQTT discovery, so that the controller appears in
+            Home Assistant on its own without a cloud account and without a
+            custom integration.
+
+            This is additive. It does not replace or alter the Ezlo cloud
+            connection: state is taken from the same item-update broadcast the
+            cloud path already produces, by registering a third observer
+            alongside the two websocket transports, and writes arrive through
+            the same hub.item.value.set handler the cloud uses. Nothing in
+            ezlopi-core was changed to make room for it.
+
+            Off by default. It opens an outbound connection to a broker and
+            accepts commands that operate relays, which is not something to
+            inherit by upgrading.
+
+            Items with no sensible Home Assistant representation -- an array,
+            an opaque token -- are not published, rather than published as an
+            entity that reads "unknown" forever. RGB lights, and dimmers
+            paired with a switch, currently appear as their individual items
+            rather than as one light entity; see the service README.
+
+    config EZPI_MQTT_BROKER_URI
+        string "MQTT broker URI"
+        depends on EZPI_ENABLE_MQTT
+        default ""
+        help
+            Broker URI, for example mqtt://192.168.1.10:1883 or
+            mqtt://homeassistant.local:1883.
+
+            Empty by default on purpose: there is no sensible default broker,
+            and the service logs and stops rather than retrying an address
+            that cannot work. An unreachable broker is retried forever, which
+            is the right behaviour for one that is merely switched off.
+
+            mqtts:// needs CONFIG_MQTT_TRANSPORT_SSL, which the committed
+            sdkconfig.defaults files currently turn off, plus a CA certificate
+            this service does not yet take. Until then, keep the broker on a
+            trusted network: the credentials below cross the wire in plain
+            text, as does every reading.
+
+    config EZPI_MQTT_USERNAME
+        string "MQTT username"
+        depends on EZPI_ENABLE_MQTT
+        default ""
+        help
+            Leave empty for an anonymous broker. When empty, no credentials
+            are sent at all rather than empty ones, which some brokers reject
+            differently from no credentials.
+
+    config EZPI_MQTT_PASSWORD
+        string "MQTT password"
+        depends on EZPI_ENABLE_MQTT
+        default ""
+        help
+            Only used when a username is set.
+
+            This is stored in the built image in plain text, like every other
+            Kconfig string. Anyone who can read the flash can read it, so use
+            a broker account scoped to this controller rather than one that
+            can administer the broker.
+
+    config EZPI_MQTT_TOPIC_PREFIX
+        string "MQTT topic prefix for this controller's own topics"
+        depends on EZPI_ENABLE_MQTT
+        default "ezlopi"
+        help
+            Root of the topics this controller publishes state and
+            availability on, and listens for commands on:
+            <prefix>/<node>/<object>/state, .../set and <prefix>/<node>/status.
+
+            The node segment is derived from the MAC address, so two
+            controllers sharing a broker and this prefix do not collide.
+
+            Changing this after Home Assistant has discovered the entities
+            orphans them: the old discovery payloads point at the old topics,
+            so those entities go unavailable. New ones are published on the
+            next connect and the stale ones have to be deleted in Home
+            Assistant.
+
+    config EZPI_MQTT_DISCOVERY_PREFIX
+        string "Home Assistant discovery prefix"
+        depends on EZPI_ENABLE_MQTT
+        default "homeassistant"
+        help
+            Must match Home Assistant's own mqtt discovery_prefix setting.
+            "homeassistant" is the default there and almost never changed; if
+            it does not match, every discovery message goes to a topic Home
+            Assistant is not subscribed to and no entity ever appears, with
+            nothing logged on either side to say why.
+
     config EZPI_CORE_ENABLE_ETH
         bool "Enable ethernet"
         depends on ETH_USE_SPI_ETHERNET

@@ -360,6 +360,131 @@ jobs:
           echo "Improv linked into the image: GATT transport, serial transport and shared core"
           grep -i improv improv-symbols.txt
 
+  # Same reasoning as firmware-ota and firmware-improv: the whole body of
+  # ezlopi_service_mqtt.c sits behind CONFIG_EZPI_ENABLE_MQTT, which is "not
+  # set" in all four committed sdkconfig.defaults.* files, so the four target
+  # builds compile none of it.
+  #
+  # Both websocket transports are turned off in this job. That is the point of
+  # it, not an incidental choice -- see the long note in
+  # tests/ci/sdkconfig.mqtt_enabled. In short, it is the only configuration
+  # that reaches the broadcast-pump condition in ezlopi_main.c and the only one
+  # that would have caught the unguarded EZPI_service_webprov_is_connected()
+  # call in ezlopi_service_uart.c, which made a hub built without the websocket
+  # client fail to compile at all.
+  #
+  # It is also exactly what a Home Assistant user who does not want the Ezlo
+  # cloud builds, so it is worth keeping green for its own sake.
+  firmware-mqtt:
+    name: Build esp32 (MQTT enabled, no websockets)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v4.4.6
+    steps:
+      - uses: actions/checkout@v4
+
+      # Appended to the per-target defaults rather than passed via
+      # -DSDKCONFIG_DEFAULTS, for the same reason the OTA and Improv jobs do
+      # it: the latter builds fine but leaves the symbol unset, which would
+      # make this job compile as little as the other four.
+      - name: Enable MQTT and disable both websocket transports
+        shell: bash
+        run: |
+          cat tests/ci/sdkconfig.mqtt_enabled >> sdkconfig.defaults.esp32
+          echo "--- tail of sdkconfig.defaults.esp32 ---"
+          tail -6 sdkconfig.defaults.esp32
+
+      - name: Build with MQTT enabled and no websockets
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32
+          idf.py build
+
+      - name: Confirm the configuration is the one this job claims to build
+        shell: bash
+        run: |
+          # All three symbols are checked. Asserting only that MQTT is on would
+          # let the websocket options stay enabled -- the fragment disables
+          # them with "# CONFIG_... is not set" lines, and if confgen ever
+          # stopped honouring those in a defaults file this job would quietly
+          # become a duplicate of the ordinary esp32 build plus MQTT, testing
+          # neither of the two things it exists for.
+          fail=0
+          grep -q '^CONFIG_EZPI_ENABLE_MQTT=y' sdkconfig || {
+            echo "::error::CONFIG_EZPI_ENABLE_MQTT did not get enabled; this job proved nothing."
+            fail=1
+          }
+          for sym in CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER CONFIG_EZPI_WEBSOCKET_CLIENT; do
+            if grep -q "^$sym=y" sdkconfig; then
+              echo "::error::$sym is still enabled; the no-websocket configuration was not built."
+              fail=1
+            fi
+          done
+          if [ $fail -ne 0 ]; then
+            echo "--- what the generated sdkconfig says instead ---"
+            grep -n 'EZPI_ENABLE_MQTT\|EZPI_MQTT_\|WEBSOCKET' sdkconfig || echo "(no matching lines at all)"
+            exit 1
+          fi
+          echo "Built with MQTT on and both websocket transports off"
+
+      # The config assertion above only proves the Kconfig symbols were set.
+      # These prove the guarded code was compiled and linked rather than
+      # preprocessed away, which is how the whole of ezlopi_core_ota.c used to
+      # escape CI.
+      #
+      # Symbol table written to a file rather than piped into grep: with
+      # "shell: bash" Actions runs steps under "bash -eo pipefail", and
+      # "nm ... | grep -q" fails even when the symbol is present, because
+      # grep -q exits on first match while nm is still writing thousands of
+      # symbols and dies of SIGPIPE. That is how the equivalent Improv step
+      # failed on its first run while the symbol was there the whole time.
+      - name: Confirm the MQTT service and the broadcast pump are both linked
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          xtensa-esp32-elf-nm build/*.elf > mqtt-symbols.txt
+
+          # One symbol per thing that can disappear independently: the service
+          # entry point, the mapping layer in ezlopi-util-ha, the topic parser
+          # that inbound commands go through, and esp-mqtt's non-blocking
+          # publish -- the service must use enqueue rather than publish because
+          # it runs on the loop-service task while that task holds the global
+          # serialization buffer.
+          missing=0
+          for sym in EZPI_service_mqtt_init \
+                     EZPI_ha_describe \
+                     EZPI_ha_parse_command_topic \
+                     esp_mqtt_client_enqueue; do
+            if ! grep -q "$sym" mqtt-symbols.txt; then
+              echo "::error::$sym is absent from the ELF; that part was not linked in."
+              missing=1
+            fi
+          done
+          if [ $missing -ne 0 ]; then
+            echo "--- every MQTT/HA symbol the image does contain ---"
+            grep -iE 'mqtt|EZPI_ha_' mqtt-symbols.txt || echo "(none at all)"
+            exit 1
+          fi
+
+          # The one that is specific to this configuration. EZPI_service_mqtt_init
+          # being present says nothing about whether item updates can reach it:
+          # that depends on EZPI_service_broadcast_init() installing the queue
+          # the broadcast methods are fed from, and in ezlopi_main.c that call
+          # is behind an #if which listed only the two websocket transports
+          # until MQTT was added to it. With both of those off and the MQTT
+          # term missing, the service would publish its discovery payloads and
+          # then never send another message -- silently, with nothing in the
+          # log. Removing that term was verified to make this symbol vanish
+          # from app_main, so this check is known to be able to fail.
+          if ! grep -q 'EZPI_service_broadcast_init' mqtt-symbols.txt; then
+            echo "::error::EZPI_service_broadcast_init is absent, so no item update can reach MQTT."
+            echo "::error::Check the #if around it in ezlopi_main.c still names CONFIG_EZPI_ENABLE_MQTT."
+            exit 1
+          fi
+
+          echo "MQTT linked in: service, mapping, topic parser, non-blocking publish, broadcast pump"
+          grep -iE 'EZPI_service_mqtt_init|EZPI_ha_|EZPI_service_broadcast_init' mqtt-symbols.txt
+
   # Assembles install/ into a publishable directory: the static page plus the
   # merged image from each of the four firmware builds. See install/README.md.
   #

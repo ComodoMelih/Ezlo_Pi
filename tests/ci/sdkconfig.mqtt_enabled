@@ -1,0 +1,49 @@
+# Config fragment used only by the "Build esp32 (MQTT enabled, no websockets)"
+# CI job.
+#
+# Why this exists: CONFIG_EZPI_ENABLE_MQTT is "not set" in all four committed
+# sdkconfig.defaults.* files, so the four target builds compile the whole of
+# ezlopi_service_mqtt.c away to nothing -- the same way they compiled none of
+# ezlopi_core_ota.c before tests/ci/sdkconfig.ota_enabled existed. A green CI
+# run would say nothing at all about this service.
+#
+# This fragment is not applied to the normal builds, so the shipped default
+# configuration is unchanged: MQTT stays off unless someone turns it on.
+CONFIG_EZPI_ENABLE_MQTT=y
+
+# A URI has to be set, because EZPI_service_mqtt_init() returns early on an
+# empty one. The address is never reached in CI; it only has to be non-empty so
+# that the code past that check is compiled and linked.
+CONFIG_EZPI_MQTT_BROKER_URI="mqtt://127.0.0.1:1883"
+
+# Both websocket transports are turned OFF here, deliberately, and that is the
+# main reason this fragment is a separate job rather than a line appended to an
+# existing one.
+#
+# Two things are only reachable in this configuration:
+#
+# 1. The broadcast pump. Every registered broadcast method, MQTT's included, is
+#    fed from the queue that EZPI_service_broadcast_init() installs, and in
+#    ezlopi_main.c that call sits behind an #if listing the transports that need
+#    it. Before CONFIG_EZPI_ENABLE_MQTT was added to that condition, a build
+#    with both websocket options off left __broadcast_queue_func NULL, so
+#    EZPI_core_broadcast_add_to_queue() dropped every item update and nothing
+#    ever reached the broker. Nothing failed; the hub simply published its
+#    discovery payloads and then went quiet forever. Removing the MQTT term
+#    from that #if was verified to make EZPI_service_broadcast_init() vanish
+#    from app_main, which is what this job exists to catch.
+#
+# 2. Call sites that only compile with the websocket client on. The declaration
+#    of EZPI_service_webprov_is_connected() is inside an
+#    #if CONFIG_EZPI_WEBSOCKET_CLIENT block in ezlopi_service_webprov.h, while
+#    ezlopi_service_uart.c called it unguarded -- so turning the websocket
+#    client off failed the build outright on
+#    -Werror=implicit-function-declaration. That made a local-only hub
+#    impossible to compile, and no job here would have noticed, because every
+#    other build has the websocket client on.
+#
+# This is also the configuration a Home Assistant user who wants nothing to do
+# with the Ezlo cloud actually builds, so it is worth keeping compilable on its
+# own merits.
+# CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER is not set
+# CONFIG_EZPI_WEBSOCKET_CLIENT is not set

@@ -76,6 +76,7 @@
 #include "ezlopi_service_webprov.h"
 #include "ezlopi_service_ws_server.h"
 #include "ezlopi_service_broadcast.h"
+#include "ezlopi_service_mqtt.h"
 #include "ezlopi_service_led_indicator.h"
 #include "ezlopi_service_system_temperature_sensor.h"
 
@@ -178,8 +179,23 @@ void app_main(void)
     ezlopi_service_otel_init();
 #endif // CONFIG_EZPI_ENABLE_OPENTELEMETRY
 
+#if defined(CONFIG_EZPI_ENABLE_MQTT)
+    /* Deliberately above the wait below. That wait is on a bit only the Wi-Fi
+     * driver ever sets, so on an Ethernet-only board it never returns, and
+     * anything placed after it would never start there. esp-mqtt keeps its own
+     * reconnect loop and does not care which interface came up, so starting it
+     * here costs nothing on a Wi-Fi board and is the only placement that also
+     * works on one without Wi-Fi. */
+    EZPI_service_mqtt_init();
+#endif
+
     EZPI_core_wait_for_wifi_to_connect(portMAX_DELAY);
-#if defined(CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER) || defined(CONFIG_EZPI_WEBSOCKET_CLIENT)
+    /* MQTT is in this condition because the broadcast queue is what feeds every
+     * registered broadcast method, including MQTT's. Without it
+     * EZPI_core_broadcast_add_to_queue() finds a NULL queue function and drops
+     * the update, so with both websocket options off no item change would ever
+     * reach the broker. */
+#if defined(CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER) || defined(CONFIG_EZPI_WEBSOCKET_CLIENT) || defined(CONFIG_EZPI_ENABLE_MQTT)
     EZPI_service_broadcast_init();
 #endif
 
