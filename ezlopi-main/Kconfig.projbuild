@@ -243,12 +243,68 @@ menu "EzloPi User Config"
             help
                 Enable this feature to captive and send traces to cloud
 
-    config EZPI_ENABLE_OTA 
+    config EZPI_ENABLE_OTA
         depends on EZPI_ENABLE_WIFI || EZPI_CORE_ENABLE_ETH
         bool "Enable OTA"
         default n
         help
             Enable OTA
+
+    choice EZPI_OTA_CA_SOURCE
+        prompt "OTA server certificate verification"
+        depends on EZPI_ENABLE_OTA
+        default EZPI_OTA_CA_HEADER
+        help
+            Where the OTA client gets the root certificate it checks the
+            firmware server against. This is the only thing deciding which
+            hosts a hub can be updated from, so it is what has to change to
+            update a hub from anywhere other than Ezlo's own server.
+
+        config EZPI_OTA_CA_HEADER
+            bool "Pinned CA from ezlopi-core-ota/ca_mios.h"
+            help
+                The original behaviour, and still the default so the shipped
+                configuration is unchanged.
+
+                Pins trust to a single certificate chain, which is the
+                stricter choice: the hub refuses an update from any host not
+                presenting that chain, even one with a valid public
+                certificate.
+
+                The header is in .gitignore, so a clean clone does not have
+                it and enabling OTA this way fails the build with a message
+                saying so. Supply it to pin your own CA -- including a
+                private or self-signed one, which the bundle option below
+                cannot verify:
+
+                    static const char ca_mios[] =
+                        "-----BEGIN CERTIFICATE-----\n"
+                        ...
+                        "-----END CERTIFICATE-----\n";
+
+        config EZPI_OTA_CA_BUNDLE
+            bool "ESP-IDF trusted root certificate bundle"
+            depends on MBEDTLS_CERTIFICATE_BUNDLE
+            help
+                Verify the firmware server against the root certificates
+                ESP-IDF already embeds, the way a browser would. No
+                ca_mios.h is needed, so OTA builds from a clean clone.
+
+                This is the option for hosting firmware yourself: any server
+                with a certificate from a public CA works, so a GitHub
+                release asset or anything behind Let's Encrypt is enough,
+                with no certificate handling in the firmware at all.
+
+                The bundle is already enabled and already in the image for
+                every shipped target (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE is
+                on, with the common root set), so selecting this adds
+                essentially no flash. It starts using bytes already carried.
+
+                The trade-off against pinning is real and worth stating:
+                trust widens from one chain to every CA in the bundle, so a
+                certificate mis-issued for your host's name would be
+                accepted. Pin instead if you control the CA and care.
+    endchoice
 
     config EZPI_SERV_MDNS_EN
         bool "Enable mDNS service"

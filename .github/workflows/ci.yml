@@ -287,6 +287,112 @@ jobs:
           fi
           echo "OTA compiled in"
 
+      # This job does not set a CA source, so it exercises whatever the Kconfig
+      # default is. Asserting that the default is still the pinned header is
+      # the point: EZPI_OTA_CA_BUNDLE widens trust from one chain to every root
+      # ESP-IDF embeds, and it must never become the default by accident. If
+      # someone flips the Kconfig default, this fails and says why.
+      - name: Confirm the pinned header is still the default CA source
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          if ! grep -q '^CONFIG_EZPI_OTA_CA_HEADER=y' sdkconfig; then
+            echo "::error::OTA is on but the pinned header is not the selected CA source."
+            echo "::error::Nothing here asked for a CA source, so this is the Kconfig default having changed."
+            echo "::error::The default must stay EZPI_OTA_CA_HEADER: the bundle trusts every root IDF embeds."
+            grep -n 'EZPI_OTA_CA' sdkconfig || echo "(no EZPI_OTA_CA lines at all)"
+            exit 1
+          fi
+          # The pinned chain has to actually reach the image. ca_mios is a
+          # file-scope array, so it survives in the symbol table -- and unlike
+          # esp_crt_bundle_attach it genuinely discriminates between the two
+          # modes. esp_crt_bundle_attach is linked in BOTH (mbedtls pulls it in
+          # regardless of whether this code references it), so asserting on it
+          # would pass either way and prove nothing. Checked, not assumed.
+          xtensa-esp32-elf-nm build/*.elf > ota-symbols.txt
+          if ! grep -q ' ca_mios$' ota-symbols.txt; then
+            echo "::error::CONFIG_EZPI_OTA_CA_HEADER is set but ca_mios is not in the image,"
+            echo "::error::so this build has no pinned certificate. Check the #if around"
+            echo "::error::.cert_pem in ezlopi_ota_process()."
+            exit 1
+          fi
+          echo "pinned CA present and selected by default"
+
+  # The companion to firmware-ota, covering the other half of the
+  # EZPI_OTA_CA_SOURCE choice. firmware-ota generates a placeholder ca_mios.h,
+  # so it can only ever prove the pinned path compiles. This job builds the
+  # bundle path with NO ca_mios.h anywhere in the tree, which is the thing
+  # being claimed: that enabling OTA no longer requires a hand-written header,
+  # so a clean clone can produce an OTA-capable image and firmware can be
+  # self-hosted behind any ordinary public certificate.
+  #
+  # Deliberately no "Generate a placeholder CA header" step here. Its absence
+  # is the test, and the job asserts the absence rather than trusting it --
+  # ca_mios.h is gitignored, so a stray local copy could otherwise make this
+  # pass for the wrong reason.
+  firmware-ota-bundle:
+    name: Build esp32 (OTA enabled, IDF cert bundle)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v4.4.6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the certificate bundle in the per-target defaults
+        shell: bash
+        run: |
+          cat tests/ci/sdkconfig.ota_bundle >> sdkconfig.defaults.esp32
+          echo "--- tail of sdkconfig.defaults.esp32 ---"
+          tail -5 sdkconfig.defaults.esp32
+
+      - name: Confirm no pinned CA header exists
+        shell: bash
+        run: |
+          if [ -e ezlopi-core/ezlopi-core-ota/ca_mios.h ]; then
+            echo "::error::ca_mios.h exists in the checkout. This job only means something"
+            echo "::error::without it -- the claim under test is that the bundle option needs"
+            echo "::error::no hand-written header. Remove it, or fix whatever added it."
+            exit 1
+          fi
+          echo "no ca_mios.h, as required"
+
+      - name: Build with OTA enabled against the IDF certificate bundle
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32
+          idf.py build
+
+      - name: Confirm this really is the bundle path
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          for want in CONFIG_EZPI_ENABLE_OTA CONFIG_EZPI_OTA_CA_BUNDLE CONFIG_MBEDTLS_CERTIFICATE_BUNDLE; do
+            if ! grep -q "^${want}=y" sdkconfig; then
+              echo "::error::${want} is not set, so this job proved nothing."
+              grep -n 'EZPI_OTA_CA\|EZPI_ENABLE_OTA\|MBEDTLS_CERTIFICATE_BUNDLE' sdkconfig || echo "(nothing matched)"
+              exit 1
+            fi
+          done
+          xtensa-esp32-elf-nm build/*.elf > ota-bundle-symbols.txt
+          # The discriminator is ca_mios, NOT esp_crt_bundle_attach. The latter
+          # is present in both modes because mbedtls links it regardless of
+          # whether this code takes its address, so it cannot tell the two
+          # configurations apart. ca_mios can: it only exists when the pinned
+          # header was compiled in.
+          if grep -q ' ca_mios$' ota-bundle-symbols.txt; then
+            echo "::error::ca_mios is in the image even though the bundle was selected."
+            echo "::error::The pinned header leaked past its #if in ezlopi_core_ota.c."
+            exit 1
+          fi
+          # And the OTA code itself must still be compiled in, so that the
+          # absence above means "bundle mode" rather than "OTA quietly off".
+          if ! grep -q ' esp_https_ota$' ota-bundle-symbols.txt; then
+            echo "::error::esp_https_ota is absent, so no OTA code was compiled in at all"
+            echo "::error::and the ca_mios check above passed for the wrong reason."
+            exit 1
+          fi
+          echo "bundle path confirmed: OTA linked in, no pinned certificate"
+
   # Same reasoning as firmware-ota: the Improv sources sit entirely behind
   # CONFIG_EZPI_BLE_ENABLE_IMPROV and CONFIG_EZPI_ENABLE_IMPROV_SERIAL, both of
   # which are "not set" in all four committed sdkconfig.defaults.* files.

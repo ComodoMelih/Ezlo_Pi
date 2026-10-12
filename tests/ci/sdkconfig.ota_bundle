@@ -1,0 +1,18 @@
+# Config fragment used only by the "Build esp32 (OTA enabled, IDF cert bundle)"
+# CI job.
+#
+# Why this exists, separately from sdkconfig.ota_enabled: the existing OTA job
+# generates a placeholder ca_mios.h before building, because
+# CONFIG_EZPI_OTA_CA_HEADER is the default and that header is gitignored. So
+# that job proves the pinned path compiles, but it proves nothing about the
+# path that does NOT need the header -- and "OTA builds from a clean clone"
+# is the entire point of the EZPI_OTA_CA_BUNDLE option.
+#
+# The job that applies this fragment deliberately does not create ca_mios.h,
+# and asserts it is absent before building. If the bundle option ever stops
+# being self-sufficient -- say someone moves the #include out from behind its
+# #if, or adds an unconditional reference to ca_mios -- that job fails, which
+# is exactly when a maintainer wants to hear about it rather than the first
+# self-hosting user.
+CONFIG_EZPI_ENABLE_OTA=y
+CONFIG_EZPI_OTA_CA_BUNDLE=y

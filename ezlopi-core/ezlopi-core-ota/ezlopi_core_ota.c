@@ -49,9 +49,24 @@
 
 #ifdef CONFIG_EZPI_ENABLE_OTA
 
-/* The CA chain for the OTA host is NOT in this repository: ca_mios.h is listed
- * in .gitignore, so a clean clone does not have it. Enabling OTA therefore
- * requires you to supply your own ca_mios.h defining:
+/* How the firmware server's certificate is verified is a build-time choice,
+ * because it decides which hosts a hub will accept an update from. See the
+ * EZPI_OTA_CA_SOURCE choice in Kconfig.projbuild.
+ *
+ * Exactly one of these must be set. The choice has a default, so the only way
+ * to land here with neither is editing a defaults file by hand -- which is
+ * worth catching, since the alternative is an esp_http_client_config_t with no
+ * trust source at all. That does not fail to build: esp_https_ota() would
+ * simply reject every connection, and the symptom would be an OTA that always
+ * fails with a TLS error and no indication why. */
+#if !defined(CONFIG_EZPI_OTA_CA_HEADER) && !defined(CONFIG_EZPI_OTA_CA_BUNDLE)
+#error "CONFIG_EZPI_ENABLE_OTA is enabled but no OTA certificate source is selected. Set CONFIG_EZPI_OTA_CA_HEADER (pin your own CA in ezlopi-core-ota/ca_mios.h) or CONFIG_EZPI_OTA_CA_BUNDLE (use the root certificates ESP-IDF already embeds, which needs no header and is the option for self-hosted firmware)."
+#endif
+
+#if defined(CONFIG_EZPI_OTA_CA_HEADER)
+/* The pinned CA chain is NOT in this repository: ca_mios.h is listed in
+ * .gitignore, so a clean clone does not have it. Pinning therefore requires
+ * you to supply your own ca_mios.h defining:
  *
  *     static const char ca_mios[] = "-----BEGIN CERTIFICATE-----\n...";
  *
@@ -60,7 +75,7 @@
  * no hint that a file is expected to be supplied by hand. */
 #if defined(__has_include)
 #if !__has_include("ca_mios.h")
-#error "CONFIG_EZPI_ENABLE_OTA is enabled but ezlopi-core-ota/ca_mios.h is missing. That header holds the CA chain for the OTA server and is deliberately not in this repository (see .gitignore); supply your own, or disable OTA in sdkconfig.defaults.<target>."
+#error "CONFIG_EZPI_OTA_CA_HEADER is selected but ezlopi-core-ota/ca_mios.h is missing. That header holds the CA chain to pin and is deliberately not in this repository (see .gitignore). Supply your own, or select CONFIG_EZPI_OTA_CA_BUNDLE instead to verify against the root certificates ESP-IDF already embeds -- that needs no header and is what self-hosted firmware wants -- or disable OTA in sdkconfig.defaults.<target>."
 #endif
 #endif
 
@@ -68,6 +83,7 @@
  * defines a variable, so at block scope it became a per-call local; at file
  * scope, where an include belongs, it is static storage as intended. */
 #include "ca_mios.h"
+#endif // CONFIG_EZPI_OTA_CA_HEADER
 
 #include <stdbool.h>
 #include <string.h>
@@ -265,9 +281,21 @@ static void ezlopi_ota_process(void *pv)
     esp_http_client_config_t config = {
         .url = url,
         .event_handler = _http_event_handler,
+
+#if defined(CONFIG_EZPI_OTA_CA_HEADER)
+        /* Pin one chain. Stricter, and the shipped default. */
         .cert_pem = ca_mios, // ezlopi_factory_info_v3_get_ssl_shared_key(),
-                             // .buffer_size = 1024,
-                             // .buffer_size_tx = 1024,
+#elif defined(CONFIG_EZPI_OTA_CA_BUNDLE)
+        /* Verify against the roots ESP-IDF already embeds, so firmware can be
+         * hosted anywhere with an ordinary public certificate. Setting the
+         * function pointer is all that is required; esp_http_client calls it
+         * while setting up the TLS config. cert_pem is deliberately left unset
+         * -- supplying both would pin as well, which would defeat the point of
+         * selecting the bundle. */
+        .crt_bundle_attach = esp_crt_bundle_attach,
+#endif
+    // .buffer_size = 1024,
+    // .buffer_size_tx = 1024,
     // .client_cert_pem = ezlopi_factory_info_v3_get_ssl_shared_key(),
     // .client_key_pem = ezlopi_factory_info_v3_get_ssl_private_key(),
 
@@ -339,7 +367,29 @@ static esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     case HTTP_EVENT_ERROR:
     {
         TRACE_E("HTTP_EVENT_ERROR");
-        TRACE_E("HTTP_EVENT_ERROR, error code: %d", esp_http_client_get_errno(evt));
+        /* evt->client, not evt. esp_http_client_get_errno() takes the client
+         * handle; this used to pass the event struct, which is a different
+         * type -- the compiler warned about it
+         * (-Wincompatible-pointer-types) and the warning was right.
+         *
+         * It was not harmless. IDF dispatches events as &client->event, and
+         * sizeof(esp_http_client_event_t) happens to equal
+         * offsetof(esp_http_client, transport) -- both 28 on this target,
+         * checked with _Static_assert against the real headers. So reading
+         * ->transport through the mistyped pointer read the word immediately
+         * after the event member, which is client->data_written_index: a byte
+         * count, used as a transport pointer. The NULL check inside
+         * esp_http_client_get_errno() does not catch it, because the pointer
+         * it is handed (the event) is perfectly non-NULL.
+         *
+         * In practice that count is 0 for the GET that esp_https_ota() issues,
+         * so this logged a meaningless -1 rather than crashing. But it logged
+         * -1 for every possible failure, which is precisely the diagnostic
+         * someone needs when pointing a hub at their own firmware server for
+         * the first time and the TLS handshake fails. And had the count been
+         * non-zero, the chain dereferences it as a pointer and writes through
+         * it. */
+        TRACE_E("HTTP_EVENT_ERROR, error code: %d", esp_http_client_get_errno(evt->client));
         break;
     }
     case HTTP_EVENT_ON_CONNECTED:

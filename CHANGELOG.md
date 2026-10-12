@@ -219,6 +219,77 @@ failure.
   rest belongs with the ESP-IDF 5.x work: it is 83 files touched for no
   behaviour change, which is a poor thing to bury in an unrelated pull request.
 
+- **The OTA error path logged a meaningless error code, and read the wrong
+  struct field to get it.** `_http_event_handler` called
+  `esp_http_client_get_errno(evt)`, passing the *event* struct where the
+  function takes a *client handle*. The compiler warned
+  (`-Wincompatible-pointer-types`) and was right.
+
+  ESP-IDF dispatches events as `&client->event`, and it happens that
+  `sizeof(esp_http_client_event_t)` equals
+  `offsetof(struct esp_http_client, transport)` — both 28 bytes on this target,
+  confirmed with `_Static_assert` against the real headers. So reading
+  `->transport` through the mistyped pointer read the word immediately *after*
+  the event member, which is `client->data_written_index`: a byte count, used
+  as a transport pointer. The `NULL` check inside
+  `esp_http_client_get_errno()` does not catch this, because the pointer it is
+  handed is a perfectly valid non-`NULL` event struct.
+
+  That count is `0` for the GET that `esp_https_ota()` issues, so in practice
+  this logged `-1` rather than crashing. But it logged `-1` for *every* failure,
+  which is exactly the diagnostic someone needs when they first point a hub at
+  their own firmware server and the TLS handshake fails. Had the count been
+  non-zero, the chain dereferences it as a pointer and writes through it. Now
+  passes `evt->client`.
+
+### OTA — [feat]
+
+- **Which hosts a hub will accept firmware from is now a build-time choice, so
+  firmware can be self-hosted.** Previously `.cert_pem = ca_mios` was the only
+  trust source, and `ca_mios.h` is gitignored — so the only way to get an
+  OTA-capable image was to hand-write a header containing Ezlo's CA chain, and
+  the only host that chain accepts is Ezlo's own. The OTA *URL* was already
+  arbitrary (`hub.firmware.update.start` takes any URL, and is reachable from
+  the local websocket API as well as the cloud), so the pinned certificate was
+  the single thing standing between this project and self-hosted updates.
+
+  The new `EZPI_OTA_CA_SOURCE` choice has two options:
+
+  - `EZPI_OTA_CA_HEADER` — the original pinned header. **Still the default, so
+    the shipped configuration is byte-for-byte unchanged.** Pinning is the
+    stricter option, and it is the only one that can verify a private or
+    self-signed CA.
+  - `EZPI_OTA_CA_BUNDLE` — verify against the root certificates ESP-IDF already
+    embeds, the way a browser would. **No `ca_mios.h` is needed, so an
+    OTA-capable image builds from a clean clone.** Any server with an ordinary
+    public certificate works, so a GitHub release asset or anything behind
+    Let's Encrypt is enough.
+
+  This is close to free: `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` with the common
+  root set is already in every shipped target's configuration, and
+  `esp_crt_bundle.h` was already `#include`d in `ezlopi_core_ota.c` but unused.
+  Measured on esp32 with OTA on: pinned `0x191b60`, bundle `0x191b10` — the
+  bundle build is 80 bytes *smaller*, because it drops the embedded PEM string
+  and starts using bytes the image was already carrying.
+
+  The trade-off is stated in the Kconfig help rather than hidden: selecting the
+  bundle widens trust from one chain to every CA in it.
+
+  Both paths are covered by CI, and the two jobs are deliberately asymmetric.
+  `firmware-ota` generates a placeholder `ca_mios.h`, so it can only ever prove
+  the pinned path compiles; it also now asserts that the pinned header is still
+  what the Kconfig *default* selects, so the wider-trust option cannot become
+  the default by accident. `firmware-ota-bundle` builds with **no `ca_mios.h`
+  anywhere in the tree** and asserts its absence first — that clean-clone build
+  is the claim being made, so it is tested directly rather than inferred.
+
+  The link-presence check is on the `ca_mios` symbol, not on
+  `esp_crt_bundle_attach`. The latter looks like the obvious thing to assert and
+  is useless: mbedtls links it regardless of whether this code takes its
+  address, so it is present in *both* configurations and an assertion on it
+  would pass either way. `ca_mios` genuinely discriminates, and both assertions
+  were checked against the opposite build to confirm they fail when they should.
+
 ### Provisioning — [feat]
 
 - **Improv Wi-Fi over BLE, as an opt-in sixth GATT service.** Guarded by
@@ -346,19 +417,20 @@ failure.
   | `host-tests` | `make -C tests/host` under ASan + UBSan |
   | `hygiene` | no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised |
   | `firmware` | builds all four targets in `espressif/idf:v4.4.6`, asserts the generated config was actually inherited from the per-target defaults, merges and verifies a flashable image, uploads `bin`/`elf`/`map`/`sdkconfig` |
-  | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled |
+  | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled, that the pinned header is still the default CA source, and that `ca_mios` reached the ELF |
+  | `firmware-ota-bundle` | builds esp32 with OTA on and `CONFIG_EZPI_OTA_CA_BUNDLE=y`, from a tree with **no `ca_mios.h`**, and asserts the header is absent, `ca_mios` is *not* in the ELF, and `esp_https_ota` still is |
   | `firmware-improv` | builds esp32 with `CONFIG_EZPI_BLE_ENABLE_IMPROV=y` and asserts both that the symbol got enabled and that the service is in the ELF |
   | `install-page` | assembles and verifies [`install/`](install/) from the firmware artifacts |
   | `deploy-install-page` | publishes it, once a maintainer opts in |
 
-- **Two jobs exist only to compile code the other builds skip.**
+- **Several jobs exist only to compile code the other builds skip.**
   `ezlopi_core_ota.c` is wrapped in `#ifdef CONFIG_EZPI_ENABLE_OTA`, and the
   Improv service and advertisement sit behind `CONFIG_EZPI_BLE_ENABLE_IMPROV`.
   Neither symbol is set in any committed `sdkconfig.defaults.*`, so the four
   target builds compile *none* of either and a green run said nothing about
   them. Each job turns one feature on for one target.
 
-  Both assert afterwards that the symbol was actually enabled, because the
+  They assert afterwards that the symbol was actually enabled, because the
   first attempt at this used `-DSDKCONFIG_DEFAULTS`, which builds perfectly and
   leaves the symbol unset — the job passed while compiling exactly as little as
   the others. The config fragment is now appended to the per-target defaults
@@ -515,9 +587,12 @@ Listed because a changelog that only mentions what was finished is misleading.
 - **Hardware verification is partial even on `esp32`.** The firmware has not
   been reflashed since this refactor, and the device-add path through chunked
   `0xE501` config has not been re-tested on hardware.
-- **OTA is untested and off by default on every target.** It cannot be built
-  without a `ca_mios.h` that this repository does not contain, so nothing here
-  exercises it.
+- **OTA is untested on hardware and off by default on every target.** It can now
+  be *built* from a clean clone — selecting `EZPI_OTA_CA_BUNDLE` needs no
+  `ca_mios.h`, and CI builds that configuration on every push — but compiling is
+  not updating. No board has fetched an image over either trust path, so neither
+  the pinned nor the bundle verification has been watched succeed or fail against
+  a real server.
 - **The PSK is still sent to the cloud as `key`** in `hub.network.get`. Only
   the local trace is masked. See the README privacy note.
 - **83 files still pin the generated config by relative path**, so the tree as a
