@@ -99,6 +99,24 @@ jobs:
       - name: JSON string destinations are initialised
         run: python3 tests/ci/check_uninit_json_buffers.py
 
+      # 83 files include the generated config as
+      # "../../build/config/sdkconfig.h", which pins both the build
+      # directory's name and its position relative to the source file -- so the
+      # tree cannot be built with idf.py -B <dir>. Converting all 83 belongs
+      # with the ESP-IDF 5.x work; what must not happen before then is the
+      # number going up, because a new file in the old style is one more file to
+      # convert later and nothing would have objected.
+      #
+      # The script holds the baseline and fails in both directions: upward
+      # because that is a regression, downward because a stale high baseline
+      # would quietly let the next regression back in. It also self-tests its
+      # own comment scanner on every run, which is not ceremony -- the first
+      # version of this check silently undercounted, because "//*****" banner
+      # comments contain the substring "/*" and a regex-based stripper treated
+      # them as opening a block comment, swallowing the real #include below.
+      - name: No new pinned sdkconfig.h includes
+        run: python3 tests/ci/check_sdkconfig_includes.py
+
   firmware:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest

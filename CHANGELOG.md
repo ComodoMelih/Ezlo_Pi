@@ -549,7 +549,7 @@ failure.
   | Job | What it does |
   | --- | --- |
   | `host-tests` | `make -C tests/host` under ASan + UBSan |
-  | `hygiene` | no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised |
+  | `hygiene` | no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no new pinned `sdkconfig.h` includes |
   | `firmware` | builds all four targets in `espressif/idf:v4.4.6`, asserts the generated config was actually inherited from the per-target defaults, merges and verifies a flashable image, uploads `bin`/`elf`/`map`/`sdkconfig` |
   | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled, that the pinned header is still the default CA source, and that `ca_mios` reached the ELF |
   | `firmware-ota-bundle` | builds esp32 with OTA on and `CONFIG_EZPI_OTA_CA_BUNDLE=y`, from a tree with **no `ca_mios.h`**, and asserts the header is absent, `ca_mios` is *not* in the ELF, and `esp_https_ota` still is |
@@ -758,22 +758,37 @@ Listed because a changelog that only mentions what was finished is misleading.
 - **The PSK is still sent to the cloud as `key`** in `hub.network.get`. Only
   the local trace is masked. See the README privacy note.
 - **83 files still pin the generated config by relative path**, so the tree as a
-  whole still cannot be built with `idf.py -B <dir>`. Four files use the plain
-  `#include "sdkconfig.h"`: `ezlopi_core_ota.c`, `ezlopi_service_ble_improv.c`
-  (added in this branch), and
+  whole still cannot be built with `idf.py -B <dir>`. Seven files use the plain
+  `#include "sdkconfig.h"`: `ezlopi_core_ota.c`, `ezlopi_service_ble_improv.c`,
+  `ezlopi_service_improv.c`, `ezlopi_service_improv_serial.c` and
+  `ezlopi_service_mqtt.c` (all added or converted in this branch), plus
   `ezlopi_service_system_temperature_sensor.c`/`.h`, which were already that way
   upstream.
 
-  Counting this takes more care than it looks, which is worth recording for
-  whoever does the conversion.
-  `git grep -l 'build/config/sdkconfig.h' -- '*.c' '*.h'` reports 87, but three
-  of those quote the path in a comment while *not* including it: the two
-  converted files explain what they moved away from, and two host-test stubs
-  describe what they stub out. Matching the `#include` line itself gives 82 --
-  one short, because `ezlopi-user-config/EZLOPI_USER_CONFIG.h:48` sits one
-  directory shallower and writes `"../build/config/sdkconfig.h"`. A ratchet
-  check for this must match on the path suffix, not on a fixed `../` depth, or
-  it will wave that file through.
+  The count is now enforced by
+  [`tests/ci/check_sdkconfig_includes.py`](tests/ci/check_sdkconfig_includes.py),
+  which fails if it rises *or* if it falls without the baseline being lowered.
+  Counting it correctly takes more care than it looks, and both traps are worth
+  recording for whoever does the conversion:
+
+  - **Matching a fixed `../` depth misses a file.** Almost every offender sits
+    two directories deep, but `ezlopi-user-config/EZLOPI_USER_CONFIG.h:48` is
+    one shallower and writes `"../build/config/sdkconfig.h"`. Match on the path
+    *suffix* at any depth.
+  - **Mentioning the path is not including it.**
+    `git grep -l 'build/config/sdkconfig.h' -- '*.c' '*.h'` reports 89, but six
+    of those name the old form in a comment while deliberately not using it —
+    four converted files explaining what they moved away from, and two host-test
+    stubs describing what they stub out.
+
+  A third trap cost more than either, and is the reason the checker is a
+  character scanner rather than a regex. Stripping block comments with
+  `re.sub(r"/\*.*?\*/", "", text, flags=re.S)` *undercounts*: banner comments
+  like `//*******` contain the substring `/*`, so the regex treats them as
+  opening a block comment and deletes everything through the next `*/` —
+  swallowing the real `#include` underneath. That hid
+  `ezlopi_core_scenes_cjson.c` and produced a confident 82. The scanner knows
+  `//` starts a line comment, and self-tests that specific case on every run.
 - **The install page has never been used to flash a board.** It is assembled
   and checked on every CI run, and the images it serves are verified
   byte-for-byte against the build outputs, but no one has opened it in a
