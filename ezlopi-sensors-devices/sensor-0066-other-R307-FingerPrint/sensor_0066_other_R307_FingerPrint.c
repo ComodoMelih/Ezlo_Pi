@@ -575,9 +575,21 @@ static void __uart_0066_fingerprint_upcall(uint8_t *buffer, uint32_t output_len,
     if (NULL != temp_buf)
     {
         memset(temp_buf, 0, 256);
-        if ((NULL != buffer) && (output_len) && (uart_object_handle->arg))
+        if ((NULL != buffer) && (output_len) && (NULL != uart_object_handle) && (uart_object_handle->arg))
         {
-            memcpy(temp_buf, buffer, 256);
+            // Copy only what arrived. buffer is a heap block the UART HAL sized
+            // to output_len, so the old fixed "memcpy(temp_buf, buffer, 256)"
+            // read up to 255 bytes past the end of it on every single reply --
+            // an ACK packet from this part is twelve bytes at most, never 256.
+            // temp_buf is memset to zero immediately above, so everything
+            // beyond output_len is now a deterministic zero rather than
+            // whatever happened to follow the allocation, which means the
+            // header, PID and length checks below act on real packet bytes.
+            //
+            // uart_object_handle is also tested now; the old condition read
+            // through it to reach ->arg without ever checking the pointer.
+            const size_t to_copy = (output_len < 256) ? (size_t)output_len : 256;
+            memcpy(temp_buf, buffer, to_copy);
             TRACE_D("BUFFER-DATA-LEN: %d", output_len);
 
             l_ezlopi_item_t *item = (l_ezlopi_item_t *)uart_object_handle->arg;
@@ -585,8 +597,16 @@ static void __uart_0066_fingerprint_upcall(uint8_t *buffer, uint32_t output_len,
             if (user_data)
             {
                 uint16_t package_len = 0;
-                uint8_t another_buffer[MAX_PACKET_LENGTH_VAL] = {0};
-                memcpy(another_buffer, temp_buf, MAX_PACKET_LENGTH_VAL);
+                // Sized MAX_PACKET_LENGTH_VAL + 6, not MAX_PACKET_LENGTH_VAL.
+                // The copy out of this array further down starts at offset 6
+                // ("another_buffer + 6", skipping the header and address) and
+                // may run to MAX_PACKET_LENGTH_VAL bytes, so it needs 6 + 64
+                // valid bytes; at 64 it read up to 6 bytes of adjacent stack.
+                // The extra 6 come from temp_buf, which has 256 bytes of which
+                // everything past output_len is zero, so the copy now lands on
+                // real packet bytes or zeroes instead of unrelated stack.
+                uint8_t another_buffer[MAX_PACKET_LENGTH_VAL + 6] = {0};
+                memcpy(another_buffer, temp_buf, sizeof(another_buffer));
                 // Programmed only for ACK_operation [0x07h] with 256byte results.
                 if (another_buffer[6] == FINGERPRINT_PID_ACKPACKET)
                 {

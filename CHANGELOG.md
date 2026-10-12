@@ -94,6 +94,38 @@ the parsers involved. All four are covered by regression tests in
   drifts. Covering this needs the HAL seam tracked in
   [Known gaps](#known-gaps).
 
+- **Every UART callback then read a fixed number of bytes regardless of how
+  many arrived.** Fixing the HAL stopped the NULL dispatch but not this: the
+  buffer handed up is a heap block sized to the bytes that actually arrived,
+  and five of the six callbacks ignored `output_len` entirely. A frame split
+  across two UART events — the ordinary case on a busy line, not a
+  malformed-input case — was read off the end of that block every time.
+
+  | Driver | Read | Available |
+  |---|---|---|
+  | ZE08-CH2O | 9 bytes | `output_len` |
+  | PMS5003 | 32 bytes | `output_len` |
+  | R307 fingerprint | 256 bytes | `output_len` (a reply is ≤ 12) |
+  | GY-GPS6MV2 | 256 bytes | `output_len` |
+  | MB1013 | `buffer[idx + 5]` with `idx < output_len` | 5 bytes short |
+  | LD2410 | — | already correct |
+
+  All five now require the bytes they read to be inside `output_len`. For a
+  well-formed frame nothing changes; the bytes no longer read were never
+  sensor data, they were whatever followed the allocation.
+
+  Three smaller defects in the same paths: the R307 driver copied 64 bytes from
+  `another_buffer + 6` out of a 64-byte array, over-reading 6 bytes of adjacent
+  stack (the array is now sized `+ 6`); `__uart_gps6mv2_upcall()` never checked
+  `buffer` for NULL at all, only `tmp_buffer`; and that same function called
+  `strlen()` on a 256-byte `ezlopi_malloc` block it had just filled completely
+  with NMEA text, which contains CR and LF but no NUL, so there was no
+  terminator anywhere in it. The resulting over-long length was passed to
+  `strncpy` as a byte count, and since the guard above it only reserves 255
+  bytes of a 768-byte `gps_cir_buf` at an offset of up to 512, that wrote past
+  the end of the buffer and into the rest of `GPS6MV2_t` — a write overflow,
+  not only an over-read. The copy is now clamped and terminated.
+
 - **The ZE08-CH2O checksum rejected 99.6% of valid frames, so that sensor has
   never reported a reading.** `ze08_ch2o_sensor_checksum()` was two nested
   loops with identical bounds and the same induction variable name, the inner
@@ -943,13 +975,14 @@ Listed because a changelog that only mentions what was finished is misleading.
   and checked on every CI run, and the images it serves are verified
   byte-for-byte against the build outputs, but no one has opened it in a
   browser and driven it end to end against hardware.
-- **No ZE08-CH2O has been connected since the checksum fix.** The part is not
-  on hand. Its frame parsing is covered by 26 host checks under ASan, proven
-  able to fail by six mutations, but "tested" there means "against frames this
-  repo constructs from the datasheet rule", not against a real sensor. The fix
-  means this sensor should start reporting readings for the first time, and
-  *should* is the operative word: nothing has confirmed a real part's frames
-  now validate.
+- **No UART sensor has been connected since the dispatch and clamp fixes.**
+  None of these parts is on hand. The ZE08-CH2O path is covered by 26 host
+  checks under ASan, proven able to fail by six mutations, but "tested" there
+  means "against frames this repo constructs from the datasheet rule", not
+  against a real sensor; its checksum fix means that sensor should start
+  reporting readings for the first time, and *should* is the operative word.
+  The MB1013, PMS5003, R307 and GY-GPS6MV2 clamps are verified only by an
+  esp32 build.
 - **Four of the six UART drivers cannot be host-tested at all.** MB1013,
   PMS5003, R307 and GY-GPS6MV2 pull in cJSON, the device/item core, FreeRTOS
   tasks and GPIO, so `tests/host/` cannot compile them and their parsing is

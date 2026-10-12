@@ -543,10 +543,44 @@ static int __sensor_uart_gps6mv2_update_values(l_ezlopi_item_t *item)
 static void __uart_gps6mv2_upcall(uint8_t *buffer, uint32_t output_len, s_ezlopi_uart_object_handle_t uart_object_handle)
 {
     // TRACE_E("UART_Buffer => \n%s\n", buffer);
+
+    // buffer and uart_object_handle are checked here. The old condition tested
+    // tmp_buffer and uart_object_handle->arg but not buffer and not the handle
+    // itself, so a NULL buffer went straight into the memcpy below as the
+    // source of a 256-byte read.
+    if ((NULL == buffer) || (NULL == uart_object_handle))
+    {
+        return;
+    }
+
     char *tmp_buffer = (char *)ezlopi_malloc(__FUNCTION__, 256);
     if (tmp_buffer && (uart_object_handle->arg))
     {
-        memcpy(tmp_buffer, buffer, 256);
+        // Copy only what arrived, and terminate it. Two separate defects here:
+        //
+        // The fixed 256-byte read from buffer, a heap block the UART HAL sized
+        // to output_len, over-read it by up to 255 bytes on every event.
+        //
+        // Worse, tmp_buffer came from ezlopi_malloc and was never zeroed, so
+        // after filling all 256 bytes with NMEA text -- which is ASCII
+        // containing CR and LF but no NUL -- there was no terminator anywhere
+        // in it. The strlen(tmp_buffer) below therefore ran off the end of
+        // tmp_buffer too, and then handed that over-long length to strncpy as
+        // the byte count. The guard above it only reserves 255 bytes of
+        // gps_cir_buf (CIR_BUFSIZE is 768, the test allows an offset up to
+        // 512), so a strlen that returned more than 256 wrote past the end of
+        // gps_cir_buf and into the rest of GPS6MV2_t. That made it a write
+        // overflow, not only an over-read.
+        //
+        // Clamping to 255 and writing the terminator bounds strlen(tmp_buffer)
+        // at 255, which is what the existing guard was already sized for. The
+        // effective cap on bytes consumed per event goes from 256 to 255; the
+        // bytes being dropped were never valid NMEA, they were whatever
+        // followed the allocation.
+        const size_t to_copy = (output_len < 255) ? (size_t)output_len : 255;
+        memcpy(tmp_buffer, buffer, to_copy);
+        tmp_buffer[to_copy] = '\0';
+
         l_ezlopi_item_t *item = (l_ezlopi_item_t *)uart_object_handle->arg;
         GPS6MV2_t *sensor_0053_UART_gps6mv2_data = (GPS6MV2_t *)item->user_arg;
         if (sensor_0053_UART_gps6mv2_data)
