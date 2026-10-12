@@ -648,6 +648,16 @@ static void ezpi_mqtt_announce(void)
         }
     }
 
+    /* Walked without a lock, which is what every other caller of
+     * EZPI_core_device_get_head() does -- ezlopi-core-devices exposes no lock
+     * to take. This runs on the MQTT client's task rather than the loop task,
+     * so in principle a device added or removed mid-walk could be missed or
+     * followed into freed memory. Adding a mutex here alone would not fix
+     * that, because the dozen existing walks in ezlopi-cloud would still be
+     * unsynchronised; it belongs in the core, for all of them at once.
+     *
+     * The practical exposure is small: this runs on connect, and the list is
+     * built at boot and changed only by an explicit device add or remove. */
     curr_device = EZPI_core_device_get_head();
     while (NULL != curr_device)
     {
@@ -809,6 +819,17 @@ static void ezpi_mqtt_event_handler(void *handler_args, esp_event_base_t base,
     }
     case MQTT_EVENT_DATA:
     {
+        /* A payload larger than the client's buffer arrives as several of
+         * these, and only the first carries the topic -- continuation
+         * fragments have topic_len 0 and topic NULL. Those are dropped by the
+         * length check at the top of the handler, which is the behaviour we
+         * want: a command here is a single scalar, so a fragmented one is
+         * malformed rather than large, and reassembling it would mean holding
+         * state across events to no benefit.
+         *
+         * Spelled out because the guard that drops them reads like an
+         * ordinary null check, and "fixing" it to accept topic_len 0 would
+         * parse a continuation fragment as though it were a topic. */
         ezpi_mqtt_handle_command(event->topic, event->topic_len,
                                  event->data, event->data_len);
         break;
