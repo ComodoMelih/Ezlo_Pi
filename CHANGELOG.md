@@ -179,6 +179,48 @@ failure.
   `CONFIG_EZPI_ENABLE_OPENTELEMETRY=y` is committed into any
   `sdkconfig.defaults*`.
 
+### Local discovery — [bug]
+
+- **The hub advertised a service on a port with nothing listening on it.** The
+  `_ezlo._tcp` mDNS record was added unconditionally, pointing at the port the
+  local websocket server uses. That server only exists when
+  `CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER` is on: with it off, `ezlopi_main.c`
+  calls `EZPI_service_ws_server_dummy()` instead of
+  `EZPI_service_ws_server_start()`, and the dummy does nothing — so the IP
+  event handler that would eventually reach `httpd_start()` is never
+  registered, and the port has no listener at all.
+
+  A hub built that way announced itself over mDNS and then refused every
+  connection the advert attracted. That is precisely the configuration a Home
+  Assistant user who only wants MQTT builds, and it is now a first-class CI
+  target, so it is worth being honest about. The advert is behind the same
+  `#if` as the server it points at.
+
+  `mdns_init()` and the hostname are deliberately left *outside* the new guard:
+  resolving `<hostname>.local` is useful in every build, and it is all this
+  service can truthfully offer when there is no local API to point at. CI
+  asserts `EZPI_init_mdns` survives in the MQTT-only build, so over-guarding
+  would be caught too.
+
+  **No `_http._tcp` record was added**, which was the original plan and turned
+  out to be wrong. The server registers exactly one URI, `/`, with
+  `is_websocket = true`. A plain `GET` is not rejected: `esp_http_server` only
+  performs the websocket handshake once an `Upgrade: websocket` header has set
+  `ws_handshake_detect`, and otherwise still invokes the handler — which takes
+  its `HTTP_GET` branch, files the connection in the websocket client table and
+  returns without writing a response body. So any client that followed such an
+  advert would hang rather than render. The reasoning is recorded in the source
+  so it does not get re-added.
+
+- **The listening port was a bare `17001` in two files in two different
+  components.** `ezlopi-core-mdns` advertised it and
+  `ezlopi-service-ws-server` bound it, with nothing tying the two together —
+  changing the server's port would have left mDNS advertising the old one with
+  nothing behind it. It now has one definition in `EZLOPI_USER_CONFIG.h`, which
+  both already include. It has to live there rather than in either component's
+  header because `ezlopi-core-mdns` declares no service dependencies and core
+  must not depend on a service.
+
 ### OTA — [bug]
 
 - **`esp32s2` did not build at all from a clean clone.** `CONFIG_EZPI_ENABLE_OTA=y`
@@ -335,7 +377,99 @@ failure.
   Neither check can run unless something compiles this configuration, hence the
   `firmware-improv` CI job below.
 
+### Home Assistant — [feat]
+
+- **Devices wired to an EzloPi now appear in Home Assistant with no YAML, over
+  MQTT Discovery.** Off by default: `CONFIG_EZPI_ENABLE_MQTT` plus a broker URI
+  turns it on.
+
+  This is an addition, not a replacement. **No existing line of core or service
+  code changed to make it work.** State updates are observed through
+  `EZPI_core_broadcast_method_add()`, the same registry the two websocket
+  transports already use, and writes arrive through the same
+  `EZPI_items_set_value_v3()` the cloud calls — so a driver cannot tell an MQTT
+  write from a cloud one.
+
+  Everything on the broadcast path uses `esp_mqtt_client_enqueue()` rather than
+  publish. A registered broadcast method runs on the loop-service task while
+  that task holds the single global serialization buffer, so anything slow there
+  delays the Ezlo cloud broadcast queued behind it. Enqueue hands off to the
+  MQTT task and returns; publish can block on the client.
+
+  The client starts *before* `EZPI_core_wait_for_wifi_to_connect()`, on purpose.
+  That function waits on an event bit only the Wi-Fi driver ever sets, so on an
+  Ethernet-only board it never returns. esp-mqtt's own reconnect loop does not
+  care which interface came up.
+
+- **With both websocket transports off, every item update used to be dropped
+  silently.** `EZPI_service_broadcast_init()` installs the queue that every
+  broadcast method is fed from, but the `#if` around it named only the two
+  websocket transports. So a local-only hub left the queue function `NULL`: it
+  would have published its discovery payloads, then gone permanently quiet with
+  nothing in the log to say why. `CONFIG_EZPI_ENABLE_MQTT` is now a term in that
+  condition. Removing it again was verified to make the symbol vanish from
+  `app_main`, so the CI job covering this can actually fail.
+
+- **The MQTT topic layer is built and parsed separately from the service**,
+  because it is pure string work and because every way it can go wrong is
+  invisible on the device. A discovery config published to a slightly wrong
+  topic is not a degraded version of the right one — it lands where nothing is
+  subscribed and the entity simply never appears. So truncation is treated as
+  failure and the buffer cleared, which means a caller that ignores the return
+  value publishes nothing rather than publishing to a clipped topic.
+
+  The object id is the reduced device name followed by the device and item ids
+  as eight hex digits each. Fixed width is what lets the command topic be split
+  by position instead of by searching for separators, which a device name
+  containing underscores would defeat — user-supplied names routinely have them.
+  The ids are budgeted *before* the name, so a buffer too small to hold
+  everything loses name bytes and never id bytes: a clipped item id would
+  address a *different* item, which presents as a device ignoring commands
+  rather than as a bug.
+
+  Parsing is deliberately strict, because a command topic arrives from the
+  network and names an item about to be written. Anything that is not exactly
+  `_<8 hex>_<8 hex>/set` is refused rather than guessed at, and a refusal zeroes
+  the caller's ids instead of leaving the previous ones in place. The length is
+  honoured rather than a NUL, because esp-mqtt hands over a pointer and a length
+  into a larger buffer.
+
+  Covered by 183 host checks under ASan/UBSan, up from 130: every buffer size
+  from 1 to 64 through the object id builder with each result fed back through
+  the real parser, and a round trip of 12 awkward real-world device names
+  (empty, punctuation-only, non-ASCII, containing slashes, longer than the
+  buffer). Mutation-tested 12 of 12 caught — which found a real gap, in that
+  every wrong-leaf case also happened to be the wrong *length*, so the
+  separator check refused them before the leaf check ever ran. Two four-byte
+  wrong leaves (`/get` and `_set`) now isolate it.
+
+- **Two things that read as accidental are correct, and are now commented as
+  such.** A payload larger than the client's buffer arrives as several
+  `MQTT_EVENT_DATA` events, and only the first carries a topic — continuation
+  fragments have `topic_len == 0`. Those were already dropped, but by a guard
+  that looks like an ordinary argument check, so "fixing" it to accept
+  `topic_len == 0` would parse a fragment as a topic.
+
+  The device-list walk in the announce path takes no lock. That matches every
+  other caller of `EZPI_core_device_get_head()` — `ezlopi-core-devices` exposes
+  no lock to take — and adding one here alone would not address the dozen
+  unsynchronised walks in `ezlopi-cloud`. It belongs in the core, for all of
+  them at once. See [Known gaps](#known-gaps).
+
 ### Build and configuration — [infra]
+
+- **A hub could not be built without the websocket client at all.**
+  `EZPI_service_webprov_is_connected()` is declared inside an
+  `#if CONFIG_EZPI_WEBSOCKET_CLIENT` block in `ezlopi_service_webprov.h`, but
+  `ezlopi_service_uart.c` called it unguarded. Turning the websocket client off
+  therefore failed the build outright on
+  `-Werror=implicit-function-declaration`, which made a local-only hub
+  impossible to compile — the exact configuration the MQTT work needs. No build
+  in CI had the option off, so nothing caught it.
+
+  With the websocket client on, the generated code is unchanged. With it off
+  there is no cloud client, so there is no cloud connection to report and the
+  field is reported as false.
 
 - **Switching chips no longer requires copying a file by hand.** The four
   `sdkconfig.<chip>.4mb` files are renamed to
@@ -420,6 +554,7 @@ failure.
   | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled, that the pinned header is still the default CA source, and that `ca_mios` reached the ELF |
   | `firmware-ota-bundle` | builds esp32 with OTA on and `CONFIG_EZPI_OTA_CA_BUNDLE=y`, from a tree with **no `ca_mios.h`**, and asserts the header is absent, `ca_mios` is *not* in the ELF, and `esp_https_ota` still is |
   | `firmware-improv` | builds esp32 with `CONFIG_EZPI_BLE_ENABLE_IMPROV=y` and asserts both that the symbol got enabled and that the service is in the ELF |
+  | `firmware-mqtt` | builds esp32 with `CONFIG_EZPI_ENABLE_MQTT=y` and **both websocket transports off** — the local-only Home Assistant configuration — and asserts the broadcast queue is still installed and that no mDNS service is advertised on a port with no listener |
   | `install-page` | assembles and verifies [`install/`](install/) from the firmware artifacts |
   | `deploy-install-page` | publishes it, once a maintainer opts in |
 
@@ -593,6 +728,33 @@ Listed because a changelog that only mentions what was finished is misleading.
   not updating. No board has fetched an image over either trust path, so neither
   the pinned nor the bundle verification has been watched succeed or fail against
   a real server.
+- **The MQTT and Home Assistant path has never run against a real broker.** It
+  builds in three configurations in CI and the topic layer is covered by 183
+  host checks, but no broker has been connected, no entity has appeared in a
+  real Home Assistant, and no MQTT command has switched a real relay. The topic
+  strings being correct in a unit test is not the same as Home Assistant
+  recognising them.
+- **No board has announced itself to a real resolver.** The mDNS advert is
+  asserted present or absent in the ELF by CI, which catches the wrong *code*
+  being compiled, but nothing has watched a client discover a hub — or fail to.
+  Separately, the advertised hostname is `ezlopi_<serial4>`, and an underscore
+  in a `.local` host label is questionable under the relevant RFCs. It is left
+  alone deliberately: no resolver has been observed rejecting it, and changing
+  an advertised name risks breaking Ezlo's own clients.
+- **Device-list walks are unsynchronised, across the whole tree.**
+  `ezlopi-core-devices` exposes no lock, so every caller of
+  `EZPI_core_device_get_head()` iterates without one — about a dozen in
+  `ezlopi-cloud` plus the MQTT announce path added here. Fixing it means adding
+  a lock to the core and taking it in all of them at once; doing it in one new
+  caller alone would look like a fix without being one.
+- **One latent free-of-a-literal in the mDNS path, unreachable in every shipped
+  configuration.** When a factory-info getter returns `NULL` the free routine
+  can call `ezlopi_free()` on the string literal `"null"`. It is only reachable
+  with `CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES` on, which is off in all four
+  committed defaults. The same routine also never frees the list nodes
+  themselves and never `NULL`s `ezlopi_mdns_service_cntx`. Recorded rather than
+  changed, because the fix is unverifiable without a configuration nothing
+  currently builds.
 - **The PSK is still sent to the cloud as `key`** in `hub.network.get`. Only
   the local trace is masked. See the README privacy note.
 - **83 files still pin the generated config by relative path**, so the tree as a
