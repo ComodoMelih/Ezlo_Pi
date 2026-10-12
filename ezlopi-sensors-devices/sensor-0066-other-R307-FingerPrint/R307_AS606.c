@@ -1229,24 +1229,57 @@ static void generate_packet(fingerprint_packet_t *txPacket, uint8_t PID, uint16_
 {
     //------------ PID ------------------------------------------------------------------------------------------------------
     txPacket->PID = PID;
+    //------------ Clamp the data length ONCE, before anything derives from it --------------------------------------------
+    /* txPacket->data is MAX_PACKET_LENGTH_VAL bytes. The clamp used to sit on
+       the memcpy alone, and three things downstream kept using the unclamped
+       length:
+         - the checksum loop below summed data[0 .. length-1] while the copy had
+           written only MAX_PACKET_LENGTH_VAL - 2 of them. At length 64..66 that
+           read uninitialised bytes of data[] and then chk_sum, which are inside
+           the allocation; from 67 up it read past the end of it. The threshold
+           is 64 and not 62 because the old clamp tested
+           `length < MAX_PACKET_LENGTH_VAL`, so a length of 63 went down the
+           memcpy branch and copied 63 bytes into the 64-byte array -- in
+           bounds, just inconsistent with the 62 the other branch copied.
+         - that loop's counter was a uint8_t compared against an int, so from
+           length 256 up, i wrapped back to 0 and the loop never terminated.
+           255 stops one iteration short of wrapping; 256 does not.
+         - Packet_len was written from the unclamped value, and
+           send_uart_packets() computes its uart_write_bytes() count as
+           Packet_len - 2, so a length of 255 would have put 255 bytes starting
+           at data onto the wire -- 191 of them past the end of the packet,
+           which SEND_PACKET() allocates with ezlopi_malloc() at exactly
+           sizeof(fingerprint_packet_t). That is the worst of the three, being
+           the only one that moves adjacent heap contents off the device.
+       None of that is reachable today: generate_packet() and SEND_PACKET() are
+       both static, declared in no header, and all seventeen call sites pass
+       sizeof() of a local 1-to-6 byte array. It is fixed anyway because the
+       comment on Packet_len invites exactly the packet size that breaks it, and
+       because this is the same shape as the MB1013 defect -- a clamp on one
+       statement that the loop in the next statement did not inherit. Clamping
+       the parameter itself means the two cannot drift apart again.
+
+       There is no host test for this: generate_packet() is static in a
+       translation unit that needs uart_write_bytes(), esp_timer and vTaskDelay,
+       so tests/host cannot reach it. The boundaries above were measured instead
+       by running both versions of this function side by side under
+       AddressSanitizer, on a packet heap-allocated at exactly
+       sizeof(fingerprint_packet_t) so that a read past it is visible. */
+    if (length > (MAX_PACKET_LENGTH_VAL - 2))
+    {
+        length = (MAX_PACKET_LENGTH_VAL - 2);
+    }
     //------------ Packet length -------------------------------------------------------------------------------------------
     length = length + 2;
     txPacket->Packet_len[0] = (uint8_t)(length >> 8);   /*MSB [PID + P_LEN + (data_fields)] should not exceed 256bytes*/
     txPacket->Packet_len[1] = (uint8_t)(length & 0xFF); /*LSB [PID + P_LEN + (data_fields)] should not exceed 256bytes*/
     length = length - 2;
     //------------ Inst_code + Data_content  --------------------------------------------------------------------------------
-    if (length < MAX_PACKET_LENGTH_VAL)
-    {
-        memcpy(&(txPacket->data), Combined_data, ((int)length)); // Copying only data section
-    }
-    else
-    {
-        memcpy(&(txPacket->data), Combined_data, (MAX_PACKET_LENGTH_VAL - 2));
-    }
+    memcpy(&(txPacket->data), Combined_data, ((int)length)); // Copying only data section
     //------------ Checksum -------------------------------------------------------------------------------------------------
     // CHK_SUM calculation
     uint16_t sum = (uint16_t)PID + ((uint16_t)(txPacket->Packet_len[0] << 8) + (uint16_t)(txPacket->Packet_len[1] & 0xFF)); // adding
-    for (uint8_t i = 0; i < (int)length; i++)
+    for (uint16_t i = 0; i < length; i++)
     {
         sum += (uint16_t)(txPacket->data[i]);
     }

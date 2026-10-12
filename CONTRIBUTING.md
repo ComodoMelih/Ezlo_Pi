@@ -149,9 +149,36 @@ So before splitting a `.c` file, check whether the dependency is really in the
 code or only in the header it includes. Two headers — one for the layout and the
 parser, one for the cloud plumbing — is often the whole job.
 
-The remaining UART driver (R307) still reaches into cJSON, the device and item
-core, and the GPIO ISR service, so it needs the same treatment before it can
-join.
+The remaining UART driver is R307, and it is the counter-example that makes the
+paragraph above worth actually doing rather than assuming the answer. Checked
+the same way, its dependency is in the *code*: `R307_AS606.c` calls
+`esp_timer_get_time()` 31 times, `vTaskDelay()` nine times and
+`uart_write_bytes()` six times, from function bodies. No header move touches
+any of that. The specific obstacle is `__Response_function()`, which interleaves
+the confirmation-code `switch` with an `esp_timer_get_time()`/`vTaskDelay()`
+loop polling for the reply — the waiting and the interpreting are the same
+function, so it needs the PMS5003 treatment and not the GY-GPS6MV2 one.
+
+So the check cuts both ways, and the two drivers were mis-estimated in opposite
+directions before anyone ran it: GY-GPS6MV2 was assumed expensive and was a
+header split, R307 was assumed cheap for the same reason and is the most
+expensive of the five. `grep -c` on the function bodies is most of the
+measurement.
+
+Some code cannot reach this suite at all, and it is worth saying so plainly
+rather than quietly leaving it uncovered. R307's `generate_packet()` is
+`static`, in no header, in a translation unit that needs `uart_write_bytes()`,
+`esp_timer` and `vTaskDelay` — so a bug fixed in it in this release has no test
+here, and the CHANGELOG says so instead of implying coverage. If you are in that
+position, a throwaway program that copies the old and new function side by side
+and runs both under AddressSanitizer is worth far more than nothing: it is how
+the boundaries in that entry were measured rather than argued, and it caught two
+errors in the reasoning — the over-read starts two bytes later than expected,
+because `data[64..65]` are still inside the allocation and so invisible to the
+sanitiser, and a non-terminating loop could not be observed at all until the
+packet was moved into an oversized slab, because ASan aborted on the over-read
+first. Neither would have been noticed by reading the code. Delete the program
+afterwards; record the numbers.
 
 When you add a test, check that it would actually have caught the bug: break
 the fix on purpose, confirm the suite goes red, then put it back. A test that

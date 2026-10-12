@@ -194,10 +194,91 @@ the parsers involved. All four are covered by regression tests in
   reports as an ASan `heap-buffer-overflow`, which is what establishes the
   over-read was real rather than theoretical.
 
-  The other four drivers cannot join the suite yet: they pull in cJSON, the
-  device/item core, FreeRTOS tasks and GPIO. That is the concrete argument for
-  the parser seam tracked in [Known gaps](#known-gaps), and their clamps are
-  verified only by an esp32 build.
+  The other four drivers could not join the suite when this was written: they
+  pull in cJSON, the device/item core, FreeRTOS tasks and GPIO. That was the
+  concrete argument for the parser seam tracked in
+  [Known gaps](#known-gaps). Three of the four have since been brought in —
+  PMS5003, MB1013 and GY-GPS6MV2, each under *Testing* below — leaving R307,
+  whose dependency turned out to be genuinely in the code rather than only in a
+  header. Of the four clamps that were not host-testable when this was written,
+  two still are not: R307's and GY-GPS6MV2's remain verified only by an esp32
+  build.
+
+- **R307's transmit path had the MB1013 shape too: a clamp on one statement
+  that the next three statements did not inherit.** Everything above is about
+  bytes arriving; this one is about bytes leaving. `generate_packet()` clamped
+  the `memcpy` into a 64-byte `data[]` and then let three other things keep
+  using the unclamped `length`:
+
+  ```c
+  length = length + 2;
+  txPacket->Packet_len[0] = (uint8_t)(length >> 8);     /* unclamped */
+  txPacket->Packet_len[1] = (uint8_t)(length & 0xFF);
+  length = length - 2;
+  if (length < MAX_PACKET_LENGTH_VAL)
+      memcpy(&(txPacket->data), Combined_data, ((int)length));
+  else
+      memcpy(&(txPacket->data), Combined_data, (MAX_PACKET_LENGTH_VAL - 2));
+  ...
+  for (uint8_t i = 0; i < (int)length; i++)             /* unclamped */
+      sum += (uint16_t)(txPacket->data[i]);
+  ```
+
+  The three consequences, with the boundaries measured rather than reasoned —
+  both versions of the function were run side by side under AddressSanitizer on
+  a packet heap-allocated at exactly `sizeof(fingerprint_packet_t)`, which is
+  what `SEND_PACKET()` does with `ezlopi_malloc()`:
+
+  - The checksum loop summed `data[0 .. length-1]` while the copy had written
+    only 62 of them. At `length` 64 to 66 it read uninitialised bytes of
+    `data[]` and then `chk_sum`, both inside the allocation; from 67 up it read
+    past the end of it — `heap-buffer-overflow READ of size 1 ... 0 bytes after
+    75-byte region`. The threshold is 64 rather than 62 because the old test was
+    `length < MAX_PACKET_LENGTH_VAL`, so 63 went down the `memcpy` branch and
+    copied 63 bytes into a 64-byte array: in bounds, just inconsistent with the
+    62 the other branch copied.
+  - That loop's counter was a `uint8_t` compared against an `int`, so from
+    `length` 256 up, `i` wrapped to 0 and **the loop never terminated**. 255
+    stops one iteration short of wrapping and completes; 256 does not. ASan
+    cannot show this, because the over-read aborts first — so it was isolated by
+    placing the packet inside a 4096-byte slab, where every read the loop makes
+    is in bounds and the loop bound is the only thing left under test. 62, 64
+    and 255 complete; 256, 300 and 1000 are killed by `SIGALRM`.
+  - `Packet_len` was written from the unclamped value, and `send_uart_packets()`
+    computes its `uart_write_bytes()` count as `Packet_len - 2`. A `length` of
+    255 declares `Packet_len` 257 and would have put 255 bytes starting at
+    `data` onto the wire — 191 of them past the end of the packet. That is the
+    worst of the three, being the only one that moves adjacent heap contents off
+    the device.
+
+  Fixed by clamping the parameter once, before anything derives from it, and
+  widening the counter to `uint16_t`. Clamping `length` itself rather than one
+  statement means the copy and the loop cannot drift apart again, which is the
+  lesson MB1013 taught twice.
+
+  **This is latent, and saying otherwise would be easy and wrong.** No input
+  reaches it today. `generate_packet()` and `SEND_PACKET()` are both `static`
+  and appear in no header — checked, not assumed — and all seventeen call sites
+  pass `(uint16_t)(sizeof(Combined_data))` of a local array. Those seventeen
+  were resolved to literal sizes: 1, 1, 1, 1, 1, 1, 1, 2, 2, 3, 4, 4, 5, 5, 5,
+  5, 6. The largest is 6, against a clamp threshold of 62 and a non-termination
+  threshold of 256. It is fixed anyway because the comment on the `Packet_len`
+  field — *"should not exceed 256bytes"* — invites precisely the packet size
+  that breaks it, so the first person to send a template or a notepad page
+  through this function would have found all three at once.
+
+  **There is no host test for this one.** `generate_packet()` is `static` in a
+  translation unit that needs `uart_write_bytes()`, `esp_timer` and
+  `vTaskDelay`, so `tests/host` cannot reach it, and R307 is not the cheap
+  header split GY-GPS6MV2 turned out to be — see *Testing* below. The
+  AddressSanitizer runs above are a throwaway probe over copies of both
+  versions, not a committed test, and they are the only evidence that the
+  boundaries are where this entry says they are. Verified on the pinned v4.4.6
+  toolchain only to the extent a build can verify anything: the object
+  compiles, the clamp precedes all three derivations, the two-branch `memcpy`
+  and the `uint8_t` counter are both gone, no warning mentions `R307_AS606.c`,
+  the whole-build warning count is unchanged at 144, and the image is the same
+  size as before.
 
 ### BLE provisioning — [bug]
 
@@ -968,6 +1049,63 @@ failure.
   tested is the GPGGA field parser downstream of it. Two of the four clamps
   remain verified only by an esp32 build: R307's and this one.
 
+- **R307 was examined for both of the patterns found above and has neither.**
+  Two negative results, recorded because the next person to look will otherwise
+  re-derive them, and because the GY-GPS6MV2 entry above is a standing warning
+  that an assumption about a driver's dependencies can be wrong by a whole
+  category.
+
+  *It is not the cheap header split.* The hope after GY-GPS6MV2 was that R307
+  would also turn out to be blocked only by its header. It is not:
+  `R307_AS606.c` calls `esp_timer_get_time()` 31 times, `vTaskDelay()` nine
+  times and `uart_write_bytes()` six times, in the function bodies rather than
+  in declarations. Those are real code dependencies and no header move removes
+  them. `__Response_function()` is the specific obstacle — it interleaves the
+  confirmation-code `switch` with an `esp_timer_get_time()`/`vTaskDelay()`
+  polling loop, so the parsing and the waiting are the same loop. That is the
+  entanglement the earlier known-gaps entry predicted for GY-GPS6MV2, where it
+  was wrong; here it is accurate.
+
+  *It does not have the GY-GPS6MV2 stale-buffer defect.* The reason that one
+  mattered was state surviving between parses, so every R307 receive buffer was
+  checked for the same shape. All seventeen `memset(recieved_buffer, ...)` calls
+  pair one-to-one with the seventeen `SEND_PACKET()` calls, and in every pair
+  the clear comes first — the merged file order is `CS` seventeen times with no
+  two clears or two sends adjacent. That ordering is load-bearing rather than
+  incidental, for a reason that only becomes clear once you look at what reads
+  the buffer: `__Response_function()` does not fill it. It *polls* it, spinning
+  on `recieved_buffer[0] == FINGERPRINT_PID_ACKPACKET` with a
+  `vTaskDelay(50ms)`, because the actual fill happens asynchronously in
+  `__uart_0066_fingerprint_upcall()` on the UART task. The clear before each
+  send is what stops the poll returning immediately on the *previous* reply's
+  ACK byte.
+
+  Its receive-side bounds are sound too, though that is a narrower claim than
+  the receive path being sound. `recieved_buffer` is one array, sized
+  `MAX_PACKET_LENGTH_VAL` (64); the single copy that fills it is clamped with
+  `(_copy_size < MAX_PACKET_LENGTH_VAL) ? _copy_size : MAX_PACKET_LENGTH_VAL`;
+  its source `another_buffer` is sized `MAX_PACKET_LENGTH_VAL + 6` so that
+  reading 64 bytes from `another_buffer + 6` stays in bounds; the furthest
+  constant index read anywhere is `[21]`; and `ReadSysPara`'s jump from `[11]`
+  to `[16]` — the only non-consecutive step in that function — correctly skips
+  the four-byte device address the datasheet puts there rather than being an
+  off-by-four.
+
+  **One thing found and deliberately not fixed, recorded because it is not
+  obvious and is not a bounds problem.** The poll above tests only byte `[0]`,
+  and the fill is a single `memcpy` running on a different task on a different
+  core. `ACK_OK` is `0x00` and the buffer was just memset to zero, so a poller
+  that observes `[0] == 0x07` after the copy has written the first byte but
+  before it reaches the fourth will read `[3]` as `0x00` and report a failed
+  command as a success. The window is a few instructions wide inside a ~12-byte
+  `memcpy`, and nothing here establishes that it has ever been hit — it is
+  stated as a mechanism, not as an observed failure. It is left alone because
+  the fix is a sequencing or handshake change in the upcall rather than a bound,
+  and that belongs with the parser seam below, not in a clamp commit.
+
+  What the examination did find and fix is on the transmit side, under *UART
+  sensor dispatch* above.
+
 - **New CI workflow, [`.github/workflows/ci.yml`](.github/workflows/ci.yml).**
   Nothing in this repository was checked automatically before.
 
@@ -1233,7 +1371,10 @@ Listed because a changelog that only mentions what was finished is misleading.
   the same terms. The R307 and GY-GPS6MV2 clamps are still verified only by an
   esp32 build: GY-GPS6MV2 gained 146 host checks in this release, but they cover
   the GPGGA field parser, not `__uart_gps6mv2_upcall()` where that driver's clamp
-  actually sits — and MB1013 is the reason that distinction is worth taking seriously
+  actually sits. R307 is in the same position twice over — besides its receive
+  clamp, the `generate_packet()` transmit fix in this release has no host test
+  either, only a throwaway AddressSanitizer probe over copies of both versions
+  of the function. MB1013 is the reason that distinction is worth taking seriously
   rather than treating a reviewed clamp as settled: its clamp was reviewed,
   documented and wrong, and only writing the tests showed it.
 - **The R307 parser still cannot be host-tested, and the reason recorded here
@@ -1254,11 +1395,25 @@ Listed because a changelog that only mentions what was finished is misleading.
   lives in the code or in the header before costing the work — the estimate here
   was wrong by a whole category.
 
-  R307 may well be the same shape, since `R307_AS606.c` is likewise nearly
-  dependency-free; that has not been checked yet. What has *not* been brought in
-  for either driver is the upcall itself: `__uart_gps6mv2_upcall`, its
-  `gps_cir_buf` write-overflow path (clamped, never host-tested) and the
-  `strstr`/`strchr` navigation of that buffer remain outside the suite.
+  This entry also guessed that R307 "may well be the same shape, since
+  `R307_AS606.c` is likewise nearly dependency-free". That has now been checked
+  and the guess was wrong in the other direction. `R307_AS606.c` calls
+  `esp_timer_get_time()` 31 times, `vTaskDelay()` nine times and
+  `uart_write_bytes()` six times, from function bodies — real code dependencies
+  that no header move touches. The specific obstacle is
+  `__Response_function()`, which interleaves the confirmation-code `switch` with
+  an `esp_timer_get_time()`/`vTaskDelay()` loop polling for the reply: the
+  waiting and the interpreting are one function. So R307 needs the PMS5003
+  treatment (move the logic behind a seam) and not the GY-GPS6MV2 one (move a
+  header), and it is the most expensive of the five rather than the cheapest.
+  Two wrong estimates in a row, in opposite directions, from the same habit of
+  costing this work by looking at the file rather than at what it calls.
+
+  What has *not* been brought in for either driver is the upcall itself:
+  `__uart_gps6mv2_upcall`, its `gps_cir_buf` write-overflow path (clamped, never
+  host-tested) and the `strstr`/`strchr` navigation of that buffer remain
+  outside the suite, as does `__uart_0066_fingerprint_upcall` and the
+  poll-versus-fill race noted under *Testing* above.
 - **RESOLVED — GY-GPS6MV2's five `atoi()` calls are not the MB1013 defect.**
   This entry previously flagged them as unchecked, on the reasoning that a clamp
   around a string function is not the same as bounding it. They were checked.
