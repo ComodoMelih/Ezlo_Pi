@@ -45,7 +45,7 @@
  *******************************************************************************/
 #include "driver/uart.h"
 #include "ezlopi_core_heap.h"
-#include "../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 /*******************************************************************************
  *                          C++ Declaration Wrapper

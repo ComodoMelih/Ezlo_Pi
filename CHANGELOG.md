@@ -246,20 +246,71 @@ failure.
   The header defines a variable, so at block scope it became a per-call local.
   Moved to the file's include block, where it has static storage as intended.
 
-- **New code no longer hard-codes the build directory in its `sdkconfig.h`
-  include.** `#include "../../build/config/sdkconfig.h"` pins both the build
-  directory's name and its position relative to the source file, so it breaks
-  for any build directory other than `<project>/build` — including
-  `idf.py -B <dir>`. ESP-IDF already puts the generated config directory on
-  every component's include path, so the plain `#include "sdkconfig.h"` works.
+- **The tree no longer hard-codes the build directory in its `sdkconfig.h`
+  includes — all 83 occurrences are converted.**
+  `#include "../../build/config/sdkconfig.h"` pins both the build directory's
+  name and its position relative to the source file, so it breaks for any build
+  directory other than `<project>/build` — including the perfectly ordinary
+  `idf.py -B <dir>`, out-of-tree builds and most IDE integrations. ESP-IDF
+  already puts the generated config directory on every component's include path,
+  so the plain `#include "sdkconfig.h"` works; seven files, two of them
+  upstream's, were already written that way and built fine.
 
-  **This is not fixed tree-wide, and an earlier wording of this entry implied it
-  was.** What actually changed: `ezlopi_core_ota.c` was converted, and
-  `ezlopi_service_ble_improv.c` was written that way. **83 files inherited from
-  upstream still use the relative form**, so the tree as a whole still cannot be
-  built with `idf.py -B <dir>`. See [Known gaps](#known-gaps). Converting the
-  rest belongs with the ESP-IDF 5.x work: it is 83 files touched for no
-  behaviour change, which is a poor thing to bury in an unrelated pull request.
+  Done in one pass rather than file-by-file because the result is *verifiable*
+  rather than merely plausible. The preprocessor is handed the same
+  `sdkconfig.h` either way, and the conversion replaced one line with one line
+  in every file — so not even the `__LINE__` values that the `TRACE_*` macros
+  embed could shift. That is a falsifiable prediction, so it was tested instead
+  of asserted: an esp32 image built before and after the change differs in
+  exactly 69 bytes, all of them build metadata — the app descriptor's build
+  *time* string, the ELF sha256 that covers it, and the trailing image
+  checksum. With those masked the images are byte-identical;
+  `.flash.text` (1,254,203 bytes), `.flash.rodata`, `.dram0.data` and
+  `.iram0.text` compare identical section by section; and all 13,800 symbols
+  match **including their addresses**. The masking was itself checked against a
+  deliberately corrupted image, so the comparison can fail.
+
+  Host tests cannot be affected and were confirmed not to be: `tests/host`
+  compiles four leaf files, none of them among the 83, and the one that needs
+  headers gets the stubs in `tests/host/stubs/`.
+
+  Counting the occurrences correctly took more care than it looks, and the
+  traps are recorded here because the checker that now guards this has to keep
+  avoiding them:
+
+  - **Matching a fixed `../` depth misses a file.** Almost every occurrence sat
+    two directories deep, but `ezlopi-user-config/EZLOPI_USER_CONFIG.h:48` is
+    one shallower and wrote `"../build/config/sdkconfig.h"`. Match on the path
+    *suffix* at any depth.
+  - **Mentioning the path is not including it.**
+    `git grep -l 'build/config/sdkconfig.h' -- '*.c' '*.h'` reported 89, but six
+    of those named the old form in a comment while deliberately not using it —
+    four converted files explaining what they moved away from, and two host-test
+    stubs describing what they stub out. The real number was 83.
+  - **A regex block-comment stripper *undercounts*, and this one cost the most.**
+    `re.sub(r"/\*.*?\*/", "", text, flags=re.S)` looks obviously correct and is
+    not: banner comments like `//*******` contain the substring `/*`, so the
+    regex treats them as opening a block comment and deletes everything through
+    the next `*/` — swallowing the real `#include` underneath. That hid
+    `ezlopi_core_scenes_cjson.c` and produced a confident 82 instead of 83, and
+    it was only caught because the script's total was cross-checked against an
+    independent `grep` and the two disagreed. The checker is a character scanner
+    that knows `//` starts a line comment, and self-tests that exact case on
+    every run.
+
+  The payoff was then confirmed directly rather than inferred from the include
+  paths: `idf.py -B <dir> build` succeeds on the converted tree and creates no
+  `<project>/build` at all. Restoring the pinned form on that same tree makes
+  the identical command fail with
+  `fatal error: ../../build/config/sdkconfig.h: No such file or directory`,
+  while it still builds fine into the default `./build` — so the failure is the
+  include and nothing else.
+
+  Regression-guarded by
+  [`tests/ci/check_sdkconfig_includes.py`](tests/ci/check_sdkconfig_includes.py)
+  in the `hygiene` job, whose baseline is now zero, and by the
+  `firmware-outdir` job, which builds esp32 into a directory outside the
+  project so the capability itself is tested and not just the include style.
 
 - **The OTA error path logged a meaningless error code, and read the wrong
   struct field to get it.** `_http_event_handler` called
@@ -549,8 +600,9 @@ failure.
   | Job | What it does |
   | --- | --- |
   | `host-tests` | `make -C tests/host` under ASan + UBSan |
-  | `hygiene` | no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no new pinned `sdkconfig.h` includes |
+  | `hygiene` | no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes |
   | `firmware` | builds all four targets in `espressif/idf:v4.4.6`, asserts the generated config was actually inherited from the per-target defaults, merges and verifies a flashable image, uploads `bin`/`elf`/`map`/`sdkconfig` |
+  | `firmware-outdir` | builds esp32 with `idf.py -B /tmp/...`, outside the workspace, and asserts the image landed there and that **no `./build` was created at all** — so the tree cannot regress to a build directory it only builds in by default |
   | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled, that the pinned header is still the default CA source, and that `ca_mios` reached the ELF |
   | `firmware-ota-bundle` | builds esp32 with OTA on and `CONFIG_EZPI_OTA_CA_BUNDLE=y`, from a tree with **no `ca_mios.h`**, and asserts the header is absent, `ca_mios` is *not* in the ELF, and `esp_https_ota` still is |
   | `firmware-improv` | builds esp32 with `CONFIG_EZPI_BLE_ENABLE_IMPROV=y` and asserts both that the symbol got enabled and that the service is in the ELF |
@@ -757,38 +809,6 @@ Listed because a changelog that only mentions what was finished is misleading.
   currently builds.
 - **The PSK is still sent to the cloud as `key`** in `hub.network.get`. Only
   the local trace is masked. See the README privacy note.
-- **83 files still pin the generated config by relative path**, so the tree as a
-  whole still cannot be built with `idf.py -B <dir>`. Seven files use the plain
-  `#include "sdkconfig.h"`: `ezlopi_core_ota.c`, `ezlopi_service_ble_improv.c`,
-  `ezlopi_service_improv.c`, `ezlopi_service_improv_serial.c` and
-  `ezlopi_service_mqtt.c` (all added or converted in this branch), plus
-  `ezlopi_service_system_temperature_sensor.c`/`.h`, which were already that way
-  upstream.
-
-  The count is now enforced by
-  [`tests/ci/check_sdkconfig_includes.py`](tests/ci/check_sdkconfig_includes.py),
-  which fails if it rises *or* if it falls without the baseline being lowered.
-  Counting it correctly takes more care than it looks, and both traps are worth
-  recording for whoever does the conversion:
-
-  - **Matching a fixed `../` depth misses a file.** Almost every offender sits
-    two directories deep, but `ezlopi-user-config/EZLOPI_USER_CONFIG.h:48` is
-    one shallower and writes `"../build/config/sdkconfig.h"`. Match on the path
-    *suffix* at any depth.
-  - **Mentioning the path is not including it.**
-    `git grep -l 'build/config/sdkconfig.h' -- '*.c' '*.h'` reports 89, but six
-    of those name the old form in a comment while deliberately not using it —
-    four converted files explaining what they moved away from, and two host-test
-    stubs describing what they stub out.
-
-  A third trap cost more than either, and is the reason the checker is a
-  character scanner rather than a regex. Stripping block comments with
-  `re.sub(r"/\*.*?\*/", "", text, flags=re.S)` *undercounts*: banner comments
-  like `//*******` contain the substring `/*`, so the regex treats them as
-  opening a block comment and deletes everything through the next `*/` —
-  swallowing the real `#include` underneath. That hid
-  `ezlopi_core_scenes_cjson.c` and produced a confident 82. The scanner knows
-  `//` starts a line comment, and self-tests that specific case on every run.
 - **The install page has never been used to flash a board.** It is assembled
   and checked on every CI run, and the images it serves are verified
   byte-for-byte against the build outputs, but no one has opened it in a

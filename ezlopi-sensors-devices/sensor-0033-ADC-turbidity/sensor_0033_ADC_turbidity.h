@@ -43,7 +43,7 @@
  *                          Include Files
  *******************************************************************************/
 #include <stdio.h>
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 #include "ezlopi_core_actions.h"
 #include "ezlopi_core_devices.h"

@@ -40,7 +40,7 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 #include "freertos/FreeRTOSConfig.h"
 

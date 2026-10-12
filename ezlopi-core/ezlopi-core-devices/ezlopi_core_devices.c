@@ -54,7 +54,7 @@
 #include "ezlopi_cloud_constants.h"
 
 #include "EZLOPI_USER_CONFIG.h"
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 /*******************************************************************************
  *                          Extern Data Declarations
  *******************************************************************************/

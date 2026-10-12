@@ -99,22 +99,22 @@ jobs:
       - name: JSON string destinations are initialised
         run: python3 tests/ci/check_uninit_json_buffers.py
 
-      # 83 files include the generated config as
+      # 83 files used to include the generated config as
       # "../../build/config/sdkconfig.h", which pins both the build
       # directory's name and its position relative to the source file -- so the
-      # tree cannot be built with idf.py -B <dir>. Converting all 83 belongs
-      # with the ESP-IDF 5.x work; what must not happen before then is the
-      # number going up, because a new file in the old style is one more file to
-      # convert later and nothing would have objected.
+      # tree could not be built with idf.py -B <dir>. All 83 are now converted
+      # to the plain #include "sdkconfig.h", which works because ESP-IDF
+      # already puts the generated config directory on every component's
+      # include path. The baseline is therefore zero and this step exists to
+      # keep it there: a new file in the old style is one more file to convert
+      # later, and nothing else would object.
       #
-      # The script holds the baseline and fails in both directions: upward
-      # because that is a regression, downward because a stale high baseline
-      # would quietly let the next regression back in. It also self-tests its
-      # own comment scanner on every run, which is not ceremony -- the first
-      # version of this check silently undercounted, because "//*****" banner
-      # comments contain the substring "/*" and a regex-based stripper treated
-      # them as opening a block comment, swallowing the real #include below.
-      - name: No new pinned sdkconfig.h includes
+      # The script also self-tests its own comment scanner on every run, which
+      # is not ceremony -- the first version of this check silently
+      # undercounted, because "//*****" banner comments contain the substring
+      # "/*" and a regex-based stripper treated them as opening a block
+      # comment, swallowing the real #include below.
+      - name: No pinned sdkconfig.h includes
         run: python3 tests/ci/check_sdkconfig_includes.py
 
   firmware:
@@ -236,6 +236,56 @@ jobs:
             build/partition_table/partition-table.bin
             sdkconfig
           if-no-files-found: error
+
+  # Every job above builds into the default <project>/build, so none of them
+  # would notice the tree becoming unbuildable anywhere else. It used to be:
+  # 83 files included the generated config as "../../build/config/sdkconfig.h",
+  # which hard-codes both the build directory's name and its position, and
+  # "idf.py -B <dir>" failed with
+  #   fatal error: ../../build/config/sdkconfig.h: No such file or directory
+  # while still building perfectly into ./build. That is a failure mode no
+  # amount of in-tree building can see.
+  #
+  # The hygiene job checks the include *style*; this job checks the
+  # *capability*, which is the thing anyone actually cares about. Keeping both
+  # is deliberate: the style check localises a regression to the offending file
+  # and names it, and this one proves the style check is guarding something
+  # real rather than enforcing a convention for its own sake.
+  #
+  # The build directory is placed outside the workspace on purpose -- a sibling
+  # directory would still be found by a relative path containing enough "..".
+  firmware-outdir:
+    name: Build esp32 (out-of-tree build directory)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v4.4.6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build into a directory outside the project
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          OUT=/tmp/ezlopi-outdir-build
+          idf.py -B "$OUT" set-target esp32
+          idf.py -B "$OUT" build
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
+
+      - name: Confirm it really built out of tree
+        shell: bash
+        run: |
+          # If the application landed in the out-of-tree directory and no
+          # ./build was created at all, then nothing fell back to the default
+          # location and no relative path to "build/config" could have resolved.
+          test -f "$OUT/Ezlo_Pi_v4x.bin" || {
+            echo "::error::no application image in $OUT; the -B build did not produce one."
+            exit 1
+          }
+          if [ -e build ]; then
+            echo "::error::a ./build directory exists, so something ignored -B."
+            ls -la build
+            exit 1
+          fi
+          echo "built into $OUT with no ./build: out-of-tree builds work."
 
   # ezlopi_core_ota.c is entirely wrapped in "#ifdef CONFIG_EZPI_ENABLE_OTA",
   # and that symbol is "not set" in every committed sdkconfig.defaults.*. The

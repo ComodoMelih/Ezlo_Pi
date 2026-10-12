@@ -43,7 +43,7 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 #include <string.h>
 #include "cjext.h"
 #include "EZLOPI_USER_CONFIG.h"

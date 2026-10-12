@@ -57,7 +57,7 @@
 #include "ezlopi_cloud_device_types_str.h"
 #include "ezlopi_cloud_item_name_str.h"
 
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 #include "cjext.h"
 
 /*******************************************************************************

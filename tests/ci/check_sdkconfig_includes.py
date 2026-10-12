@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Ratchet on the number of files that pin the generated config by path.
+"""Fail if any file pins ESP-IDF's generated config header by relative path.
 
 The problem
 -----------
-Most of this tree includes ESP-IDF's generated configuration header like this:
+This tree used to include ESP-IDF's generated configuration header like this:
 
     #include "../../build/config/sdkconfig.h"
 
@@ -14,49 +14,57 @@ perfectly ordinary ``idf.py -B <dir>``, and including out-of-tree builds and
 most IDE integrations.
 
 It is also unnecessary. ESP-IDF already puts the generated config directory on
-every component's include path, so the plain ``#include "sdkconfig.h"`` works
-and is what new code should use.
+every component's include path, so the plain ``#include "sdkconfig.h"`` works.
 
-Why a ratchet rather than a fix
--------------------------------
-There are 83 of these, all inherited from upstream. Converting them is 83 files
-touched for zero behaviour change, which is a poor thing to bury inside an
-unrelated pull request, and it belongs with the ESP-IDF 5.x migration where the
-include paths are being revisited anyway.
+All 83 have now been converted, so the baseline is zero and this is a
+prohibition rather than a ratchet: the relative form must not come back.
 
-What must not happen in the meantime is the number going *up*. A new file
-written in the old style is a new file that has to be converted later, and
-nothing would have objected. So this script fails if the count rises, and also
-fails if it *falls* without the baseline below being updated -- otherwise
-progress silently loosens the check and the next regression has a higher bar to
-clear.
+Why the conversion was safe to do in one go
+-------------------------------------------
+Because it was verifiable rather than merely plausible. The preprocessor is
+handed the same ``sdkconfig.h`` either way, and the converter replaced one line
+with one line in every file, so not even the ``__LINE__`` values that ``TRACE_*``
+embeds could shift. That is a falsifiable prediction, and it was tested: an
+esp32 image built before and after differs only in the app descriptor's build
+*time* string, the ELF sha256 that covers it, and the trailing image checksum.
+``.flash.text``, ``.flash.rodata``, ``.dram0.data`` and ``.iram0.text`` compare
+byte-identical, and all 13800 symbols match including their addresses.
+
+The script keeps the baseline mechanism, and still fails if the count falls
+below the baseline without this constant being updated. At zero that branch
+cannot fire -- the count cannot go lower -- but it is kept rather than deleted
+because the mechanism is what makes the check honest if the number ever has to
+move again, and because a drop is only good news if the floor rises with it.
 
 Counting this correctly is fiddlier than it looks
 -------------------------------------------------
 Two traps, both of which this script was written to avoid, and both of which
 are the reason it exists as a script rather than as a one-line grep:
 
-1. **Matching a fixed ``../`` depth misses files.** Almost every offender sits
-   two directories deep and writes ``"../../build/config/sdkconfig.h"``, but
-   ``ezlopi-user-config/EZLOPI_USER_CONFIG.h`` sits one shallower and writes
+1. **Matching a fixed ``../`` depth misses files.** Almost every offender sat
+   two directories deep and wrote ``"../../build/config/sdkconfig.h"``, but
+   ``ezlopi-user-config/EZLOPI_USER_CONFIG.h`` sits one shallower and wrote
    ``"../build/config/sdkconfig.h"``. A pattern anchored on ``../../`` waves it
    through. This script matches on the path *suffix* at any depth.
 
 2. **Mentioning the path is not including it.** Several files name the old form
    in a comment while deliberately *not* using it -- the converted files explain
    what they moved away from, and two host-test stubs describe what they stub
-   out. A naive ``git grep -l`` for the string counts those as offenders. This
-   script only counts lines that are actually ``#include`` directives, and
-   strips comments before looking.
+   out. A naive ``git grep -l`` for the string counts those as offenders, which
+   is why it reported 89 when the real number was 83. This script only counts
+   lines that are actually ``#include`` directives, and strips comments before
+   looking.
 """
 
 import re
 import subprocess
 import sys
 
-# The number of files currently pinning the generated config by path.
-# Lower this as files are converted. Never raise it.
-BASELINE = 83
+# The number of files allowed to pin the generated config by path. All 83
+# inherited from upstream have been converted, so this is zero and must stay
+# zero. Never raise it: the relative form breaks idf.py -B <dir>, and a file
+# that uses it is a file someone has to convert later.
+BASELINE = 0
 
 # An #include whose quoted path ends in build/config/sdkconfig.h, at any depth.
 # Anchored at the start of the line (allowing leading whitespace) so a mention
@@ -212,25 +220,29 @@ def main():
 
     print(f"files pinning the generated config by path: {n} (baseline {BASELINE})")
     print(f"files using the plain #include \"sdkconfig.h\": {len(plain)}")
-    for path in plain:
-        print(f"  ok  {path}")
+    # The plain-form list used to be seven files and was worth printing. It is
+    # now ninety, which is noise in a CI log, so only the offenders get named.
 
     if n > BASELINE:
         added = n - BASELINE
         print()
-        print(f"::error::{added} more file(s) now pin the generated config by path "
+        print(f"::error::{added} file(s) pin the generated config by relative path "
               f"({n}, baseline {BASELINE}).")
         print("::error::New code must use the plain #include \"sdkconfig.h\" instead.")
         print("::error::ESP-IDF already puts the generated config directory on every")
         print("::error::component's include path. The relative form pins the build")
         print("::error::directory's name and position, so it breaks idf.py -B <dir>.")
         print()
-        print("--- all files currently using the relative form ---")
+        print("--- files using the relative form ---")
         for path in pinned:
             print(f"  {path}")
         return 1
 
     if n < BASELINE:
+        # Unreachable while BASELINE is 0, since a count cannot go negative.
+        # Kept because the baseline is what makes this check honest if the
+        # number ever has to move again: a drop is only good news if the floor
+        # drops with it, otherwise the next regression has a free pass.
         print()
         print(f"::error::Good news, handled badly: the count dropped to {n} but the")
         print(f"::error::baseline in {__file__} still says {BASELINE}.")
@@ -239,7 +251,7 @@ def main():
         return 1
 
     print()
-    print(f"unchanged at the baseline of {BASELINE}; no new pinned includes")
+    print("no file pins the generated config by relative path")
     return 0
 
 

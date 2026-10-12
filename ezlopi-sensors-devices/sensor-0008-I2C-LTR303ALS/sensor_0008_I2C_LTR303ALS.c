@@ -40,7 +40,7 @@
  *                          Include Files
  *******************************************************************************/
 
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 #include <math.h>
 
 #include "ezlopi_core_cloud.h"

@@ -59,7 +59,7 @@
    CONDITIONS OF ANY KIND, either express or implied.
 */
 
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"

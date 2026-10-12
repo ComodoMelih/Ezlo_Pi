@@ -38,7 +38,7 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 #ifdef CONFIG_EZPI_SERV_ENABLE_MESHBOTS
 

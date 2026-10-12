@@ -71,7 +71,7 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 #if (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)
 
 // #include "esp_log.h"

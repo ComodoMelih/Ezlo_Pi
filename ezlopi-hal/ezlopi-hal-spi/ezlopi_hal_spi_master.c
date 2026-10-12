@@ -40,7 +40,7 @@
  *                          Include Files
  *******************************************************************************/
 
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 #include "esp_intr_alloc.h"
 
 #include "ezlopi_util_trace.h"

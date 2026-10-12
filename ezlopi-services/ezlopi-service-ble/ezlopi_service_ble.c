@@ -37,7 +37,7 @@
  * @date    December 8th, 2022 5:39 PM
  */
 
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 #ifdef CONFIG_EZPI_BLE_ENABLE
 

@@ -43,7 +43,7 @@
 #include <time.h>
 #include <sys/time.h>
 
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 #include "zones.h"
 #include "esp_sntp.h"

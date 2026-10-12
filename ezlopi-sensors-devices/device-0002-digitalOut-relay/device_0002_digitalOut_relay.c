@@ -39,7 +39,7 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 #include "ezlopi_core_cloud.h"
 #include "ezlopi_core_cjson_macros.h"

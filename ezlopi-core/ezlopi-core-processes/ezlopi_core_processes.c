@@ -42,7 +42,7 @@
 #include "stdlib.h"
 #include "stdbool.h"
 #include "string.h"
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 

@@ -40,7 +40,7 @@
  *                          Include Files
  *******************************************************************************/
 #include <string.h>
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 #include "ld2410.h"
 // #include "ezlopi_core_timer.h"
 // #include "ezlopi_core_errors.h"

@@ -52,7 +52,7 @@
 #include "driver/gpio.h"
 #include "esp_idf_version.h"
 #include "ezlopi_util_version.h"
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 /*******************************************************************************
  *                          C++ Declaration Wrapper

@@ -39,7 +39,7 @@
 #ifndef __EZLOPI_CORE_MDNS_H_
 #define __EZLOPI_CORE_MDNS_H_
 
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 #ifdef CONFIG_EZPI_SERV_MDNS_EN
 

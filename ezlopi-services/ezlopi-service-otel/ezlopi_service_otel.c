@@ -6,7 +6,7 @@
 #include <freertos/task.h>
 #include <esp_websocket_client.h>
 
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 
 #ifdef CONFIG_EZPI_ENABLE_OPENTELEMETRY
 

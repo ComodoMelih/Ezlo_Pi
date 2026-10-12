@@ -37,7 +37,7 @@
  * @date    August 15th, 2022 11:57 AM
  */
 
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 #include "EZLOPI_USER_CONFIG.h"
 
 #include <esp_mac.h>

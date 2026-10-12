@@ -55,7 +55,7 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "../../build/config/sdkconfig.h"
+#include "sdkconfig.h"
 #include "cjext.h"
 
 #include "ezlopi_core_errors.h"
