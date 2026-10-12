@@ -64,10 +64,10 @@ make -C tests/host
 ```
 
 This needs only a C compiler. It compiles the real firmware sources — no copies
-— for five areas that handle untrusted input: the helpers in
+— for six areas that handle untrusted input: the helpers in
 [`ezlopi-util/ezlopi-util-sanitize`](ezlopi-util/ezlopi-util-sanitize/), the
 vendored cJSON extensions, the Improv state machine, the Home Assistant
-discovery builder and the ZE08-CH2O frame parser. Everything is built under
+discovery builder, and the ZE08-CH2O and PMS5003 frame parsers. Everything is built under
 AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
 -Werror` except where [`tests/host/Makefile`](tests/host/Makefile) documents a
 scoped exemption for vendored or third-party code. Then it runs the assertions
@@ -81,9 +81,12 @@ in [`tests/host/`](tests/host/). It should end with:
 === build/test_improv ===
 2302 check(s), 0 failure(s)
 === build/test_ha ===
+  swept 70564 combination(s): 56948 mapped, 13616 rejected
 183 check(s), 0 failure(s)
 === build/test_ze08 ===
 26 check(s), 0 failure(s)
+=== build/test_pms5003 ===
+92 check(s), 0 failure(s)
 HOST TESTS PASSED
 ```
 
@@ -98,12 +101,26 @@ precisely so it can be compiled by a plain host compiler. Please keep it that
 way; adding an ESP-IDF dependency to it makes the whole suite unbuildable
 off-target.
 
-Note what makes the ZE08 case the pattern to copy: its dependency on ESP-IDF is
-confined to type declarations in one header, so `tests/host/stubs/` can supply
-the handful of headers underneath it and the *real* driver gets compiled. The
-other four UART drivers cannot join yet — they reach into cJSON, the device and
-item core, FreeRTOS tasks and GPIO — which is the concrete argument for giving
-them the same parser/hardware seam.
+There are two patterns to copy, and which one applies depends on the driver.
+
+ZE08-CH2O needed no restructuring: its dependency on ESP-IDF is confined to type
+declarations in one header, so `tests/host/stubs/` supplies the handful of
+headers underneath that one and the *real* driver gets compiled as it stands.
+
+PMS5003 is the other case, and the more common one. `pms5003.c` configures GPIOs
+and creates an `esp_timer`, so it cannot be compiled on a host at all — but its
+frame parser depends on nothing except the C library. The parser therefore moved
+into `pms5003_parse.c`, with `pms5003.h` including `pms5003_parse.h` and never
+the reverse, and only that file is compiled here. Note that
+`tests/host/stubs/driver/gpio.h` deliberately declares *no functions*: a driver
+that actually drives a pin is meant to fail to link rather than be stubbed
+around, because the stub would then hide the dependency instead of forcing this
+split. If you find yourself wanting to add function declarations to that stub,
+the seam is what you actually want.
+
+The remaining three UART drivers still reach into cJSON, the device and item
+core, and the GPIO ISR service, so they need the PMS5003 treatment before they
+can join.
 
 When you add a test, check that it would actually have caught the bug: break
 the fix on purpose, confirm the suite goes red, then put it back. A test that

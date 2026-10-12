@@ -15,6 +15,7 @@ HA_DIR       := ../../ezlopi-util/ezlopi-util-ha
 CJEXT_DIR    := ../../ezlopi-components/cjext
 UART_HAL_DIR := ../../ezlopi-hal/ezlopi-hal-uart
 ZE08_DIR     := ../../ezlopi-sensors-devices/sensor-0069-UART-ze08-ch02-gas-sensor
+PMS_DIR      := ../../ezlopi-sensors-devices/sensor-0037-pms5003-sensor
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -45,7 +46,7 @@ CFLAGS  += -std=c99 -O1 -g \
 LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
-TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08
+TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -115,6 +116,19 @@ $(BUILD)/test_ze08: test_ze08.c $(ZE08_DIR)/ze08_ch2o.c | $(BUILD)
 	$(CC) $(ZE08_CFLAGS) -c -o $(BUILD)/test_ze08_main.o test_ze08.c
 	$(CC) $(ZE08_CFLAGS) -Wno-error=cpp -c -o $(BUILD)/ze08_ch2o.o $(ZE08_DIR)/ze08_ch2o.c
 	$(CC) -o $@ $(BUILD)/test_ze08_main.o $(BUILD)/ze08_ch2o.o $(LDFLAGS)
+
+# The PMS5003 parser is the first driver brought in by splitting it rather than
+# by being separable already: pms5003.c configures GPIOs and creates an
+# esp_timer, so only pms5003_parse.c is compiled here. It needs no stand-in for
+# the UART HAL -- unlike ze08, whose upcall is static and has to be captured
+# through EZPI_hal_uart_init() -- because the split made the upcall an extern
+# symbol the test can call directly. stubs/ still supplies the headers beneath
+# the real ezlopi_hal_uart.h so the handle struct cannot drift.
+$(BUILD)/test_pms5003: PMS_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                     -I$(PMS_DIR) -I$(UART_HAL_DIR) -I$(STUBS_DIR) \
+                                     $(SANITIZERS)
+$(BUILD)/test_pms5003: test_pms5003.c $(PMS_DIR)/pms5003_parse.c | $(BUILD)
+	$(CC) $(PMS_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

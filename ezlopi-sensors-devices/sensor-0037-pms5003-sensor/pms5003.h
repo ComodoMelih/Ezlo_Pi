@@ -51,6 +51,11 @@
 
 #include "ezlopi_hal_uart.h"
 
+/* PM25_AQI_Data and the frame parser live here. Kept in a separate header so
+ * the parser can be compiled without ESP-IDF -- this header cannot be, because
+ * the pin macros below need GPIO_NUM_* from driver/gpio.h. */
+#include "pms5003_parse.h"
+
 /*******************************************************************************
  *                          C++ Declaration Wrapper
  *******************************************************************************/
@@ -86,26 +91,7 @@ extern "C"
 #define PMS_SET_SLEEP_STATUS(status) (status |= 0x02)
 #define PMS_SET_READ_STATUS(status) (status |= 0x04)
 
-    /**! Structure holding Plantower's standard packet **/
-    typedef struct PMSAQIdata
-    {
-        uint16_t framelen;       ///< How long this data chunk is
-        uint16_t pm10_standard,  ///< Standard PM1.0
-            pm25_standard,       ///< Standard PM2.5
-            pm100_standard;      ///< Standard PM10.0
-        uint16_t pm10_env,       ///< Environmental PM1.0
-            pm25_env,            ///< Environmental PM2.5
-            pm100_env;           ///< Environmental PM10.0
-        uint16_t particles_03um, ///< 0.3um Particle Count
-            particles_05um,      ///< 0.5um Particle Count
-            particles_10um,      ///< 1.0um Particle Count
-            particles_25um,      ///< 2.5um Particle Count
-            particles_50um,      ///< 5.0um Particle Count
-            particles_100um;     ///< 10.0um Particle Count
-        uint16_t unused;         ///< Unused
-        uint16_t checksum;       ///< Packet checksum
-        uint8_t available;
-    } PM25_AQI_Data;
+    /* PM25_AQI_Data is declared in pms5003_parse.h, included above. */
 
     typedef struct
     {

@@ -742,19 +742,61 @@ failure.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 72 assertions, no
-  framework, no hardware, runs in about a second via `make -C tests/host`.
-  Built with `-Wall -Wextra -Werror` under AddressSanitizer and
-  UndefinedBehaviorSanitizer. The sanitizers are the point: the defects being
-  regression-tested are buffer overruns, and an overrun that happens to land in
-  unused stack passes a plain assertion. Buffer tests also bracket the
-  destination with a canary to catch a write that lands just past the end.
+- **New host test suite, [`tests/host/`](tests/host/)**: 2737 assertions across
+  six binaries, no framework, no hardware. `make -C tests/host` builds and runs
+  the lot from scratch in about four seconds; the binaries themselves take a
+  tenth of that, so there is no reason not to run it on every edit. Built under
+  AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
+  -Werror` except for two scoped exemptions the `Makefile` documents at the
+  point of use (vendored `cjext.c`, and one stale `#warning` in `ze08_ch2o.c`).
+  The sanitizers are the point: the defects being regression-tested are buffer
+  overruns, and an overrun that happens to land in unused stack passes a plain
+  assertion. Buffer tests also bracket the destination with a canary to catch a
+  write that lands just past the end.
 
 - **The suite was verified to have teeth.** Six mutations were introduced into
   the sanitize helpers — one per fixed defect — and each was confirmed to make
   the suite fail, by assertion or by ASan. A green suite that would also pass
   against the original buggy code is worse than no suite, because it is
   evidence of nothing.
+
+- **The PMS5003 frame parser was split out so it could be tested at all** —
+  `tests/host/test_pms5003.c`, 92 checks. This is the first driver brought into
+  the suite by restructuring it rather than by already being separable, and it
+  is the pattern the remaining three UART drivers need.
+
+  `pms5003.c` calls `gpio_config`, `gpio_set_level` and `esp_timer_create`, so
+  it cannot be compiled off-target. The obvious move — adding those functions to
+  `tests/host/stubs/driver/gpio.h` — was deliberately not taken: that stub
+  declares *no* functions precisely so a hardware-touching driver fails to link
+  instead of appearing to work, and widening it would have hidden the
+  dependency rather than removed it. Instead `pms_read_upcall` and the UART
+  upcall moved verbatim into a new `pms5003_parse.c`, with `pms5003.h`
+  including `pms5003_parse.h` and never the reverse. The new translation unit's
+  entire set of undefined symbols is `memcpy` and `memset`, which is what makes
+  it host-compilable; the component's `CMakeLists.txt` needed no change because
+  it already globs `*.c`.
+
+  Nothing about on-target behaviour changed: both function bodies were moved
+  without edit, including the `ESP_LOGE` on a failed checksum (`TRACE_E` would
+  have been tidier but compiles to nothing when tracing is off, which would have
+  been a silent behaviour change). Verified on the pinned v4.4.6 toolchain that
+  `pms5003_parse.c.obj` is actually produced, that `pms5003.c.obj` imports
+  `EZPI_pms5003_uart_upcall` from it, and that the pre-split static name is
+  absent from the ELF — a globbed source that silently stopped being compiled
+  would otherwise have left a green build with no parser in the image.
+
+  **This converts one of the four previously untestable clamps into a tested
+  one.** The suite covers all 13 decoded fields, a 65536-value sweep of
+  `pm25_standard`, every short-frame length from 1 to 31 through exact-size heap
+  allocations so ASan can see the over-read, and the exact-minimum 32-byte case
+  that a `<=` off-by-one would reject. Six mutations were confirmed to make it
+  fail. The first attempt at the clamp mutation was thrown away for being
+  worthless: deleting the length check also deletes the only use of
+  `output_len`, so `-Werror=unused-parameter` failed the build and the
+  *compiler*, not the test, was doing the catching. Rewritten to leave the
+  parameter referenced and the condition unreachable, it now aborts under
+  AddressSanitizer, which is the actual claim being made.
 
 - **New CI workflow, [`.github/workflows/ci.yml`](.github/workflows/ci.yml).**
   Nothing in this repository was checked automatically before.
@@ -1017,15 +1059,20 @@ Listed because a changelog that only mentions what was finished is misleading.
   means "against frames this repo constructs from the datasheet rule", not
   against a real sensor; its checksum fix means that sensor should start
   reporting readings for the first time, and *should* is the operative word.
-  The MB1013, PMS5003, R307 and GY-GPS6MV2 clamps are verified only by an
-  esp32 build.
-- **Four of the six UART drivers cannot be host-tested at all.** MB1013,
-  PMS5003, R307 and GY-GPS6MV2 pull in cJSON, the device/item core, FreeRTOS
-  tasks and GPIO, so `tests/host/` cannot compile them and their parsing is
-  unreachable from any test. ZE08-CH2O is in the suite only because its
-  ESP-IDF dependency happens to be confined to type declarations. Separating
-  each driver's frame parser from its hardware setup — the same seam the UART
-  HAL itself needs — is what would make the rest testable.
+  The PMS5003 clamp now has 92 host checks behind it on the same terms. The
+  MB1013, R307 and GY-GPS6MV2 clamps are verified only by an esp32 build.
+- **The MB1013, R307 and GY-GPS6MV2 parsers still cannot be host-tested.**
+  ZE08-CH2O is in the suite because its ESP-IDF dependency happens to be
+  confined to type declarations, and PMS5003 because its parser was moved into
+  its own translation unit. The other three are harder for a specific reason
+  worth recording: their UART upcalls — `__uart_data_upcall`,
+  `__uart_0066_fingerprint_upcall` and `__uart_gps6mv2_upcall`, the functions
+  that hold the clamps added here — live in the `sensor_00XX_*.c` registration
+  file alongside `ezlopi_core_cloud.h`, `ezlopi_cloud_items.h` and the device
+  value-updated path, not in the adjacent `gyGPS6MV2.c` / `R307_AS606.c` driver
+  file, which is itself nearly dependency-free. So the split is not a file move
+  as it was for PMS5003; the parsing has to be lifted out of the cloud
+  reporting it is interleaved with first.
 - **The ESP-IDF migration is measured, not attempted.** v4.4.6 is still the
   only supported version. Every number in
   [docs/esp-idf-migration.md](docs/esp-idf-migration.md) comes from a compile:

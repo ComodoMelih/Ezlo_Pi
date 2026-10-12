@@ -53,11 +53,8 @@
 /*******************************************************************************
  *                          Type & Macro Definitions
  *******************************************************************************/
-// Highest buffer index pms_read_upcall() touches, plus one. The checksum walk
-// covers indices 0..29 and the endian fix-up reads index 2 + 14 * 2 + 1 = 31,
-// so a frame has to be at least 32 bytes before any of it may be read. The
-// part itself emits 32-byte frames.
-#define PMS_MIN_FRAME_LEN 32
+/* PMS_MIN_FRAME_LEN moved to pms5003_parse.h alongside the parser that uses
+ * it. */
 
 /*******************************************************************************
  *                          Static Function Prototypes
@@ -67,13 +64,12 @@ static void pms_uart_setup(s_pms5003_sensor_object *pms_object);
 static esp_err_t pms_setup_control_gpio(gpio_num_t set_pin, gpio_num_t reset_pin);
 static esp_err_t pms_gpio_config_output(gpio_num_t pin);
 static void pms_startup(uint32_t set_pin, uint32_t reset_pin);
-static esp_err_t pms_read_upcall(uint8_t *buffer, uint32_t output_len, PM25_AQI_Data *pms_data);
 static void pms_sleep_mode(gpio_num_t set_pin);
 static void pms_active_mode(gpio_num_t set_pin);
 static void pms_create_sleep_timer(s_pms5003_sensor_object *pms_object);
 static void pms_timer_callback(void *arg);
-static void ezlopi_pms5003_upcall(uint8_t *buffer, uint32_t output_len, s_ezlopi_uart_object_handle_t uart_object_handle);
-static void pms_timer_callback(void *arg);
+/* pms_read_upcall() and EZPI_pms5003_uart_upcall() moved to pms5003_parse.c so
+ * they can be compiled by a host compiler; declared in pms5003_parse.h. */
 
 /*******************************************************************************
  *                          Static Data Definitions
@@ -131,55 +127,6 @@ void pms_print_data(PM25_AQI_Data *data)
   ESP_LOGI("PMS", "---------------------------------------");
 }
 
-esp_err_t pms_read_upcall(uint8_t *buffer, uint32_t output_len, PM25_AQI_Data *data)
-{
-  uint16_t sum = 0;
-
-  /* Reject anything shorter than a frame before reading any of it. buffer is a
-     heap block sized to the bytes that actually arrived on the line, and this
-     function reads a fixed 32 bytes out of it regardless -- so a UART event
-     carrying a partial frame, which is the ordinary way a 32-byte frame
-     arrives on a busy line rather than a malformed-input case, was read past
-     the end of the allocation. output_len was already a parameter of the
-     calling upcall and was simply never passed down or consulted. */
-  if ((NULL == buffer) || (NULL == data) || (output_len < PMS_MIN_FRAME_LEN))
-  {
-    return ESP_FAIL;
-  }
-
-  memset(data, 0, sizeof(PM25_AQI_Data));
-  /* Check that start byte is correct! */
-  if (buffer[0] != 0x42)
-  {
-    return ESP_FAIL;
-  }
-
-  /* Get checksum ready */
-  for (uint8_t i = 0; i < 30; i++)
-  {
-    sum += buffer[i];
-  }
-
-  /* The data comes in endian'd, this solves it so it works on all platforms */
-  uint16_t buffer_u16[15];
-  for (uint8_t i = 0; i < 15; i++)
-  {
-    buffer_u16[i] = buffer[2 + i * 2 + 1];
-    buffer_u16[i] += (buffer[2 + i * 2] << 8);
-  }
-
-  /* put it into a nice struct :) */
-  memcpy((void *)data, (void *)buffer_u16, 30);
-
-  if (sum != data->checksum)
-  {
-    ESP_LOGE(__FILENAME__, "CheckSum Failed");
-    return ESP_FAIL;
-  }
-  /* success! */
-  return ESP_OK;
-}
-
 bool pms_is_data_available(PM25_AQI_Data *data)
 {
   bool ret = false;
@@ -208,7 +155,7 @@ void pms_set_data_available_to_false(PM25_AQI_Data *data)
 */
 static void pms_uart_setup(s_pms5003_sensor_object *pms_object)
 {
-  if (NULL == EZPI_hal_uart_init(pms_object->pms_baud_rate, pms_object->pms_tx_pin, pms_object->pms_rx_pin, ezlopi_pms5003_upcall, &pms_object->pms_data))
+  if (NULL == EZPI_hal_uart_init(pms_object->pms_baud_rate, pms_object->pms_tx_pin, pms_object->pms_rx_pin, EZPI_pms5003_uart_upcall, &pms_object->pms_data))
   {
     TRACE_E("Failed to initialize PMS_uart");
   }
@@ -328,19 +275,6 @@ static void pms_sleep_mode(gpio_num_t set_pin)
 static void pms_active_mode(gpio_num_t set_pin)
 {
   gpio_set_level(set_pin, 1);
-}
-
-static void ezlopi_pms5003_upcall(uint8_t *buffer, uint32_t output_len, s_ezlopi_uart_object_handle_t uart_object_handle)
-{
-  /* Check the handle before reading through it; this runs on the UART event
-     task, where a fault takes down that task rather than the caller. */
-  if (NULL == uart_object_handle)
-  {
-    return;
-  }
-
-  PM25_AQI_Data *data = (PM25_AQI_Data *)uart_object_handle->arg;
-  pms_read_upcall(buffer, output_len, data);
 }
 
 /*******************************************************************************

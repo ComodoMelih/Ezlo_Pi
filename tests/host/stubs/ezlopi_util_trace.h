@@ -22,6 +22,13 @@
 #ifndef __EZLOPI_UTIL_TRACE_H__
 #define __EZLOPI_UTIL_TRACE_H__
 
+#include <string.h>
+
+/* Copied verbatim from the real header. Drivers pass this as their log tag, so
+ * a source that compiles on target only because the real trace header defined
+ * it must still compile here. */
+#define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+
 /* (void)sizeof(...) consumes the arguments without evaluating them, so an
  * undefined variable in a trace call is still caught, but nothing is printed
  * and no side effect runs. */
