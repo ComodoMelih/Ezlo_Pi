@@ -199,9 +199,74 @@ That component is also a reminder to check *reachability* before writing
 real and are now tested, but they were never reachable, and the CHANGELOG
 entry says so in those words.
 
+**That sweep has already been run, so don't run it again.** The obvious way to
+generalise the paragraph above is to ask the compiler which other files are in
+the same position — `gcc -fsyntax-only -I<the file's own directory> <file>`,
+with no stubs and no other include path. 32 of 246 first-party `.c` files pass,
+and 27 of those have no tests. The honest result is that the list is nearly
+empty of opportunity:
+
+| what they turned out to be | count |
+| --- | --- |
+| tables of string literals (mostly `ezlopi-cloud-constants`) | 13 |
+| a licence header and nothing else | 4 |
+| a single `#include` of their own header | 3 |
+| wrapped in `#if 0` from first line to last | 3 |
+| only a header include guard, in a `.c` file | 1 |
+| a `.c` file that is only `#include`s and defines nothing | 1 |
+| inactive blocks of device provisioning credentials | 1 |
+| actual executable logic | **1** |
+
+The one file with logic in it was `ezlopi-core-actions`, and it did have a
+defect. But the lesson is that "compiles with no stubs" selects for *emptiness*
+far more strongly than for portability, and `ezlopi-util-uuid` was a genuine
+outlier rather than the first of a series. If you want more host coverage, the
+lever is not another sweep of this kind: it is a stub `sdkconfig.h`, which is
+the first missing header for 69 of the 214 files that do not compile. The next
+most common blockers are `ezlopi_core_cloud.h` (35), `ezlopi_util_trace.h` (17)
+and `cjext.h` (14).
+
+That table is generated, not counted by hand, and the first version of it was
+wrong in a way worth naming: it claimed 15 string tables by quietly folding in
+three files that are each their own oddity — `ezlopi_cloud_thermostat_str.c`
+contains nothing but a header's `#ifndef`/`#define`/`#endif`,
+`ezlopi_cloud_constants.c` is eleven `#include`s that define nothing and expand
+to 1081 lines of `extern` declarations, and `ezlopi_test_prov.c` is discussed
+below. Eight buckets that sum to 27 beats five buckets that sum to 27 by
+rounding.
+
+Two traps in measuring this, both of which produced confident wrong answers
+first:
+
+- **Count what the compiler sees, not what the file says.** A first pass at
+  ranking those 27 files by branch points stripped comments and counted
+  `if`/`for`/`while`/`switch` in the text. It nominated `ezlopi_cloud_data.c`
+  (9 branches) and `ezlopi_core_event_queue.c` (8) as the only two worth
+  testing. Both are inside `#if 0` end to end — every branch counted was text
+  the compiler never compiles, and the dead block is also why they appeared in
+  the zero-stub list at all, since their `#include "freertos/FreeRTOS.h"` is
+  inside it too. Run the file through `gcc -E -P` and measure the output.
+
+- **A missing tool scores a pass.** Checking "does this symbol survive into the
+  ELF?" with `xtensa-esp32-elf-nm ... | grep -c` reported `0` — the hoped-for
+  answer — while `nm` was not on `PATH` at all and had exited 127 printing
+  nothing. `grep -c` on empty input is `0`. Verify the tool exists and abort if
+  it does not, and sanity-check the total symbol count before trusting a zero.
+  Related: `cmd | sed '...'` followed by `echo $?` reports *sed's* status, which
+  is how one of these scripts announced success for a check that could not
+  succeed.
+
 When you add a test, check that it would actually have caught the bug: break
 the fix on purpose, confirm the suite goes red, then put it back. A test that
 passes against the broken code is evidence of nothing.
+
+A related trap, which the `ezlopi-core-actions` test was built to avoid:
+when the data under test is generated from a list, don't check it against that
+same list. The bug there was one wrong string in an X-macro table, and a test
+comparing `ezlopi_action_names[]` to the table's own string column would have
+confirmed the bug rather than finding it. Rebuild the expectation from the
+other column — in that case from the macro's token with `#action` — so the two
+halves can disagree.
 
 Sweep inputs rather than picking one, and the uuid suite shows why in numbers.
 Run its 256 round-trip patterns against the old parser and 240 fail — but 16

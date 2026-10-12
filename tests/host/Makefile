@@ -19,6 +19,7 @@ PMS_DIR      := ../../ezlopi-sensors-devices/sensor-0037-pms5003-sensor
 MB1013_DIR   := ../../ezlopi-sensors-devices/sensor-0021-UART-MB1013
 GPS_DIR      := ../../ezlopi-sensors-devices/sensor-0053-UART-GYGPS6MV2
 UUID_DIR     := ../../ezlopi-util/ezlopi-util-uuid
+ACTIONS_DIR  := ../../ezlopi-core/ezlopi-core-actions
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -50,7 +51,7 @@ LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
-           test_mb1013 test_gps6mv2 test_uuid
+           test_mb1013 test_gps6mv2 test_uuid test_actions
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -186,6 +187,31 @@ $(BUILD)/test_uuid: UUID_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
                                    $(SANITIZERS)
 $(BUILD)/test_uuid: test_uuid.c $(UUID_DIR)/ezlopi_util_uuid.c | $(BUILD)
 	$(CC) $(UUID_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# ezlopi-core-actions was found the same way as uuid, by a sweep rather than by
+# reading, and it is the end of that particular seam. host_reachable.py asks
+# `gcc -fsyntax-only` which first-party .c files compile with nothing but their
+# own directory on the include path; 27 did so while having no tests, and this
+# is the only one of the 27 with any executable logic in it. The others are
+# string tables, four files that are a licence header and nothing else, three
+# that are a single #include, and three -- ezlopi_cloud_data.c,
+# ezlopi_core_event_queue.c, ezlopi_core_ethernet.c -- wrapped in `#if 0` end
+# to end. "Compiles with no stubs" selects for emptiness far more than for
+# portability, so there is no third uuid waiting in that list; the next lever
+# is a stub sdkconfig.h, which is the first missing header for 69 files.
+#
+# What it found: EZLOPI_ACTION(HUB_UPDATE, "EZLOPI_ACTION_HUB_GET_ITEM") in
+# ezlopi_core_actions_list.h, so two distinct enum values stringified to one
+# name. Not reachable -- all three call sites are commented out and the linker
+# discards both symbols -- but wrong, and the sort of wrong that reads as right
+# in a log. The test derives each expected string from the macro's token with
+# the stringify operator instead of reading the table's own string column,
+# because a test that read `name` would have agreed with the bug.
+$(BUILD)/test_actions: ACTIONS_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                         -I$(ACTIONS_DIR) \
+                                         $(SANITIZERS)
+$(BUILD)/test_actions: test_actions.c $(ACTIONS_DIR)/ezlopi_core_actions.c | $(BUILD)
+	$(CC) $(ACTIONS_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

@@ -801,6 +801,63 @@ the rest of this entry with that in front of it.
   tests added below — the fix is a seam, not a one-liner, and it is listed in
   [Known gaps](#known-gaps).
 
+### Action name table — [bug]
+
+**Also not reachable, and for the same mechanical reason.** All three call sites
+of `EZPI_core_actions_to_string()` in the tree are commented out. The object
+file defines both `EZPI_core_actions_to_string` and `ezlopi_action_names`, and
+neither name appears among the 13802 symbols of the linked `Ezlo_Pi_v4x.elf`;
+the image stays at `0x18fca0` and the corrected string literal is absent from
+`Ezlo_Pi_v4x.bin` entirely. The `e_ezlopi_actions_t` *enum*, in contrast, is
+load-bearing — 63 driver files in `ezlopi-sensors-devices` reference one of its
+enumerators — so the live half of this component was never affected.
+
+- **Two distinct actions stringified to one name.**
+  `ezlopi_core_actions_list.h` read
+  `EZLOPI_ACTION(HUB_UPDATE, "EZLOPI_ACTION_HUB_GET_ITEM")`, so
+  `EZPI_core_actions_to_string(EZLOPI_ACTION_HUB_UPDATE)` returned
+  `"EZLOPI_ACTION_HUB_GET_ITEM"`. Every other one of the sixteen entries spells
+  its own identifier. In a trace that is a wrong answer wearing the shape of a
+  right one — the kind of defect that survives code review precisely because
+  the line looks like its neighbours.
+
+  Fixed in the table. The test that covers it does **not** read the table's
+  string column: it rebuilds each expected name from the macro's first argument
+  with the preprocessor's stringify operator, so the table is checked against
+  the token it is named after rather than against itself. A test written the
+  obvious way would have agreed with the bug. Confirmed by running the new test
+  against the unfixed header first, where it fails two checks — the per-entry
+  comparison and an independent all-strings-distinct check — and passes the
+  other 142.
+
+- **The range guard has an upper bound and no lower bound, and that is left
+  alone.** `if (EZLOPI_ACTION_MAX > action)` would index `ezlopi_action_names[]`
+  out of bounds for any negative argument. It is safe today, but not because
+  the function checks: every enumerator is non-negative, so the compiler gives
+  the enum an unsigned type and `-1` converts to a value far above `MAX`. That
+  is a property of the type rather than of the code, so instead of adding a
+  redundant branch the test asserts the property at compile time and fails the
+  build if a future list makes the enum signed. gcc proved the point while the
+  test was being written: a first draft wrote the assertion as a runtime
+  `(e_ezlopi_actions_t)-1 < 0` and `-Wtype-limits` rejected it as always false,
+  which under this suite's `-Werror` is a build failure.
+
+- **How it was found, and why there is no third one of these.** The UUID
+  defects above came from noticing a component that needed no test seam and had
+  no tests, so that observation was generalised: ask `gcc -fsyntax-only` which
+  first-party `.c` files compile with nothing but their own directory on the
+  include path. 32 of 246 do, and 27 of those had no tests. That list is much
+  less interesting than it sounds. Four files are a licence header and nothing
+  else, three are a single `#include`, three more — `ezlopi_cloud_data.c`,
+  `ezlopi_core_event_queue.c` and `ezlopi_core_ethernet.c` — are wrapped in
+  `#if 0` from first line to last, and fifteen are tables of string literals.
+  `ezlopi-core-actions` is the only one of the 27 containing executable logic.
+  "Compiles with no stubs" selects far more strongly for emptiness than for
+  portability, so this seam is now exhausted; the next lever is a stub
+  `sdkconfig.h`, which is the first missing header for 69 of the remaining
+  files. Recorded in [`CONTRIBUTING.md`](CONTRIBUTING.md) so the sweep is not
+  repeated from scratch.
+
 ### Dead null checks — [bug]
 
 - **31 checks that compared an array's own address against NULL.** Across seven
@@ -934,8 +991,8 @@ the rest of this entry with that in front of it.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 3364 assertions across
-  nine binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 3508 assertions across
+  ten binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
@@ -976,6 +1033,27 @@ the rest of this entry with that in front of it.
   nibbles repeat, so a single hard-coded UUID had roughly a one-in-sixteen
   chance of turning this bug into a green run. That is the argument for
   sweeping inputs instead of picking one, in numbers rather than in principle.
+
+- **`ezlopi-core-actions` joined the suite** — `tests/host/test_actions.c`, 144
+  checks, and the last file the zero-stub sweep had to offer. It found the
+  `HUB_UPDATE` string defect described under **Action name table — [bug]**
+  above.
+
+  The design decision worth recording is what the test compares against. The
+  obvious implementation walks `ezlopi_action_names[]` and checks each entry
+  against the string in `ezlopi_core_actions_list.h` — which is the table
+  checking itself, and would have passed happily on the bug. Instead the test
+  includes the same X-macro list and rebuilds every expected name from the
+  macro's *token* with `"EZLOPI_ACTION_" #action`, so the table is measured
+  against the identifier it claims to name. Verified by building it against
+  the unfixed header, where exactly two checks fail and 142 pass.
+
+  One check in it is deliberately a compile-time assertion rather than a
+  runtime one, because the thing being asserted is a property of a type: that
+  `e_ezlopi_actions_t` is unsigned, which is the only reason the function's
+  single-sided range guard is not an out-of-bounds read. A runtime version
+  cannot fail — and in fact cannot compile, since `-Wtype-limits` plus
+  `-Werror` rejects an always-false unsigned `< 0` comparison.
 
 - **The PMS5003 frame parser was split out so it could be tested at all** —
   `tests/host/test_pms5003.c`, 92 checks. This is the first driver brought into
@@ -1414,6 +1492,31 @@ the rest of this entry with that in front of it.
 ## Known gaps
 
 Listed because a changelog that only mentions what was finished is misleading.
+
+- **Three sets of real-looking device provisioning credentials are committed in
+  `ezlopi-services/ezlopi-service-webprov/ezlopi_test_prov.c`, and this change
+  does not remove them.** Each block holds an EC private key, a public key, a
+  provisioning token, a device UUID, a cloud UUID, a certificate and a CA
+  certificate, keyed to three specific device serials (`105200073`,
+  `105200122`, `105200134`).
+
+  **None of it is compiled.** Three blocks are inside `#if 0` and a fourth is
+  commented out with `//`, which was verified three independent ways rather
+  than by reading: no `test_*` symbol is defined in the preprocessed output, no
+  `test_ssl_pvt_key` / `test_prov_token` / `test_id_str` symbol appears in
+  `Ezlo_Pi_v4x.elf`, and none of the three unique base64 prefixes of the key
+  bodies appears anywhere in `Ezlo_Pi_v4x.bin`. (The single
+  `-----BEGIN PRIVATE KEY-----` that *is* in the image comes from mbedTLS's
+  `pkparse.c`, which carries the PEM delimiters it matches against — it is a
+  parser table, not a key. That one needed checking rather than assuming,
+  because it looked exactly like the bad outcome.)
+
+  Not compiled is not the same as not published. The material is in the
+  repository and in its git history, so deleting the lines would not retract
+  it. Remediation is a decision for whoever controls those devices and that
+  cloud account — the keys should be treated as disclosed and revoked, and only
+  then is removing the file a tidy-up rather than a false reassurance. Flagged
+  here rather than quietly edited.
 
 - **`ezlopi_util_uuid_generate_random()` is not random.** It calls
   `srand(time(NULL))` once and then `rand()`. The seed has one-second
