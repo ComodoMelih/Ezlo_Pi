@@ -553,6 +553,22 @@ failure.
 
 ### Build and configuration — [infra]
 
+- **`REQUIRES tinyusb` was unconditional while every use of it was not.**
+  `ezlopi_service_uart.c` wraps all of its USB-CDC code — includes and calls
+  alike — in `#if !defined(CONFIG_IDF_TARGET_ESP32) && !defined(CONFIG_IDF_TARGET_ESP32C3)`,
+  because neither chip has a USB-OTG peripheral. The component's `REQUIRES`
+  asked for `tinyusb` regardless of target.
+
+  On IDF 4.4.6 this is harmless by accident, which is why it survived: IDF's
+  `tinyusb` component is `visible if USB_OTG_SUPPORTED` and registers no sources
+  on esp32, so the dependency resolves to an empty stub. It stops being harmless
+  on IDF 5.x, where `tinyusb` is not an IDF component at all and configure fails
+  with `Failed to resolve component 'tinyusb'`. The registry cannot stand in
+  either: `espressif/esp_tinyusb` depends on `espressif/tinyusb`, which supports
+  only chips that have the peripheral — so on esp32 this is not a component to
+  rename but a dependency that should never have been requested. The `REQUIRES`
+  now mirrors the `#if` in the source.
+
 - **A hub could not be built without the websocket client at all.**
   `EZPI_service_webprov_is_connected()` is declared inside an
   `#if CONFIG_EZPI_WEBSOCKET_CLIENT` block in `ezlopi_service_webprov.h`, but
