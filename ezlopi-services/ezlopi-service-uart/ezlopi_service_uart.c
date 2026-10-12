@@ -1255,7 +1255,20 @@ static void ezpi_service_uart_set_wifi(const char *data)
                     s_ezlopi_net_status_t *net_stat = EZPI_core_net_get_net_status();
                     if (net_stat)
                     {
+                        /* EZPI_service_webprov_is_connected() is declared inside
+                         * an #if CONFIG_EZPI_WEBSOCKET_CLIENT block in
+                         * ezlopi_service_webprov.h, so this call site has to
+                         * carry the same condition. Without it, turning the
+                         * websocket client off fails the build here on
+                         * -Werror=implicit-function-declaration, which is what
+                         * made a local-only configuration impossible to
+                         * compile. There is no cloud client in that build, so
+                         * there is no cloud connection to report. */
+#if defined(CONFIG_EZPI_WEBSOCKET_CLIENT)
                         net_stat->nma_cloud_connection_status = EZPI_service_webprov_is_connected();
+#else
+                        net_stat->nma_cloud_connection_status = false;
+#endif // CONFIG_EZPI_WEBSOCKET_CLIENT
 
                         if (net_stat->wifi_status->wifi_connection)
                         {
