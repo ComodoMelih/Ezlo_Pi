@@ -107,13 +107,18 @@ int EZPI_core_scenes_status_change_broadcast(l_scenes_list_v2_t *scene_node, con
                     l_user_notification_v2_t *user_notification_node = scene_node->user_notifications;
                     while (user_notification_node)
                     {
-                        if (NULL != user_notification_node->user_id)
+                        // user_id is char[32] inside l_user_notification_v2_t, so its
+                        // address is the node's address plus a constant and the old
+                        // "NULL != user_id" guard here could never be false. Removed
+                        // rather than rewritten: an empty user_id still produces an
+                        // empty string in this array exactly as it does today. Whether
+                        // it should instead be skipped (user_id[0] != '\0') is a
+                        // question about what the hub expects in this field, not
+                        // something to change blind.
+                        cJSON *cj_notf = cJSON_CreateString(__FUNCTION__, user_notification_node->user_id);
+                        if (!cJSON_AddItemToArray(cj_notifications, cj_notf))
                         {
-                            cJSON *cj_notf = cJSON_CreateString(__FUNCTION__, user_notification_node->user_id);
-                            if (!cJSON_AddItemToArray(cj_notifications, cj_notf))
-                            {
-                                cJSON_Delete(__FUNCTION__, cj_notf);
-                            }
+                            cJSON_Delete(__FUNCTION__, cj_notf);
                         }
                         user_notification_node = user_notification_node->next;
                     }

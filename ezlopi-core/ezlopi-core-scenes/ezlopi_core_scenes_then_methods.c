@@ -109,7 +109,7 @@ int EZPI_core_scene_then_set_item_value(l_scenes_list_v2_t *curr_scene, void *ar
             l_fields_v2_t *curr_field = curr_then->fields;
             while (curr_field)
             {
-                size_t len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+                size_t len = (strlen(curr_field->name) + 1);
                 if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, ezlopi_item_str, len, 5))
                 {
                     cJSON_AddStringToObject(__FUNCTION__, cj_params, ezlopi__id_str, curr_field->field_value.u_value.value_string);
@@ -170,7 +170,7 @@ int EZPI_core_scene_then_group_set_item_value(l_scenes_list_v2_t *curr_scene, vo
             l_fields_v2_t *curr_field = curr_then->fields;
             while (curr_field)
             {
-                size_t len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+                size_t len = (strlen(curr_field->name) + 1);
                 if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, ezlopi_deviceGroup_str, len, 12))
                 {
                     device_group_id = strtoul(curr_field->field_value.u_value.value_string, NULL, 16);
@@ -298,7 +298,7 @@ int EZPI_core_scene_then_set_device_armed(l_scenes_list_v2_t *curr_scene, void *
             l_fields_v2_t *curr_field = curr_then->fields;
             while (curr_field)
             {
-                size_t len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+                size_t len = (strlen(curr_field->name) + 1);
                 if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, dev_type_device, len, 7))
                 {
                     device_id = strtoul(curr_field->field_value.u_value.value_string, NULL, 16);
@@ -347,7 +347,7 @@ int EZPI_core_scene_then_group_set_device_armed(l_scenes_list_v2_t *curr_scene, 
             while (curr_field)
             {
 
-                size_t len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+                size_t len = (strlen(curr_field->name) + 1);
                 if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, ezlopi_deviceGroup_str, len, 12))
                 {
                     device_group_id = strtoul(curr_field->field_value.u_value.value_string, NULL, 16);
@@ -545,7 +545,7 @@ int EZPI_core_scene_then_run_scene(l_scenes_list_v2_t *curr_scene, void *arg)
         l_fields_v2_t *curr_field = curr_then->fields;
         while (curr_field)
         {
-            size_t name_len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+            size_t name_len = (strlen(curr_field->name) + 1);
             if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, ezlopi_sceneId_str, name_len, 8))
             {
                 if (EZLOPI_VALUE_TYPE_SCENEID == curr_field->value_type)
@@ -615,7 +615,7 @@ int EZPI_core_scene_then_set_scene_state(l_scenes_list_v2_t *curr_scene, void *a
         l_fields_v2_t *curr_field = curr_then->fields;
         while (curr_field)
         {
-            size_t len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+            size_t len = (strlen(curr_field->name) + 1);
             if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, ezlopi_sceneId_str, len, 8))
             {
                 if (EZLOPI_VALUE_TYPE_SCENEID == curr_field->value_type)
@@ -662,7 +662,7 @@ int EZPI_core_scene_then_reset_latch(l_scenes_list_v2_t *curr_scene, void *arg)
         l_fields_v2_t *curr_field = curr_block->fields;
         while (curr_field)
         {
-            size_t len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+            size_t len = (strlen(curr_field->name) + 1);
             if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, ezlopi_sceneId_str, len, 8))
             {
                 if ((EZLOPI_VALUE_TYPE_STRING == curr_field->value_type) && (NULL != curr_field->field_value.u_value.value_string))
@@ -801,7 +801,7 @@ int EZPI_core_scene_then_set_expression(l_scenes_list_v2_t *curr_scene, void *ar
             l_fields_v2_t *curr_field = curr_then->fields;
             while (curr_field)
             {
-                size_t len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+                size_t len = (strlen(curr_field->name) + 1);
                 if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, ezlopi_name_str, len, 5))
                 {
                     if ((EZLOPI_VALUE_TYPE_STRING == curr_field->value_type) && (NULL != curr_field->field_value.u_value.value_string))
@@ -870,7 +870,7 @@ int EZPI_core_scene_then_set_variable(l_scenes_list_v2_t *curr_scene, void *arg)
             l_fields_v2_t *curr_field = curr_then->fields;
             while (curr_field)
             {
-                size_t len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+                size_t len = (strlen(curr_field->name) + 1);
                 if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, ezlopi_name_str, len, 5))
                 {
                     if ((EZLOPI_VALUE_TYPE_STRING == curr_field->value_type) && (NULL != curr_field->field_value.u_value.value_string))
@@ -926,7 +926,7 @@ int EZPI_core_scene_then_toggle_value(l_scenes_list_v2_t *curr_scene, void *arg)
             l_fields_v2_t *curr_field = curr_then->fields;
             while (curr_field)
             {
-                size_t len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+                size_t len = (strlen(curr_field->name) + 1);
                 if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, ezlopi_item_str, len, 5))
                 {
                     if ((EZLOPI_VALUE_TYPE_ITEM == curr_field->value_type) && (NULL != curr_field->field_value.u_value.value_string))
@@ -985,7 +985,7 @@ int EZPI_core_scene_then_group_toggle_value(l_scenes_list_v2_t *curr_scene, void
             l_fields_v2_t *curr_field = curr_then->fields;
             while (curr_field)
             {
-                size_t len = (curr_field->name ? strlen(curr_field->name) + 1 : 0);
+                size_t len = (strlen(curr_field->name) + 1);
                 if (EZPI_STRNCMP_IF_EQUAL(curr_field->name, ezlopi_deviceGroup_str, len, 12))
                 {
                     if ((EZLOPI_VALUE_TYPE_DEVICE_GROUP == curr_field->value_type) && (NULL != curr_field->field_value.u_value.value_string))

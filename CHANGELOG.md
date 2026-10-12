@@ -507,6 +507,50 @@ failure.
   unsynchronised walks in `ezlopi-cloud`. It belongs in the core, for all of
   them at once. See [Known gaps](#known-gaps).
 
+### Dead null checks — [bug]
+
+- **31 checks that compared an array's own address against NULL.** Across seven
+  files the code tested things like `if (handler->raw_data_reg)`,
+  `curr_field->name ? strlen(curr_field->name) + 1 : 0` and
+  `NULL != user_notification_node->user_id`, where the operand is a `char[]` or
+  `uint8_t[]` *member* of the struct, not a pointer stored in it. Its address is
+  the struct's address plus a fixed offset, so the test can only be false for
+  one absurd pointer value, and the error branch behind it was unreachable.
+  These are the reason the project cannot compile under GCC 14, which promotes
+  `-Waddress` to an error.
+
+  Removed rather than rewritten. The tempting "fix" is to replace the dead test
+  with the one the author presumably meant (`name[0] != '\0'`), but that is a
+  behaviour change — fields with an empty name would start taking a different
+  path — and there is no hub to test the new behaviour against. Making the code
+  say what it already does is the bug fix; what it *should* do is a separate
+  question, and each deferred one is recorded in a comment at the site.
+
+  Two of these deserve singling out. `gxhtc3_compute_values()` has therefore
+  always returned `true` unconditionally, so its one caller learns nothing by
+  testing the result; a real check needs a validity flag the struct does not
+  carry. And in the scene-status broadcast, an empty `user_id` still emits an
+  empty string into the `notifications` array exactly as before — whether it
+  should be skipped instead depends on what the hub expects in that field.
+
+  Measured on the 4.4.6 toolchain this project ships with, by building the tree
+  with and without the change and comparing images. The result is
+  behaviour-identical but *not* byte-identical, and the difference is worth
+  recording because it contradicts the obvious assumption that dead code costs
+  nothing:
+
+  - 30 of the 31 sites were genuinely free — GCC had already folded them.
+    Proven by construction: a build with all 31 removals except the `gxhtc3` one
+    is byte-identical to the baseline.
+  - The 31st was not. For `gxhtc3_compute_values` GCC emitted a real runtime
+    test (`addi.n a9, a2, 6` / `movi.n a8, 0` / `bne`), so the function shrank
+    by 14 bytes. The branch was still dead, and instructively so: it fired only
+    when `handler == 0xFFFFFFFA` and *not* when `handler` was NULL, since
+    `0 + 6` is non-zero. It never guarded the value worth guarding.
+  - That 14 bytes moved `.flash.text` by 12, which shifted 2,143 pointer words
+    across `.flash.rodata`, `.dram0.data` and `.iram0.text` by exactly −12.
+    Of 12,581 symbols, exactly one changed size and none were added or removed.
+
 ### Build and configuration — [infra]
 
 - **A hub could not be built without the websocket client at all.**

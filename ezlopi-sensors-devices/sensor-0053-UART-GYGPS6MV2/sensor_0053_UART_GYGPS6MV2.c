@@ -515,15 +515,16 @@ static int __sensor_uart_gps6mv2_update_values(l_ezlopi_item_t *item)
         GPS6MV2_t *sensor_0053_UART_gps6mv2_data = (GPS6MV2_t *)item->user_arg;
         if (sensor_0053_UART_gps6mv2_data)
         {
-            // replace the gps_sentence of GPGGA structure
-            if ((sensor_0053_UART_gps6mv2_data->gps_sentence) != NULL)
-            {
-                // reset the GPGGA_sentence array
-                len = sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GPGGA_sentence);
-                memset(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GPGGA_sentence, 0, sizeof(len));
-                sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GPGGA_sentence[len - 1] = '\0';
-                strncpy(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GPGGA_sentence, (sensor_0053_UART_gps6mv2_data->gps_sentence), (len - 1));
-            }
+            // replace the gps_sentence of GPGGA structure.
+            //
+            // gps_sentence is char[MAX_GPGGA_SENTENCE_SIZE + 30], an array member,
+            // so the old "!= NULL" guard around this block could never be false.
+            // Removed; the block ran unconditionally before and still does.
+            // reset the GPGGA_sentence array
+            len = sizeof(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GPGGA_sentence);
+            memset(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GPGGA_sentence, 0, sizeof(len));
+            sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GPGGA_sentence[len - 1] = '\0';
+            strncpy(sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GPGGA_sentence, (sensor_0053_UART_gps6mv2_data->gps_sentence), (len - 1));
 
             // Check availability of Checksum in the message
             if (strchr((sensor_0053_UART_gps6mv2_data->GPGGA_data_structure.GPGGA_sentence), '*') != NULL)

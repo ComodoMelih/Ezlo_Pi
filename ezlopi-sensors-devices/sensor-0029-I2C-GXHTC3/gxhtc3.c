@@ -121,20 +121,31 @@ bool gxhtc3_compute_values(s_gxhtc3_sensor_handler_t *handler)
 {
     bool ret = true;
 
-    if (handler->raw_data_reg)
-    {
-        {
-            handler->reading_temp_c = -45.0 + (175 * ((handler->raw_data_reg[0] << 8 | handler->raw_data_reg[1])) / 65536.0);
-            handler->reading_rh = 100.0 * (handler->raw_data_reg[3] << 8 | handler->raw_data_reg[4]) / 65536.0;
+    // raw_data_reg is uint8_t[GXHTC3_I2C_RAW_DATA_LEN] at offset 6 of the
+    // struct, so the old "if (handler->raw_data_reg)" tested whether
+    // (handler + 6) is NULL. Removed, along with the else branch that set
+    // ret = false.
+    //
+    // Unlike the other guards of this shape in the tree, this one was NOT free:
+    // GCC did not fold it. It emitted a real runtime test --
+    //     addi.n a9, a2, 6 ; movi.n a8, 0 ; bne a9, a8, <body>
+    // -- so removing it shrinks this function by 14 bytes. It is still dead:
+    // the branch is taken only when handler == 0xFFFFFFFA, and notably NOT when
+    // handler is NULL, because 0 + 6 is 6, non-zero, so a NULL handler already
+    // fell through into the body and dereferenced it. The guard never protected
+    // against the one value worth protecting against. The sole caller,
+    // GXHTC3_read_sensor, already checks "if (handler)" before calling.
+    //
+    // Worth knowing what that implies for callers: this function has always
+    // returned true unconditionally, so testing its result tells them nothing.
+    // Making it a genuine check needs something the struct does not carry today
+    // -- a validity flag set by the I2C read path -- which is a design change,
+    // not a compile fix, so it is deliberately not bundled in here.
+    handler->reading_temp_c = -45.0 + (175 * ((handler->raw_data_reg[0] << 8 | handler->raw_data_reg[1])) / 65536.0);
+    handler->reading_rh = 100.0 * (handler->raw_data_reg[3] << 8 | handler->raw_data_reg[4]) / 65536.0;
 
-            // handler->reading_temp_c = ((((handler->raw_data_reg[0] * 256.0) + handler->raw_data_reg[1]) * 175) / 65535.0) - 45;
-            // handler->reading_rh = ((((handler->raw_data_reg[3] * 256.0) + handler->raw_data_reg[4]) * 100) / 65535.0);
-        }
-    }
-    else
-    {
-        ret = false;
-    }
+    // handler->reading_temp_c = ((((handler->raw_data_reg[0] * 256.0) + handler->raw_data_reg[1]) * 175) / 65535.0) - 45;
+    // handler->reading_rh = ((((handler->raw_data_reg[3] * 256.0) + handler->raw_data_reg[4]) * 100) / 65535.0);
 
     return ret;
 }

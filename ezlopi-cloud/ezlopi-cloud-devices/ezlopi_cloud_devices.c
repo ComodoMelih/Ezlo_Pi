@@ -264,7 +264,7 @@ void EZPI_device_updated(cJSON *cj_request, cJSON *cj_response)
                                 }
                             }
 
-                            if (device_node->cloud_properties.protect_config && (strlen(device_node->cloud_properties.protect_config) > 0))
+                            if ((strlen(device_node->cloud_properties.protect_config) > 0))
                             {
                                 cJSON_AddStringToObject(__FUNCTION__, cj_result, ezlopi_protect_config_str, device_node->cloud_properties.protect_config);
                             }

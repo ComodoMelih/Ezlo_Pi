@@ -201,7 +201,7 @@ cJSON *EZPI_core_device_create_device_table_from_prop(l_ezlopi_device_t *device_
             cJSON_AddBoolToObject(__FUNCTION__, cj_device, ezlopi_ready_str, true);
             cJSON_AddStringToObject(__FUNCTION__, cj_device, ezlopi_status_str, ezlopi_idle_str);
             cJSON_AddBoolToObject(__FUNCTION__, cj_device, ezlopi_parent_room_str, device_prop->cloud_properties.parent_room);
-            if (device_prop->cloud_properties.protect_config && (strlen(device_prop->cloud_properties.protect_config) > 0))
+            if ((strlen(device_prop->cloud_properties.protect_config) > 0))
             {
                 cJSON_AddStringToObject(__FUNCTION__, cj_device, ezlopi_protect_config_str, device_prop->cloud_properties.protect_config);
             }
