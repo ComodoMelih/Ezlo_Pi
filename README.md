@@ -278,6 +278,29 @@ Commands may be pipelined — `{"cmd":4}{"cmd":1}` in a single write is answered
 twice. (Upstream silently dropped everything after the first object, because
 `cJSON_Parse` stops at the end of the first value and still reports success.)
 
+## 5.1 Provisioning a board from your own tooling
+
+There are three ways to provision a hub — `cmd:7` on the serial line above,
+BLE characteristic `0xE301`, and the hub's own outbound call to Ezlo's
+provision-sync — and **no two of them accept the same payload.** The JSON
+keys, the chunk framing, the field size limits and the security properties of
+all three are documented in
+**[docs/provisioning-schema.md](docs/provisioning-schema.md)**.
+
+Read it before writing a provisioning tool, because the differences are not
+cosmetic: `cmd:7` nests everything under a `data` object while BLE takes a
+flat one, the provisioning UUID is `provisioning_uuid` on the serial path but
+`uuid_provisioning` over BLE, and `cmd:7` neither requires nor reads a
+`user_id`, so it performs no ownership check at all.
+
+Beyond that, the parts most likely to cost you time are that BLE's
+`total_len` and `len` count base64 *characters* rather than decoded bytes,
+that over-long string values are silently truncated instead of rejected, that
+the CA certificate key is `signing_ca_certificate` and not the `ca_cert` the
+headers also declare, and that the provisioning status characteristic
+`0xE302` is compiled out of every shipped build — so configuration cannot be
+read back from the provisioning service, only from device info on `0xE401`.
+
 # 6. Troubleshooting
 
 **`idf.py build` fails with errors about unknown IDF functions.** You are on

@@ -20,15 +20,22 @@ Severity markers:
 
 ### Memory safety — [sec]
 
-All but the last of these are reachable by anyone in BLE range, or anyone with
-physical access to the UART header. No pairing or authentication is required to
-reach the parsers involved: the GATT characteristics are declared
+Most of these are reachable by anyone in BLE range, or anyone with physical
+access to the UART header. No pairing or authentication is required to reach
+the parsers involved: the GATT characteristics are declared
 `ESP_GATT_PERM_WRITE` rather than `ESP_GATT_PERM_WRITE_ENCRYPTED`, and
 `CONFIG_EZPI_BLE_ENABLE_PASSKEY` is unset in every shipped
-`sdkconfig.defaults.*`. The final item — the `cJSON *` passed to a `%s` — sits
-instead on the cloud provisioning path, which is an *outbound* HTTPS GET
-validated against the bundled CA, so reaching it means controlling that
-response; it is listed here because the defect class it exposed was tree-wide.
+`sdkconfig.defaults.*`. The serial provisioning command checks nothing at all —
+it reads no `user_id` and its provisioned-state guard is disabled.
+
+Two items sit instead on the cloud provisioning path — the `cJSON *` passed to
+a `%s`, and the 512-byte stack over-read in `set_basic()`. That path is an
+*outbound* HTTPS GET validated against the bundled CA, so triggering either
+means controlling that response. They are listed here anyway because of what
+they expose rather than how they are triggered: the first was a tree-wide
+defect class, and the second wrote the over-read stack bytes into the
+factory-info partition, from where anyone in BLE range can read them back out
+of device-info without authenticating.
 
 Evidence differs by item, so it is worth being explicit about which:
 
@@ -43,13 +50,25 @@ Evidence differs by item, so it is worth being explicit about which:
 - The format-attribute defect is covered by the compiler itself: with the
   attribute in place and `-Werror=format` already on, reintroducing the bad
   call fails the build. That was verified by reintroducing it, not assumed.
-- The `get_provisioning_status()` leak has **no automated coverage at all**. It
-  needs `esp_partition`, so it cannot run on the host, and no structural rule
-  would have caught it either: the pre-fix function did call `ezlopi_free` on
-  the right variable, just on only one of two paths. Catching that needs
-  branch analysis, not pattern matching, so no check was added rather than one
-  that would give false confidence. It was found by reading, and the audit of
-  the sibling call sites that followed was also by reading.
+- The `set_basic()` over-read is the best-evidenced item here. It was
+  reproduced as a real out-of-bounds read rather than inferred: the same
+  buffer layout and copy lengths under `-fsanitize=address` report
+  `stack-buffer-overflow ... READ of size 126` from a 40-byte array, and the
+  bounded version runs clean. A second harness confirms the fix stores
+  byte-identical data for the two callers that were already correct, across
+  eight cases including empty, exactly-full and over-long values — and was
+  mutated to confirm it can actually detect a difference.
+  [`tests/ci/check_finfo_bounded_store.py`](tests/ci/check_finfo_bounded_store.py)
+  then guards the pattern, and was verified against the real pre-fix file from
+  git, where it flags all twelve copies, not merely against its own samples.
+- The two leaks — `get_provisioning_status()` and the serial `cmd:7` path —
+  have **no automated coverage at all.** Both need `esp_partition`, so neither
+  can run on the host. No structural rule would have caught the first either:
+  the pre-fix function did call `ezlopi_free` on the right variable, just on
+  only one of two paths, and catching that needs branch analysis rather than
+  pattern matching. No check was added rather than one that would give false
+  confidence. Both were found by reading, and the audits of sibling call sites
+  that followed were also by reading.
 
 None of these have been exercised on physical hardware; see Known gaps.
 
@@ -160,6 +179,74 @@ None of these have been exercised on physical hardware; see Known gaps.
   into the `__ca_cert`/`__pvt_key`/`__pub_key` statics, so this was the only
   one. Not covered by a host test — the function needs `esp_partition` — and
   not yet observed on hardware; see Known gaps.
+
+- **512 bytes of stack read out of bounds and written into the factory-info
+  partition.**
+  `EZPI_core_factory_info_v3_set_basic()` takes a caller-filled
+  `s_basic_factory_info_t` of `char *` members and writes each into a
+  fixed-size region of flash. It did that with a `memset`/`memcpy` pair per
+  field where **the count was the size of the destination field**, which has
+  no relationship to the size of the buffer the caller actually passed:
+
+  ```c
+  memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_UUID, 0, EZLOPI_FINFO_LEN_DEVICE_UUID);
+  memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_UUID, cfg->device_uuid, EZLOPI_FINFO_LEN_DEVICE_UUID);
+  ```
+
+  Two of the three callers survived that only by coincidence — the BLE and
+  serial paths declare their stack arrays at exactly those lengths and zero
+  them first. `__provision_update()` in
+  [`ezlopi_service_webprov.c`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c)
+  does not. It declares `tmp_dev_uuid[40]`, `tmp_prov_uuid[40]`,
+  `tmp_cloud_server[128]` and `tmp_provision_token[300]` against fields of
+  `0x7E`, `0x7E`, `0x100` and `0x200`, so those four copies ran 86, 86, 128
+  and 212 bytes past the ends of the arrays — 512 bytes of adjacent stack in
+  total.
+
+  The read is the smaller half of the problem. Those bytes were then written
+  to the factory-info partition and are served straight back out: the BLE
+  device-info characteristic and the UART status query both report
+  `cloud_server`, the device UUID and the provisioning UUID, and neither
+  requires authentication. Whatever was on that task's stack — and this is the
+  task that handles the cloud socket — became readable by anyone in radio
+  range.
+
+  All thirteen string fields now go through one helper that bounds the copy
+  with `strnlen()` of the source. For the two callers that were already
+  correct this is byte-for-byte identical, which was checked rather than
+  assumed: the destination is still zeroed first and their sources are
+  zero-filled past the string, so the bytes no longer copied were zeros
+  either way. Enlarging webprov's four buffers instead would have added 512
+  bytes to that task's stack purely to keep copying padding the `memset`
+  already wrote. The two remaining `memcpy`s in the function are the binary
+  `id` and `config_version` fields, whose sources are exactly the right size.
+
+  Found while writing [`docs/provisioning-schema.md`](docs/provisioning-schema.md)
+  — specifically while checking what the field size limits in that document
+  actually mean, which required reading how each field reaches flash.
+
+- **The serial provisioning command leaked a struct on every call.**
+  `ezpi_service_uart_process_provisioning_api()` in
+  [`ezlopi_service_uart.c`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c)
+  allocates an `s_basic_factory_info_t`, fills it, hands it to `set_basic()`
+  and never frees it. The BLE sibling it was copied from does free it, two
+  lines after the same three setter calls; the copy simply dropped the line.
+  The same sibling-copy pattern as the BLE chunk overflow above — a function
+  duplicated, then fixed in only one of its two homes.
+
+  This path is reachable without any authentication whatsoever: `cmd:7` reads
+  no `user_id`, and its provisioned-state check is `if (0)` with the real
+  condition commented out beside it. So it can be driven in a loop by
+  anything able to write to the UART. Now freed. The struct holds only
+  pointers and scalars, so that is the whole leak; the strings it points at
+  are the caller's stack.
+
+  The struct is also now zeroed on allocation, matching the BLE sibling. That
+  part is not a fix for a live defect — `set_basic()` reads neither of the two
+  members the serial path left uninitialised, `version` and `user_id`, which
+  was verified rather than assumed — but it means the day that function starts
+  reading `user_id`, this path hands it `NULL` instead of a stale heap
+  pointer.
 
 - **A `cJSON *` passed to a `%s`, in every shipped image.**
   `__provision_update()` in
@@ -1454,6 +1541,35 @@ enumerators — so the live half of this component was never affected.
   is also run against the pre-fix header from git, where it reports both
   declarations unguarded.
 
+- **New CI check that factory-info field copies stay bounded by their source,
+  [`tests/ci/check_finfo_bounded_store.py`](tests/ci/check_finfo_bounded_store.py).**
+  Guards the `set_basic()` over-read described under **Memory safety** above:
+  no `memcpy` in `ezlopi_core_factory_info.c` may take its source from an
+  `s_basic_factory_info_t` member and its count from an `EZLOPI_FINFO_LEN_*`
+  constant. Address-of sources are exempt, since `&cfg->id` really is as long
+  as its field.
+
+  The reason this needs a script rather than a compiler flag is that there is
+  nothing for a compiler to object to. `set_basic()` received a pointer and a
+  byte count; that the count came from the destination's size is a fact about
+  the program, not about the statement. The four images build clean with the
+  defect present, and the only visible symptom is extra bytes in a flash
+  region nobody diffs.
+
+  Verified against the real pre-fix file recovered from git, where it flags
+  all twelve string copies and correctly exempts the two binary ones — not
+  merely against its own fixtures. That distinction is the lesson from
+  `check_trace_format_attr.py` below, whose self-test passed while its scan
+  was wrong, and it is why `SELF_TEST['commented_decoy']` exists here too: the
+  helper's own documentation quotes the old pattern in prose directly above
+  the code, and a scanner that reads comments would flag the explanation of
+  the fix as the bug.
+
+  The defect itself was separately reproduced under `-fsanitize=address`
+  rather than argued from the source, and the claim that the fix preserves
+  stored bytes was tested across eight cases with a harness that was mutated
+  to prove it can report a mismatch.
+
 - **`ezlopi-util-uuid` joined the suite** — `tests/host/test_uuid.c`, 431
   checks. It ties MB1013 for the shortest build rule in the `Makefile` — one
   `-I`, its own directory, no stubs — but it reached that point differently,
@@ -1975,6 +2091,44 @@ enumerators — so the live half of this component was never affected.
   factory-info partition and NVS, so the serial number, MAC and certificates
   are unrecoverable — whereas `{"cmd":0,"sub_cmd":1}` is a plain reboot. They
   differ by one character and the destructive one is `0`.
+- **Documented the provisioning JSON schema**, in
+  [docs/provisioning-schema.md](docs/provisioning-schema.md), so a hub can be
+  configured from something other than the Ezlo mobile app. Linked from README
+  section 5.1.
+
+  The headline finding is that there are **three provisioning paths and no two
+  share a schema** — BLE `0xE301`, serial `cmd:7`, and the hub's own outbound
+  call to Ezlo's provision-sync. They differ in payload shape (flat versus
+  nested under `data`), in key names, and in whether they authenticate at all.
+  The document gives per-path key tables with the buffer size behind each
+  field, the BLE chunk framing, and a security-properties section.
+
+  Three traps get their own treatment, because each one compiles, runs, stores
+  nothing and reports success: `provisioning_uuid` versus
+  `uuid_provisioning`, `signing_ca_certificate` versus `ca_cert`, and
+  `device_type_ezlopi` versus `ezlopi_device_type`. All three pairs genuinely
+  exist as separate declared constants. Every key named in the document was
+  checked against its declaration in `ezlopi_cloud_keywords.c` rather than
+  inferred from the identifier.
+
+  It also records what cannot be done rather than leaving readers to find out:
+  the provisioning status characteristic `0xE302` is never registered and
+  `0xE301` is write-only, because `EZPI_SERV_BLE_ENABLE_READ_PROV` and
+  `EZPI_SERV_BLE_ENABLE_STAT_PROV` are `#define`d and then unconditionally
+  `#undef`'d in `EZLOPI_USER_CONFIG.h`. Configuration can only be read back
+  from device-info on `0xE401`. And "provisioned" means one thing only: the
+  stored `cloud_server` contains the substring `https://`.
+
+  Writing it was not a neutral exercise. Checking the claims against the
+  source produced two live defects in the code being described — the
+  `set_basic()` stack over-read and the serial-path leak, both under **Memory
+  safety** above — and caught three errors in the document's own first draft
+  before it was committed: it told readers to poll `0xE302`, which does not
+  exist in any shipped build; it conflated buffer size with usable string
+  length, when `snprintf` costs a byte to the terminator; and it named the CA
+  certificate key as `ca_cert`, which is the read-back name from a function
+  that is compiled out, not the name any write path accepts.
+
 - **Measured what migrating off ESP-IDF v4.4.6 would actually cost**, in
   [docs/esp-idf-migration.md](docs/esp-idf-migration.md). The README said the
   tree "does not build on v5.x" without saying why or how much, which is not
