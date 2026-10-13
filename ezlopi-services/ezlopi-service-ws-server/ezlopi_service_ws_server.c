@@ -89,6 +89,7 @@
 #include "ezlopi_core_event_group.h"
 #include "ezlopi_core_api_methods.h"
 #include "ezlopi_core_cjson_macros.h"
+#include "ezlopi_core_local_key.h"
 #include "ezlopi_core_offline_login.h"
 
 #include "ezlopi_service_ws_server.h"
@@ -199,6 +200,15 @@ e_ws_status_t EZPI_service_ws_server_status(void)
 
 void EZPI_service_ws_server_start(void)
 {
+    /* Make sure the device has a local API key before it starts accepting
+     * connections, generating and storing one if nobody ever provisioned this
+     * board. Here rather than in ezlopi_main.c because this is the only
+     * consumer of that credential: an unauthenticated client of this server
+     * gets hub.offline.login.ui and nothing else, and that method's one check
+     * is the local key. A build without this server has no use for a key and
+     * should not be generating or announcing one. */
+    (void)EZPI_core_local_key_init();
+
     EZPI_core_broadcast_method_add(ezpi_ws_server_broadcast, "wss-method", 2);
 
     if (EZPI_core_wifi_got_ip())

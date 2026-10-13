@@ -390,7 +390,23 @@ ezlopi_error_t EZPI_core_nvs_read_wifi(char *wifi_info, uint32_t len)
             if (ESP_OK == err)
             {
                 error = EZPI_SUCCESS;
-                TRACE_D("Load wifi config:: ssid: %s, password: %s", wifi_info, &wifi_info[32]);
+                /* SSID yes, password no. This was
+                **     TRACE_D("Load wifi config:: ssid: %s, password: %s",
+                **             wifi_info, &wifi_info[32]);
+                ** which printed the user's Wi-Fi password to the serial
+                ** console every time the stored config was loaded. It was
+                ** found by checking that the local-API credential had really
+                ** stopped being logged: the string "password: %s" was still in
+                ** the built image, and it was coming from here.
+                **
+                ** As with the local key, do not assume a TRACE_D is quiet in a
+                ** shipped build. These are EzloPi's own trace macros, not
+                ** ESP_LOG, so CONFIG_LOG_DEFAULT_LEVEL does not gate them, and
+                ** serial_log_severity defaults to
+                ** ENUM_EZLOPI_TRACE_SEVERITY_MAX (ezlopi_core_log.c:86), which
+                ** passes severity 4. The password printed. */
+                TRACE_D("Load wifi config:: ssid: %s, password: set (%d chars)",
+                        wifi_info, (int)strlen(&wifi_info[32]));
             }
         }
         else

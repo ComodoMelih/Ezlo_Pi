@@ -20,6 +20,7 @@ MB1013_DIR   := ../../ezlopi-sensors-devices/sensor-0021-UART-MB1013
 GPS_DIR      := ../../ezlopi-sensors-devices/sensor-0053-UART-GYGPS6MV2
 UUID_DIR     := ../../ezlopi-util/ezlopi-util-uuid
 ACTIONS_DIR  := ../../ezlopi-core/ezlopi-core-actions
+LOCALKEY_DIR := ../../ezlopi-util/ezlopi-util-localkey
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -51,7 +52,7 @@ LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
-           test_mb1013 test_gps6mv2 test_uuid test_actions
+           test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -212,6 +213,32 @@ $(BUILD)/test_actions: ACTIONS_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
                                          $(SANITIZERS)
 $(BUILD)/test_actions: test_actions.c $(ACTIONS_DIR)/ezlopi_core_actions.c | $(BUILD)
 	$(CC) $(ACTIONS_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# ezlopi-util-localkey is the first component in this suite that was created in
+# order to be testable rather than found to be testable. The local key is the
+# entire access control of the offline websocket API -- an unauthenticated
+# client is allowed `hub.offline.login.ui` and nothing else -- and the check it
+# performs used to be `strncmp(stored, supplied, strlen(stored))` inline in
+# ezlopi_core_offline_login.c, a file that cannot be host-compiled because it
+# pulls in cjext, NVS and the factory-info partition.
+#
+# So the comparison, the validation and the generation were moved somewhere
+# with no dependencies at all, and the entropy is passed in as an argument
+# instead of being read from esp_fill_random() inside. Both choices exist only
+# to make the checks in test_localkey.c possible: a prefix match, an empty key
+# that matches every token, and a generation alphabet whose size does not
+# divide 256 are all defects that leave a device behaving correctly in every
+# manual test.
+#
+# The test keeps a verbatim copy of the old strncmp expression and asserts that
+# it *accepted* the prefix and the empty key, so the file demonstrates the
+# defect rather than asserting it. Needs no stubs and no -I but its own
+# directory.
+$(BUILD)/test_localkey: LOCALKEY_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                           -I$(LOCALKEY_DIR) \
+                                           $(SANITIZERS)
+$(BUILD)/test_localkey: test_localkey.c $(LOCALKEY_DIR)/ezlopi_util_localkey.c | $(BUILD)
+	$(CC) $(LOCALKEY_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

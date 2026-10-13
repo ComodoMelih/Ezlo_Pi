@@ -663,7 +663,14 @@ int EZPI_core_factory_info_v3_set_basic(s_basic_factory_info_t *ezlopi_config_ba
                     {
                         memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_LOCAL_KEY, 0, EZLOPI_FINFO_LEN_LOCAL_KEY);
                         memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_LOCAL_KEY, ezlopi_config_basic->local_key, EZLOPI_FINFO_LEN_LOCAL_KEY);
-                        TRACE_S("local_key: %s", ezlopi_config_basic->local_key);
+                        /* Length only. This was
+                        **     TRACE_S("local_key: %s", ...)
+                        ** which printed the device's local API credential to
+                        ** the serial console on every provisioning run. Of the
+                        ** seven fields written in this block, five are
+                        ** identifiers or URLs and are still logged in full;
+                        ** this one and provision_token are secrets. */
+                        TRACE_S("local_key: set (%d chars)", (int)strlen(ezlopi_config_basic->local_key));
                     }
 
                     if (NULL != ezlopi_config_basic->cloud_server)
@@ -695,7 +702,9 @@ int EZPI_core_factory_info_v3_set_basic(s_basic_factory_info_t *ezlopi_config_ba
                     {
                         memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_TOKEN, 0, EZLOPI_FINFO_LEN_PROVISIONING_TOKEN);
                         memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_TOKEN, ezlopi_config_basic->provision_token, EZLOPI_FINFO_LEN_PROVISIONING_TOKEN);
-                        TRACE_S("provision_token: %s", ezlopi_config_basic->provision_token);
+                        /* Length only, same reason as local_key above: this
+                        ** token authorises provisioning against the cloud. */
+                        TRACE_S("provision_token: set (%d chars)", (int)strlen(ezlopi_config_basic->provision_token));
                     }
 
                     if (ESP_OK == esp_partition_erase_range(partition_ctx_v3, EZLOPI_FINFO_OFFSET_CONN_DATA, EZLOPI_FINFO_READ_LEN_4KB))

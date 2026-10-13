@@ -602,6 +602,162 @@ failure.
   would pass either way. `ca_mios` genuinely discriminates, and both assertions
   were checked against the opposite build to confirm they fail when they should.
 
+### Local API credentials — [sec]
+
+- **The local API key was printed to the serial console on every login
+  attempt.** `ezlopi_core_offline_login.c` contained
+  `TRACE_D("password: %s", password_saved)`, where `password_saved` is the
+  device's only local-API credential. Now removed.
+
+  The reason this is listed as a defect rather than as debug noise is that a
+  `TRACE_D` here is *not* compiled out or filtered in a shipped build, contrary
+  to how it reads. These are EzloPi's own trace macros, not `ESP_LOG`, so
+  `CONFIG_LOG_DEFAULT_LEVEL` does not apply to them. The severity was chased to
+  the actual `printf`: `TRACE_D` is `trace_log_sev_debug`
+  ([`ezlopi_util_trace.h:192`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L192)),
+  which is severity 4; `serial_log_severity` defaults to
+  `ENUM_EZLOPI_TRACE_SEVERITY_MAX`
+  ([`ezlopi_core_log.c:86`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L86));
+  the upcall is registered at `:255` and ends in `printf` at `:309`. The
+  default build printed it.
+
+- **The Wi-Fi password was printed every time the stored config was loaded.**
+  `ezlopi_core_nvs.c:393` was
+  `TRACE_D("Load wifi config:: ssid: %s, password: %s", wifi_info, &wifi_info[32])`.
+  Now reports the SSID and the password's length only.
+
+  This one is worth reading as a method note rather than as a bug. It was not
+  found by reading the file; it was found by checking that the *first* fix had
+  actually worked — searching the built `.bin` for the format string
+  `password: %s` after removing the line above. The count came back 1 instead
+  of 0, and this was the other caller. Grepping the source for the credential
+  would not have found it, because the variable is called `wifi_info` and the
+  password is an offset into it.
+
+- **The provisioning token and local key were printed during provisioning.**
+  Two `TRACE_S("...: %s", ...)` calls in `ezlopi_core_factory_info.c` logged
+  the local key and the cloud provisioning token in full as they were written
+  to flash. Both now report a length. The other five fields written in the same
+  block are identifiers and URLs and are still logged in full.
+
+- **The local key comparison was a prefix match.**
+  `strncmp(password_saved, cj_token->valuestring, strlen(password_saved))`
+  accepted any token *beginning* with the key, so appending anything to a valid
+  key still authenticated. It also accepted everything when the stored key was
+  empty, because `strlen("")` is 0 and `strncmp(a, b, 0)` is 0.
+
+  Replaced by `EZPI_util_localkey_match()`, which requires equal lengths and
+  equal bytes, refuses a stored key shorter than 8 characters, accepts `NULL`
+  on either side, and runs the whole key without an early exit so its duration
+  does not report how many leading bytes a guess got right. The length check
+  ahead of that loop does leak the key length, which is fixed by whoever
+  provisioned the device and is not secret.
+
+  The empty-key case was not reachable in the shipped build, and the reason is
+  worth recording because it was luck rather than a check:
+  `EZPI_core_factory_info_v3_get_local_key()` tests `isprint(local_key[0])`,
+  and erased flash reads as `0xFF`, for which `isprint` is false — so a blank
+  region returned `NULL` and the caller's `NULL` guard caught it. The
+  protection against "empty key accepts every token" was a printability test
+  on one byte, in a different component, written for a different purpose.
+
+- **The user-id verification was disabled with a `#warning`, and is now a
+  documented build option rather than commented-out code.** Two copies of
+  `#warning "Lomas: user-id verification disabled!"` and about fifteen lines of
+  commented-out verification are replaced by `__user_id_accepted()`, behind
+  `CONFIG_EZPI_OFFLINE_LOGIN_VERIFY_USER_ID`, **`default n`**.
+
+  Default `n` is deliberate and is the conservative answer, not the lazy one.
+  Three findings drove it. The commented-out code refuses the login outright
+  when no user id is stored, which would lock a self-flashed device out of its
+  own local API. No shipped build has ever enforced this check, so enabling it
+  changes the behaviour of already-claimed devices against an app whose exact
+  `user` value cannot be tested from this repository. And this repository has
+  already answered the same question the same way once:
+  [`ezlopi_service_ble_ble_auth.c:158`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_ble_auth.c#L158)
+  keeps a prefix comparison for the BLE user id, with a note saying it is what
+  the shipped app authenticates against. Enforcing strict equality here while
+  that path deliberately does not would be incoherent.
+
+### Local operation — [feat]
+
+- **A self-flashed device can now log in to its own local API.** This was the
+  single thing standing between "local control exists in the architecture" and
+  "local control works". Everything else was already there: the local websocket
+  server exposes the same 117 methods as the cloud path from the same table,
+  scenes run locally, and nothing in the request path requires the cloud.
+
+  But the API has exactly one credential. An unauthenticated client is allowed
+  `hub.offline.login.ui` and nothing else — a real gate, at
+  [`ezlopi_service_ws_server.c:292`](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L292)
+  — and that method compares the supplied token against the local key. The key
+  had one source: the factory-info partition, written only by Ezlo cloud
+  provisioning over BLE. On a board somebody flashed themselves that region has
+  never been written, so it reads back as erased `0xFF`,
+  `EZPI_core_factory_info_v3_get_local_key()` returns `NULL`, and the login
+  fails. Every local method was implemented, reachable and working, and none of
+  them could be called.
+
+  `ezlopi-core-local-key` resolves the key from three sources in a fixed order:
+  the factory partition, then an NVS entry, then — if there is neither — 32
+  characters generated from `esp_fill_random()` and stored in NVS.
+  **Factory-first is the compatibility guarantee**: a cloud-provisioned device
+  uses exactly the key it used before, whatever is in NVS, so nothing about the
+  Ezlo path changes. The two storage locations are separate, so a device that
+  is later claimed through the app returns to the cloud key with no migration
+  step.
+
+  `esp_fill_random()` and not `rand()`. The repository's other random source,
+  `ezlopi_util_uuid_generate_random()`, is `srand(time(NULL))` plus `rand()`,
+  whose seed is guessable to within the second the device first booted — a key
+  from that source would carry roughly 20 bits of real entropy rather than 160.
+
+- **The generated key is printed once at startup**, behind
+  `CONFIG_EZPI_LOCAL_KEY_ANNOUNCE` (`default y`). A generated credential nobody
+  can read is not a feature, so this is a deliberate exposure replacing an
+  accidental one, and it differs from the `TRACE_D` it replaces in three ways:
+  only a *locally generated* key is ever printed (a cloud-provisioned key never
+  is, since the Ezlo app already holds it and printing it would be a leak with
+  no benefit); it happens once at boot rather than on every login attempt, so
+  it is not in the log that gets pasted into a bug report; and it can be
+  switched off, which is what anyone shipping a product on this firmware should
+  do, installing their own key with `EZPI_core_local_key_set()`.
+
+  It uses `printf` rather than `TRACE_*` on purpose. Every `TRACE_*` macro
+  expands to nothing when `CONFIG_EZPI_UTIL_TRACE_EN` is off, and `TRACE_*`
+  output is also subject to the runtime-settable, NVS-persisted
+  `serial_log_severity` — either of which would leave a user holding a device
+  with an unknowable key. With the option off, the firmware still reports that
+  a key *exists* and withholds the value, so a missing banner is not mistaken
+  for a missing key.
+
+  Anyone with the serial port can read the key while this is on. On this
+  hardware that threshold is already total, since serial access means the
+  ability to reflash the board, so it is not a new exposure — but it is a real
+  one, and the Kconfig entry says so.
+
+- **`ezlopi-util-localkey`** holds the comparison, validation and generation,
+  and has no `REQUIRES` at all so that `tests/host` can drive every case on a
+  desktop. The entropy is passed in as an argument rather than read from
+  `esp_fill_random()` inside, for the same reason. 58 host checks; see the
+  Testing section for what they establish and how they were shown to fail.
+
+  `EZPI_util_localkey_is_valid()` is deliberately a length-and-printability
+  rule and **not** an alphabet test. A cloud-provisioned key is 64 mixed-case
+  alphanumerics and contains the four characters generation omits (`l`, `o`,
+  `0`, `1`); requiring the generation alphabet would reject every provisioned
+  device. There is a host check asserting exactly that, so the next person to
+  tidy `is_valid()` into an alphabet test gets a red suite instead of a field
+  failure.
+
+- **Not validated on hardware.** None of this has run on a board: not the
+  first-boot generation, not the NVS persistence, not the announcement, not a
+  login against a generated key. Three builds were verified — defaults, with
+  user-id verification on, and with the announcement off — and all three
+  compile and link with the new symbols present in the ELF. The absence of the
+  credential format strings was checked against the built `.bin` rather than
+  the source. That is the limit of what has been established.
+
 ### Provisioning — [feat]
 
 - **Improv Wi-Fi over BLE, as an opt-in sixth GATT service.** Guarded by
@@ -991,8 +1147,8 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 3508 assertions across
-  ten binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 3566 assertions across
+  eleven binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
@@ -1054,6 +1210,50 @@ enumerators — so the live half of this component was never affected.
   single-sided range guard is not an out-of-bounds read. A runtime version
   cannot fail — and in fact cannot compile, since `-Wtype-limits` plus
   `-Werror` rejects an always-false unsigned `< 0` comparison.
+
+- **`ezlopi-util-localkey` is the first component in the suite written in order
+  to be testable, rather than found to be testable** —
+  `tests/host/test_localkey.c`, 58 checks. The local key is the entire access
+  control of the offline API, and the check it performs lived inline in
+  `ezlopi_core_offline_login.c` — a file that cannot be host-compiled because
+  it pulls in cjext, NVS and the factory-info partition. So the comparison, the
+  validation and the generation were moved somewhere with no dependencies at
+  all, and the entropy is passed in as an argument rather than read from
+  `esp_fill_random()` inside. Both choices exist only to make these checks
+  possible.
+
+  **The test demonstrates the defect instead of asserting it.** It keeps a
+  verbatim copy of the old expression as `legacy_match()` and checks that the
+  old code *accepted* a key with junk appended, and accepted every token
+  against an empty key. Those checks fail if the premise is wrong, so the file
+  is the evidence for the fix rather than a restatement of it. Running it
+  prints the "legacy accepted" lines.
+
+  **Four mutations, all caught.** The real implementation was reverted to the
+  old `strncmp` prefix match in a scratch copy: 7 failures. Reverted with a
+  `NULL` guard added: the same 7 — and without the guard it *segfaults* under
+  ASan in `strlen`, which is the concrete demonstration that the old code was
+  only safe because its caller checked for `NULL` first. Transposing two
+  characters of the generation alphabet: caught by the known-vector check.
+  Removing one character from the alphabet, so that 32 no longer divides 256
+  and generation becomes biased: **caught at compile time** by a negative-array
+  `typedef`, because a biased generator produces perfectly plausible keys and
+  so cannot be noticed by reading the output.
+
+  One check is worth naming because it protects a compatibility property rather
+  than a correctness one: `is_valid()` is asserted to accept `l`, `o`, `0` and
+  `1`, which generation never emits. A cloud-provisioned key contains them, so
+  anyone who "tidies" `is_valid()` into an alphabet test would lock out every
+  provisioned device — and now gets a red suite instead. The test vector for
+  that is the real 64-character provisioned key left in a commented-out line in
+  `ezlopi_core_factory_info.c`, rather than an invented string, so the question
+  is settled against a value that actually shipped.
+
+  Not covered, and recorded rather than implied: that the comparison is
+  *measurably* constant-time (the structural guarantee is no data-dependent
+  branch; timing it on a host under ASan would measure the host's scheduler),
+  where the entropy comes from, whether the key persists across a reboot, and
+  the complete absence of rate limiting on login attempts.
 
 - **The PMS5003 frame parser was split out so it could be tested at all** —
   `tests/host/test_pms5003.c`, 92 checks. This is the first driver brought into

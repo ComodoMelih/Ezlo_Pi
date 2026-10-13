@@ -326,6 +326,54 @@ menu "EzloPi User Config"
         help
             Enable local websocket server
 
+    config EZPI_LOCAL_KEY_ANNOUNCE
+        depends on EZPI_LOCAL_WEBSOCKET_SERVER
+        bool "Print the generated local API key to the serial console"
+        default y
+        help
+            A device that was never provisioned through the Ezlo app has no
+            local API key, so one is generated on first boot and stored in
+            NVS. This prints it once at startup so you can actually use it.
+
+            Only a locally generated key is ever printed. A key written by
+            cloud provisioning is not, because the Ezlo app already has it.
+
+            Leave this on for a device you build yourself: without it the
+            generated key is unknowable and the local API cannot be logged
+            into. Turn it off if you are shipping a product on this firmware,
+            and install a key of your own with EZPI_core_local_key_set().
+
+            Anyone with the serial port can read the key while this is on.
+            That is already true of anyone who can reflash the board, so it
+            is not a new exposure - but it is a real one, and this is the
+            switch for it.
+
+    config EZPI_OFFLINE_LOGIN_VERIFY_USER_ID
+        depends on EZPI_LOCAL_WEBSOCKET_SERVER
+        bool "Verify the user id on offline login as well as the key"
+        default n
+        help
+            hub.offline.login.ui takes a "user" and a "token". The token is
+            checked against the local API key. The user field is not checked
+            at all, and never has been - the verification was commented out
+            with a "user-id verification disabled!" warning.
+
+            Turn this on to also require the user id to equal the one stored
+            when the device was claimed over BLE. A device that was never
+            claimed has no stored id, so there is nothing to compare and the
+            login proceeds on the key alone.
+
+            Default n because no shipped build has ever enforced it, and the
+            exact "user" value the Ezlo app sends on this path cannot be
+            tested from this repository. The BLE auth path makes the same
+            choice for the same reason - see the note at
+            ezlopi_service_ble_ble_auth.c:158, which keeps a prefix match
+            rather than change the behaviour of already-claimed devices.
+
+            This is a second factor on an identifier, not on a secret. It
+            does not make the local API meaningfully harder to get into; the
+            local key is what does that.
+
     config EZPI_WEBSOCKET_CLIENT
         depends on (EZPI_CORE_ENABLE_ETH || EZPI_ENABLE_WIFI )
         bool "Enable Web-Socket client"

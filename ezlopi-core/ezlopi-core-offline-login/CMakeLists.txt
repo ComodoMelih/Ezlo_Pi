@@ -7,9 +7,10 @@ set(ESP_IDF_COMPONENTS
 )
 
 # Define core components
-set(EZLOPI_CORE_COMPONENTS 
-        ezlopi-core-nvs 
+set(EZLOPI_CORE_COMPONENTS
+        ezlopi-core-nvs
         ezlopi-core-factory-info
+        ezlopi-core-local-key
 )
 
 # Define HAL components
@@ -30,6 +31,7 @@ set(EZLOPI_SENSOR_DEVICE_COMPONENTS
 
 # Define ezlopi-utils components
 set(EZLOPI_UTIL_COMPONENTS
+        ezlopi-util-localkey
 )
 
 # Register the components
