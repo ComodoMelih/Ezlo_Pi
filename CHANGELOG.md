@@ -43,6 +43,13 @@ Evidence differs by item, so it is worth being explicit about which:
 - The format-attribute defect is covered by the compiler itself: with the
   attribute in place and `-Werror=format` already on, reintroducing the bad
   call fails the build. That was verified by reintroducing it, not assumed.
+- The `get_provisioning_status()` leak has **no automated coverage at all**. It
+  needs `esp_partition`, so it cannot run on the host, and no structural rule
+  would have caught it either: the pre-fix function did call `ezlopi_free` on
+  the right variable, just on only one of two paths. Catching that needs
+  branch analysis, not pattern matching, so no check was added rather than one
+  that would give false confidence. It was found by reading, and the audit of
+  the sibling call sites that followed was also by reading.
 
 None of these have been exercised on physical hardware; see Known gaps.
 
@@ -125,6 +132,34 @@ None of these have been exercised on physical hardware; see Known gaps.
   deliberately unchanged** — the mobile app and cloud appear to depend on that
   field, and changing the wire format is out of scope for a hardening pass. See
   the privacy note in the README.
+
+- **257-byte heap leak per status query on every unprovisioned hub.**
+  `EZPI_core_factory_info_v3_get_provisioning_status()`
+  ([`ezlopi_core_factory_info.c:219`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L219))
+  read the stored `cloud_server` URL and freed it **only inside the branch that
+  found `https://` in it** — so the unprovisioned path leaked the buffer, and
+  that is the path a factory-fresh device always takes.
+
+  It leaks on blank flash rather than skipping it, which is what makes this
+  reliable instead of theoretical: an erased region is all `0xFF` with no zero
+  byte, so `__read_string()` does not return `NULL` for an unset field, it
+  returns a non-NULL string of `0xFF` bytes. That fails the `strstr` and fell
+  straight into the unfreeing `else`.
+
+  `EZLOPI_FINFO_LEN_CLOUD_SERVER_URL` is `0x100`, so 257 bytes went per call,
+  and the function is called on every BLE device-info read (the
+  `provisioned_status` field) and every UART status query — neither
+  authenticated. A client in radio range could poll an unprovisioned hub's heap
+  away, which is precisely the state a hub is in *while being provisioned*.
+
+  Now freed unconditionally, matching `get_cloud_server()` and
+  `get_provisioning_server()` immediately below it, which both already got this
+  right — the three functions are the same shape and only one had the free
+  misplaced. Every other caller of `__read_string()` was audited at the same
+  time: the rest either hand ownership to their caller or cache deliberately
+  into the `__ca_cert`/`__pvt_key`/`__pub_key` statics, so this was the only
+  one. Not covered by a host test — the function needs `esp_partition` — and
+  not yet observed on hardware; see Known gaps.
 
 - **A `cJSON *` passed to a `%s`, in every shipped image.**
   `__provision_update()` in

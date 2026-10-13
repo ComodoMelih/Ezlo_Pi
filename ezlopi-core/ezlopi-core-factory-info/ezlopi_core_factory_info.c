@@ -217,15 +217,26 @@ uint32_t EZPI_core_factory_info_v3_get_provisioning_status(void)
     if (EZPI_factory_info_v3_init())
     {
         char *cloud_server = __EZPI_core_factory_info_v3_read_string(__FUNCTION__, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_CLOUD_SERVER_URL, E_EZLOPI_FACTORY_INFO_CONN_DATA), EZLOPI_FINFO_LEN_CLOUD_SERVER_URL);
-        if (cloud_server && strstr(cloud_server, "https://"))
-        {
-            g_provisioning_status = 1;
-            ezlopi_free(__FUNCTION__, cloud_server);
-        }
-        else
-        {
-            g_provisioning_status = 0;
-        }
+
+        /* The free used to sit inside the "provisioned" branch only, so the
+        ** unprovisioned path leaked the buffer -- and that is the path a
+        ** factory-fresh device always takes. An erased flash region is all
+        ** 0xFF with no zero byte in it, so __read_string() does not return
+        ** NULL for a blank field; it returns a non-NULL string of 0xFF bytes,
+        ** which fails the strstr and fell straight into the else.
+        **
+        ** EZLOPI_FINFO_LEN_CLOUD_SERVER_URL is 0x100, so that was 257 bytes
+        ** per call, and this is called on every BLE device-info read
+        ** (ezlopi_service_ble_device_info.c, "provisioned_status") and every
+        ** UART status query -- neither of which requires authentication. A
+        ** client in radio range could poll an unprovisioned hub's heap away,
+        ** which is exactly the state a hub is in while being provisioned.
+        **
+        ** Freed unconditionally now, matching get_cloud_server() and
+        ** get_provisioning_server() just below, which both already did this
+        ** correctly. ezlopi_free() tolerates NULL. */
+        g_provisioning_status = (cloud_server && strstr(cloud_server, "https://")) ? 1 : 0;
+        ezlopi_free(__FUNCTION__, cloud_server);
     }
 
     return g_provisioning_status;
