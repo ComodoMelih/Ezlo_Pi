@@ -20,10 +20,21 @@ Severity markers:
 
 ### Memory safety — [sec]
 
-All four of these are reachable by anyone in BLE range, or anyone with physical
+All of these are reachable by anyone in BLE range, or anyone with physical
 access to the UART header. No pairing or authentication is required to reach
-the parsers involved. All four are covered by regression tests in
-[`tests/host/`](tests/host/).
+the parsers involved: the GATT characteristics are declared
+`ESP_GATT_PERM_WRITE` rather than `ESP_GATT_PERM_WRITE_ENCRYPTED`, and
+`CONFIG_EZPI_BLE_ENABLE_PASSKEY` is unset in every shipped
+`sdkconfig.defaults.*`.
+
+The first four are covered by regression tests in [`tests/host/`](tests/host/).
+The BLE chunk-reassembly defects below are covered instead by
+[`tests/ci/check_ble_chunk_clamp.py`](tests/ci/check_ble_chunk_clamp.py), which
+fails on the pre-fix revision of each file and passes on the current tree — the
+reassembly functions are `static` inside translation units that need the
+ESP-IDF GATT headers, so there is no host harness for them yet. That is a gap,
+and it is why the check pairs clamps and frees structurally rather than relying
+on anyone re-reading these files.
 
 - **Stack buffer overflow parsing a device `chipset` string.**
   `ezlopi_core_devices.c` copied an attacker-supplied `chipset` value into a
@@ -41,6 +52,50 @@ the parsers involved. All four are covered by regression tests in
   that kept sending chunks past `total_len`, wrote past the end of the buffer.
   Now bounded by `EZPI_util_clamp_copy_len`, which takes the remaining
   destination space into account.
+
+- **The same unbounded copy in the BLE *provisioning* assembler — the sibling
+  that was missed.**
+  `ezpi_base64_decode_provisioning_info()` in
+  [`ezlopi_service_ble_provisioning.c`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c)
+  is a near-line-for-line copy of the dynamic-config function in the bullet
+  above. Only one of the two copies was fixed. The provisioning copy still did
+  `memcpy(base64_buffer + pos, data, len)` with `len` taken straight from the
+  chunk's JSON, where it has no enforced relation to the actual length of
+  `"data"`. A single 517-byte GATT write of
+  `{"total_len":1,"sequence":1,"len":100000,"data":"AA"}` satisfied the
+  completion test, allocated a two-byte staging buffer and then copied 100000
+  bytes out of a two-byte string into it — an over-read and an over-write in
+  one statement. This is the provisioning characteristic, so it is reached
+  before the payload's own `user_id` is looked at; the heap is already
+  corrupted by the time anything checks who is talking. `CONFIG_EZPI_BLE_ENABLE`
+  is `y` in `sdkconfig.defaults.esp32`, `.esp32c3` and `.esp32s3`, so this was
+  in every shipped build for those chips — the Kconfig `default n` is
+  overridden by all three.
+
+- **`total_len` was unbounded, which would have defeated the clamp anyway.**
+  Both assemblers size their staging buffer with `ezlopi_malloc(total_size + 1)`
+  on a `uint32_t`, so a claimed `total_len` of `0xFFFFFFFF` wraps the argument
+  to `0` while leaving `total_size - pos` at roughly 4GB of apparent room —
+  the clamp would then be computed from a number that no longer describes the
+  allocation and would permit the very overflow it exists to stop. Provisioning
+  now rejects any `total_len` outside `1..EZPI_BLE_PROV_MAX_BASE64_LEN`, which
+  is derived from the partition layout rather than picked: everything a
+  provisioning payload can persist lands below
+  `EZLOPI_FINFO_OFFSET_HUB_DATA` (`0x6000`), and base64 expands by 4/3, so 4/3
+  of that region already exceeds any storable payload.
+
+- **Unauthenticated heap exhaustion: three leaked cJSON trees per BLE write.**
+  `ezpi_provisioning_info_write_func()` parsed the envelope of every inbound
+  chunk and never freed it; the reassembly loop above parsed and leaked one
+  tree per chunk; and `ezpi_service_ble_serial_config_write()` in
+  [`ezlopi_service_ble_device_info.c`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_device_info.c)
+  leaked its whole tree on every write. Any client in range could exhaust the
+  heap one write at a time without authenticating. The third of these was found
+  by the CI check, not by hand — a careful manual read of the same two files
+  had already missed it, because the write handler *does* call `cJSON_Delete`,
+  just on a different variable. That is why the check pairs each parse with a
+  free of the same variable rather than asking whether a free appears anywhere
+  in the function.
 
 - **Double free in the UART reset handler.**
   `ezlopi_service_uart.c` called `cJSON_Delete` on `cj_sub_cmd`, which was
@@ -1244,6 +1299,32 @@ enumerators — so the live half of this component was never affected.
   against the original buggy code is worse than no suite, because it is
   evidence of nothing.
 
+- **New CI check for the BLE chunk-reassembly bug class,
+  [`tests/ci/check_ble_chunk_clamp.py`](tests/ci/check_ble_chunk_clamp.py).**
+  This one exists because of how its bug was found. There were two copies of
+  the chunk assembler, one pasted from the other; the clamp was added to one
+  and the other kept an unauthenticated remote heap overflow across a release.
+  Fixing the second copy does nothing about a third, and the two files are far
+  enough apart that no reviewer would connect them. So the rule is structural
+  rather than per-site: in the BLE sources, a function that reads a chunk
+  length out of a JSON envelope and then calls `memcpy` must also call
+  `EZPI_util_clamp_copy_len`, and every parsed cJSON tree must be freed through
+  the variable it was parsed into.
+
+  It earned its place immediately — the lifetime rule found a third leak, in
+  `ezpi_service_ble_serial_config_write()`, in a file that had just been read
+  through by hand looking for exactly that.
+
+  Like the other two `tests/ci/` checks it self-tests on every run, and for the
+  same reason: the first draft of the lifetime rule asked only whether a
+  function called `cJSON_Delete` anywhere, which the provisioning write handler
+  satisfied while leaking — it parsed two trees and freed one. That shape is
+  now a fixture (`SELF_TEST['one_of_two']`) asserted to report exactly one
+  leak, alongside the unclamped-`memcpy` shape. Verified end to end by running
+  the finished check against the pre-fix revision of both files, where it
+  reports all four defects at the right functions, and against the current
+  tree, where it reports none.
+
 - **`ezlopi-util-uuid` joined the suite** — `tests/host/test_uuid.c`, 431
   checks. It ties MB1013 for the shortest build rule in the `Makefile` — one
   `-I`, its own directory, no stubs — but it reached that point differently,
@@ -1808,6 +1889,41 @@ enumerators — so the live half of this component was never affected.
 ## Known gaps
 
 Listed because a changelog that only mentions what was finished is misleading.
+
+- **The BLE chunk accumulator is still unbounded, and is not reset on
+  disconnect.** Separate from the overflow fixed above, and deliberately not
+  fixed in the same change. Every write handler calls
+  `EZPI_core_ble_buffer_create()` / `EZPI_core_ble_buffer_add_to_buffer()` at
+  the top, before parsing or validating anything, and the list is only freed
+  when the completion test `((sequence - 1) * 400 + len) >= total_len` passes.
+  A client that repeats `{"total_len":99999999,"sequence":1,"len":1,"data":"A"}`
+  never satisfies that test, so each write appends a node holding a copy of the
+  payload and nothing ever frees it.
+
+  `ESP_GATTS_DISCONNECT_EVT` in
+  [`ezlopi_core_ble_gatt.c`](ezlopi-core/ezlopi-core-ble/ezlopi_core_ble_gatt.c)
+  only sets `disconnected_service->connected = false` — it frees no buffers. So
+  the growth is not even bounded per connection: connect, send one
+  never-completing chunk, disconnect, repeat. It also means a half-finished
+  transfer from one client is still in the list when the next client starts, and
+  the two get concatenated.
+
+  Two things make it worse than a plain leak. `EZPI_core_ble_buffer_free_buffer()`
+  recurses once per node, so a list long enough to matter risks blowing a small
+  FreeRTOS task stack at the moment it is finally freed. And the accumulator is
+  a single file-scope pointer per characteristic, so there is no notion of which
+  client the partial data belongs to.
+
+  Not fixed here because the accumulator lives in
+  [`ezlopi_core_ble_buffer.c`](ezlopi-core/ezlopi-core-ble/ezlopi_core_ble_buffer.c)
+  and is shared by the provisioning, dynamic-config, Wi-Fi, device-info and
+  Improv characteristics, which have different legitimate payload sizes. A cap
+  picked without knowing the real maximum for each one risks refusing a valid
+  transfer, and "do not break the existing Ezlo provisioning flow" outranks
+  closing a memory-exhaustion path on this branch. The clamp fixes above are
+  safe in a way a cap is not: they only ever restrict a copy that was already
+  out of bounds. The right fix is probably a per-characteristic byte budget
+  plus a free on disconnect, and it needs a real app transfer to size it.
 
 - **Three sets of real-looking device provisioning credentials are committed in
   `ezlopi-services/ezlopi-service-webprov/ezlopi_test_prov.c`, and this change

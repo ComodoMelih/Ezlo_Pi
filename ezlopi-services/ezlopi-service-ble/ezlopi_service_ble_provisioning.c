@@ -65,6 +65,7 @@
 
 #include "cjext.h"
 #include "ezlopi_util_trace.h"
+#include "ezlopi_util_sanitize.h"
 #include "EZLOPI_USER_CONFIG.h"
 
 #include "ezlopi_core_nvs.h"
@@ -108,6 +109,33 @@
  *
  */
 #define CJ_GET_NUMBER(name) cJSON_GetNumberValue(cJSON_GetObjectItem(__FUNCTION__, root, name))
+
+/**
+ * @brief Largest "total_len" a provisioning write may claim.
+ *
+ * total_len counts base64 characters -- see ezpi_base64_decode_provisioning_info(),
+ * which sizes its base64 staging buffer at total_len + 1 and fills it with the
+ * sum of the chunks' "len" fields. It is attacker-controlled: it arrives in a
+ * BLE write before anything in this file has authenticated anybody.
+ *
+ * A bound is needed for correctness, not just for thrift. total_len + 1 is a
+ * uint32 addition, so a claim of 0xFFFFFFFF wraps it to 0, ezlopi_malloc(0)
+ * hands back either NULL or a minimal block, and the "total_size - pos"
+ * argument to EZPI_util_clamp_copy_len() below is then ~4GB of apparent room.
+ * The clamp would be computed from a number that no longer describes the
+ * allocation and would permit the very overflow it exists to stop. Capping
+ * total_len first is what makes that clamp meaningful.
+ *
+ * The value is derived rather than picked. Everything a provisioning payload
+ * can persist lands in the connection-data region of the factory partition,
+ * which ends where the hub-data region begins at EZLOPI_FINFO_OFFSET_HUB_DATA
+ * (0x6000). A decoded config bigger than that region cannot be stored whatever
+ * it claims, and base64 expands by 4/3, so 4/3 of the region is already more
+ * than any usable payload. Legitimate writes are nowhere near it: the three
+ * PEM fields are capped at 0x1000 each by EZLOPI_FINFO_LEN_CA_CERTIFICATE and
+ * its siblings.
+ */
+#define EZPI_BLE_PROV_MAX_BASE64_LEN ((EZLOPI_FINFO_OFFSET_HUB_DATA / 3u) * 4u)
 
 /*******************************************************************************
  *                          Static Function Prototypes
@@ -468,6 +496,14 @@ static void ezpi_provisioning_info_write_func(esp_gatt_value_t *value, esp_ble_g
                         g_provisioning_linked_buffer = NULL;
                     }
                 }
+
+                /* root holds a parsed copy of this chunk's envelope and nothing
+                 * below keeps a pointer into it, but it was never released --
+                 * so every chunk of every provisioning write leaked a whole
+                 * cJSON tree. Unauthenticated: the leak happens on any write to
+                 * this characteristic, valid or not, because the only thing
+                 * between the write and the parse is a length check. */
+                cJSON_Delete(__FUNCTION__, root);
             }
         }
     }
@@ -615,14 +651,28 @@ static void ezpi_provisioning_info_read_func(esp_gatt_value_t *value, esp_ble_ga
 static char *ezpi_base64_decode_provisioning_info(uint32_t total_size)
 {
     char *decoded_config_json = NULL;
-    char *base64_buffer = ezlopi_malloc(__FUNCTION__, total_size + 1);
+    char *base64_buffer = NULL;
 
     TRACE_W("tatal data length: %d", total_size);
+
+    /* See EZPI_BLE_PROV_MAX_BASE64_LEN. This has to happen before the
+    ** allocation below, because total_size + 1 is what wraps. */
+    if ((0 == total_size) || (total_size > EZPI_BLE_PROV_MAX_BASE64_LEN))
+    {
+        TRACE_E("total_len %d is outside 1..%d, refusing", total_size, (uint32_t)EZPI_BLE_PROV_MAX_BASE64_LEN);
+        return NULL;
+    }
+
+    base64_buffer = ezlopi_malloc(__FUNCTION__, total_size + 1);
 
     if (base64_buffer)
     {
         uint32_t pos = 0;
         s_linked_buffer_t *tmp_prov_buffer = g_provisioning_linked_buffer;
+
+        /* If the very first chunk carries no data member, the strlen() and the
+         * trace below would both read this buffer uninitialised. */
+        base64_buffer[0] = '\0';
 
         while (tmp_prov_buffer)
         {
@@ -633,6 +683,28 @@ static char *ezpi_base64_decode_provisioning_info(uint32_t total_size)
                 char *data = CJ_GET_STRING(ezlopi_data_str);
                 if (data)
                 {
+                    /* len and the data member both come straight off the wire,
+                     * and base64_buffer is only total_size + 1 bytes. Copying
+                     * len bytes unchecked let a client whose chunks claim more
+                     * than total_len -- or whose len exceeds the string it
+                     * actually sent -- read past the end of the parsed string
+                     * and write past the end of this heap block. "len" is a
+                     * JSON number with no enforced relation to the length of
+                     * "data" at all, so a single 517-byte BLE write claiming
+                     * {"total_len":1,"sequence":1,"len":100000,"data":"AA"}
+                     * was enough to reach it.
+                     *
+                     * This is the same fix already carried by the near-identical
+                     * ezpi_base64_decode_dynamic_config(); the two functions are
+                     * copies of each other and only one of them had been
+                     * corrected. */
+                    uint32_t safe_len = EZPI_util_clamp_copy_len(len, (uint32_t)strlen(data), total_size - pos);
+                    if (safe_len != len)
+                    {
+                        TRACE_E("chunk claimed %d byte(s), only %d safe at pos %d of %d, truncating", len, safe_len, pos, total_size);
+                    }
+                    len = safe_len;
+
                     memcpy(base64_buffer + pos, data, len);
                     pos += len;
                     base64_buffer[pos] = '\0';
@@ -641,6 +713,10 @@ static char *ezpi_base64_decode_provisioning_info(uint32_t total_size)
                 {
                     TRACE_E("DATA IS NULL");
                 }
+
+                /* data pointed into root, so this has to come after the copy.
+                 * It was missing entirely, leaking one tree per chunk. */
+                cJSON_Delete(__FUNCTION__, root);
             }
             else
             {

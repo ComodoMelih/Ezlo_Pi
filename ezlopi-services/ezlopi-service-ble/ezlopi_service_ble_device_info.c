@@ -622,6 +622,14 @@ static void ezpi_service_ble_serial_config_write(esp_gatt_value_t *value, esp_bl
                 {
                     TRACE_W("Configuration unchanged !");
                 }
+
+                /* Every value above was copied out of root into a local by the
+                 * CJSON_GET_VALUE_* macros, so nothing points into the tree
+                 * once they have run -- but it was never freed. Each write to
+                 * this characteristic leaked the whole parsed tree, and the
+                 * characteristic is writable by any connected client. Found by
+                 * tests/ci/check_ble_chunk_clamp.py, not by hand. */
+                cJSON_Delete(__FUNCTION__, root);
             }
         }
     }

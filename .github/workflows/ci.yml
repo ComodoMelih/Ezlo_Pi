@@ -99,6 +99,20 @@ jobs:
       - name: JSON string destinations are initialised
         run: python3 tests/ci/check_uninit_json_buffers.py
 
+      # The BLE chunk-reassembly functions copy a wire-supplied "len" bytes out
+      # of a wire-supplied "data" string into a buffer sized from a
+      # wire-supplied "total_len". There were two near-identical copies of that
+      # function, one pasted from the other; the clamp was added to one and the
+      # other kept an unauthenticated remote heap overflow. The characteristic
+      # is ESP_GATT_PERM_WRITE with no passkey in any shipped defaults file.
+      #
+      # The same check pairs every parsed cJSON tree with a free of that same
+      # variable, which is how a third leak in a different file turned up. It
+      # self-tests against both the unclamped shape and the
+      # two-trees-one-free shape on every run.
+      - name: BLE chunk copies are clamped and trees are freed
+        run: python3 tests/ci/check_ble_chunk_clamp.py
+
       # 83 files used to include the generated config as
       # "../../build/config/sdkconfig.h", which pins both the build
       # directory's name and its position relative to the source file -- so the
