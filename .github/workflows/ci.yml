@@ -125,6 +125,26 @@ jobs:
       - name: TRACE_* format strings stay compiler-checked
         run: python3 tests/ci/check_trace_format_attr.py
 
+      # EZPI_core_factory_info_v3_set_basic() copied each string field out of a
+      # caller-supplied pointer using the *destination field's* length as the
+      # count. Two of three callers were safe only by coincidence -- their stack
+      # arrays happen to be declared at exactly those lengths. webprov's are
+      # not: 40/40/128/300 against fields of 0x7E/0x7E/0x100/0x200, so four
+      # copies read 512 bytes of adjacent stack and wrote them into the
+      # factory-info partition, which is readable back over BLE device-info and
+      # the UART status query without authenticating.
+      #
+      # Confirmed as a genuine out-of-bounds read, not just an eyeballed one:
+      # the same buffer layout under -fsanitize=address reports
+      # "stack-buffer-overflow ... READ of size 126" and the bounded version
+      # does not, while storing identical bytes.
+      #
+      # No compiler flag catches this -- set_basic() just received a pointer
+      # and a length. The fix is one helper that bounds the copy by the source,
+      # and this check is what stops it being inlined back into a memcpy.
+      - name: factory-info field copies stay bounded by the source
+        run: python3 tests/ci/check_finfo_bounded_store.py
+
       # 83 files used to include the generated config as
       # "../../build/config/sdkconfig.h", which pins both the build
       # directory's name and its position relative to the source file -- so the

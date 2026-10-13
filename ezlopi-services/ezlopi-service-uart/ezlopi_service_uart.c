@@ -585,6 +585,15 @@ static ezlopi_error_t ezpi_service_uart_process_provisioning_api(const cJSON *cj
             s_basic_factory_info_t *ezlopi_config_basic = ezlopi_malloc(__FUNCTION__, sizeof(s_basic_factory_info_t));
             if (ezlopi_config_basic)
             {
+                /* The BLE sibling zeroes this struct and this copy did not,
+                ** leaving ->version and ->user_id holding whatever was on the
+                ** heap. Not a live defect: EZPI_core_factory_info_v3_set_basic()
+                ** reads neither of those two members, which was checked rather
+                ** than assumed. Zeroed anyway so that the day it does start
+                ** reading user_id, this path hands it NULL instead of a stale
+                ** heap pointer. */
+                memset(ezlopi_config_basic, 0, sizeof(s_basic_factory_info_t));
+
                 char device_name[EZLOPI_FINFO_LEN_DEVICE_NAME];
                 char manufacturer[EZLOPI_FINFO_LEN_MANUF_NAME];
                 char brand[EZLOPI_FINFO_LEN_BRAND_NAME];
@@ -644,6 +653,19 @@ static ezlopi_error_t ezpi_service_uart_process_provisioning_api(const cJSON *cj
                 EZPI_core_factory_info_v3_set_ca_cert(cJSON_GetObjectItem(__FUNCTION__, cj_data, ezlopi_signing_ca_certificate_str));
                 EZPI_core_factory_info_v3_set_ssl_shared_key(cJSON_GetObjectItem(__FUNCTION__, cj_data, ezlopi_ssl_shared_key_str));
                 EZPI_core_factory_info_v3_set_ssl_private_key(cJSON_GetObjectItem(__FUNCTION__, cj_data, ezlopi_ssl_private_key_str));
+
+                /* This was missing, so every cmd:7 write leaked
+                ** sizeof(s_basic_factory_info_t). The BLE sibling that this
+                ** function was copied from does free it
+                ** (ezlopi_service_ble_provisioning.c, right after the same
+                ** three setter calls); the copy dropped the line.
+                **
+                ** Unlike the BLE path this one is reachable without any
+                ** authentication at all -- see the disabled guard above -- so
+                ** it can be driven in a loop by anything on the serial line.
+                ** The struct is only pointers and scalars, so this is the
+                ** whole leak; the strings it points at are the caller's stack. */
+                ezlopi_free(__FUNCTION__, ezlopi_config_basic);
 
                 uart_response = 1;
             }

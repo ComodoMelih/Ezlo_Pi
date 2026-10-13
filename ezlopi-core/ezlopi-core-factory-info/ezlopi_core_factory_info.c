@@ -585,6 +585,47 @@ char *EZPI_core_factory_info_v3_get_ezlopi_config(void)
     return ret;
 }
 
+/* Stores one string into a fixed-size factory-info field, copying only as far
+** as the source string actually goes.
+**
+** This replaces a memset-then-memcpy pair that was repeated for all thirteen
+** string fields below, each copying the *field's* length out of a pointer the
+** caller supplied:
+**
+**     memset(tmp_buffer + REL_OFFSET_DEVICE_UUID, 0, LEN_DEVICE_UUID);
+**     memcpy(tmp_buffer + REL_OFFSET_DEVICE_UUID, cfg->device_uuid, LEN_DEVICE_UUID);
+**
+** Two of the three callers get away with that because their stack arrays are
+** declared at exactly those lengths and zeroed first. The third does not.
+** __provision_update() in ezlopi_service_webprov.c declares
+** tmp_dev_uuid[40], tmp_prov_uuid[40], tmp_cloud_server[128] and
+** tmp_provision_token[300], while the fields are 0x7E, 0x7E, 0x100 and 0x200
+** -- so the copies ran 86, 86, 128 and 212 bytes past the end of those
+** arrays, 512 bytes of adjacent stack in total, and wrote every one of them
+** into the factory-info partition. From there they are readable back out over
+** BLE device-info and the UART status query, neither of which authenticates.
+**
+** Bounding by the source length fixes all three callers at once and is
+** byte-for-byte identical for the two that were already correct: the field is
+** still zeroed first, and their source arrays are zero-filled past the
+** string, so the bytes that are no longer copied were zeros either way. The
+** alternative -- enlarging webprov's four buffers to match the field sizes --
+** would have added 512 bytes to that task's stack to keep copying padding
+** that the memset already wrote.
+**
+** strnlen() stops at the field length, so the read is bounded even if a
+** future caller hands over something that is not terminated; that is no worse
+** than what this did unconditionally before. */
+static void __EZPI_core_factory_info_v3_store_str(char *field, const char *src, size_t field_len)
+{
+    memset(field, 0, field_len);
+
+    if (src)
+    {
+        memcpy(field, src, strnlen(src, field_len));
+    }
+}
+
 int EZPI_core_factory_info_v3_set_basic(s_basic_factory_info_t *ezlopi_config_basic)
 {
     int ret = 0;
@@ -600,41 +641,35 @@ int EZPI_core_factory_info_v3_set_basic(s_basic_factory_info_t *ezlopi_config_ba
                 {
                     if (NULL != ezlopi_config_basic->device_name)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_NAME, 0, EZLOPI_FINFO_LEN_DEVICE_NAME);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_NAME, ezlopi_config_basic->device_name, EZLOPI_FINFO_LEN_DEVICE_NAME);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_NAME, ezlopi_config_basic->device_name, EZLOPI_FINFO_LEN_DEVICE_NAME);
                         TRACE_S("device_name: %s", ezlopi_config_basic->device_name);
                     }
 
                     if (NULL != ezlopi_config_basic->manufacturer)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_MANUF_NAME, 0, EZLOPI_FINFO_LEN_MANUF_NAME);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_MANUF_NAME, ezlopi_config_basic->manufacturer, EZLOPI_FINFO_LEN_MANUF_NAME);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_MANUF_NAME, ezlopi_config_basic->manufacturer, EZLOPI_FINFO_LEN_MANUF_NAME);
                         TRACE_S("manufacturer: %s", ezlopi_config_basic->manufacturer);
                     }
 
                     if (NULL != ezlopi_config_basic->brand)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_BRAND_NAME, 0, EZLOPI_FINFO_LEN_BRAND_NAME);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_BRAND_NAME, ezlopi_config_basic->brand, EZLOPI_FINFO_LEN_BRAND_NAME);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_BRAND_NAME, ezlopi_config_basic->brand, EZLOPI_FINFO_LEN_BRAND_NAME);
                         TRACE_S("brand: %s", ezlopi_config_basic->brand);
                     }
                     if (NULL != ezlopi_config_basic->model_number)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_MODEL_NAME, 0, EZLOPI_FINFO_LEN_MODEL_NAME);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_MODEL_NAME, ezlopi_config_basic->model_number, EZLOPI_FINFO_LEN_MODEL_NAME);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_MODEL_NAME, ezlopi_config_basic->model_number, EZLOPI_FINFO_LEN_MODEL_NAME);
                         TRACE_S("model_number: %s", ezlopi_config_basic->model_number);
                     }
                     if (NULL != ezlopi_config_basic->device_type)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_EZLOPI_DEVICE_TYPE, 0, EZLOPI_FINFO_LEN_EZLOPI_DEVICE_TYPE);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_EZLOPI_DEVICE_TYPE, ezlopi_config_basic->device_type, EZLOPI_FINFO_LEN_EZLOPI_DEVICE_TYPE);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_EZLOPI_DEVICE_TYPE, ezlopi_config_basic->device_type, EZLOPI_FINFO_LEN_EZLOPI_DEVICE_TYPE);
                         TRACE_S("device_type: %s", ezlopi_config_basic->device_type);
                     }
 
                     if (NULL != ezlopi_config_basic->device_mac)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_MAC, 0, EZLOPI_FINFO_LEN_DEVICE_MAC);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_MAC, ezlopi_config_basic->device_mac, EZLOPI_FINFO_LEN_DEVICE_MAC);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_MAC, ezlopi_config_basic->device_mac, EZLOPI_FINFO_LEN_DEVICE_MAC);
                         TRACE_S("EzloPi Device MAC: %s", ezlopi_config_basic->device_mac);
                     }
 
@@ -672,8 +707,7 @@ int EZPI_core_factory_info_v3_set_basic(s_basic_factory_info_t *ezlopi_config_ba
 
                     if (NULL != ezlopi_config_basic->local_key)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_LOCAL_KEY, 0, EZLOPI_FINFO_LEN_LOCAL_KEY);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_LOCAL_KEY, ezlopi_config_basic->local_key, EZLOPI_FINFO_LEN_LOCAL_KEY);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_LOCAL_KEY, ezlopi_config_basic->local_key, EZLOPI_FINFO_LEN_LOCAL_KEY);
                         /* Length only. This was
                         **     TRACE_S("local_key: %s", ...)
                         ** which printed the device's local API credential to
@@ -686,33 +720,28 @@ int EZPI_core_factory_info_v3_set_basic(s_basic_factory_info_t *ezlopi_config_ba
 
                     if (NULL != ezlopi_config_basic->cloud_server)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_CLOUD_SERVER_URL, 0, EZLOPI_FINFO_LEN_CLOUD_SERVER_URL);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_CLOUD_SERVER_URL, ezlopi_config_basic->cloud_server, EZLOPI_FINFO_LEN_CLOUD_SERVER_URL);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_CLOUD_SERVER_URL, ezlopi_config_basic->cloud_server, EZLOPI_FINFO_LEN_CLOUD_SERVER_URL);
                         TRACE_S("cloud_server: %s", ezlopi_config_basic->cloud_server);
                     }
                     if (NULL != ezlopi_config_basic->device_uuid)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_UUID, 0, EZLOPI_FINFO_LEN_DEVICE_UUID);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_UUID, ezlopi_config_basic->device_uuid, EZLOPI_FINFO_LEN_DEVICE_UUID);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_DEVICE_UUID, ezlopi_config_basic->device_uuid, EZLOPI_FINFO_LEN_DEVICE_UUID);
                         TRACE_S("device_uuid: %s", ezlopi_config_basic->device_uuid);
                     }
                     if (NULL != ezlopi_config_basic->prov_uuid)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_UUID, 0, EZLOPI_FINFO_LEN_PROV_UUID);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_UUID, ezlopi_config_basic->prov_uuid, EZLOPI_FINFO_LEN_PROV_UUID);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_UUID, ezlopi_config_basic->prov_uuid, EZLOPI_FINFO_LEN_PROV_UUID);
                         TRACE_S("prov_uuid: %s", ezlopi_config_basic->prov_uuid);
                     }
                     if (NULL != ezlopi_config_basic->provision_server)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_SERVER_URL, 0, EZLOPI_FINFO_LEN_PROVISIONING_SERVER_URL);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_SERVER_URL, ezlopi_config_basic->provision_server, EZLOPI_FINFO_LEN_PROVISIONING_SERVER_URL);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_SERVER_URL, ezlopi_config_basic->provision_server, EZLOPI_FINFO_LEN_PROVISIONING_SERVER_URL);
                         TRACE_S("provision_server: %s", ezlopi_config_basic->provision_server);
                     }
 
                     if (NULL != ezlopi_config_basic->provision_token)
                     {
-                        memset(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_TOKEN, 0, EZLOPI_FINFO_LEN_PROVISIONING_TOKEN);
-                        memcpy(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_TOKEN, ezlopi_config_basic->provision_token, EZLOPI_FINFO_LEN_PROVISIONING_TOKEN);
+                        __EZPI_core_factory_info_v3_store_str(tmp_buffer + EZLOPI_FINFO_REL_OFFSET_PROVISIONING_TOKEN, ezlopi_config_basic->provision_token, EZLOPI_FINFO_LEN_PROVISIONING_TOKEN);
                         /* Length only, same reason as local_key above: this
                         ** token authorises provisioning against the cloud. */
                         TRACE_S("provision_token: set (%d chars)", (int)strlen(ezlopi_config_basic->provision_token));
