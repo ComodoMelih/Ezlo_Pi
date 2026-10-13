@@ -58,6 +58,45 @@ extern "C"
 
     void EZPI_core_cjson_trace(const char *name_str, cJSON *cj_object);
 
+    /* 87 call sites pass the address of an enum-typed struct field to
+    ** CJSON_GET_VALUE_INT, which forwards it as an int * -- for example
+    ** CJSON_GET_VALUE_INT(cjson_device, ezlopi_dev_type_str,
+    ** item->interface_type), where the field is an
+    ** e_ezlopi_device_interface_type_t. That is why the build emits 87
+    ** -Wincompatible-pointer-types warnings from the macro on line ~84.
+    **
+    ** Today that is a type pun and not a memory error: with this toolchain and
+    ** this project's flags an enum is exactly int-sized and int-aligned, so
+    ** EZPI_core_cjson_get_value_int() writes 4 bytes into a 4-byte field.
+    ** Verified, not assumed -- the compiler was asked directly, and the same
+    ** probe fails under -fshort-enums, which confirms it measures something.
+    ** There is no -fshort-enums anywhere in the generated
+    ** compile_commands.json.
+    **
+    ** But that safety is an ABI accident, not a property of the code. Narrow
+    ** the enums -- -fshort-enums, a different target, a toolchain that packs
+    ** them -- and all 87 sites start writing 4 bytes into fields as small as
+    ** one, silently corrupting whatever struct members sit next to them.
+    **
+    ** The call sites are deliberately left alone: changing 87 of them across
+    ** the device drivers is exactly the kind of churn that risks altering
+    ** working Ezlo behaviour for no present defect. Instead the assumption
+    ** they all rest on is made explicit here, so the day it stops holding the
+    ** build stops rather than the firmware misbehaving in the field. */
+    typedef enum e_ezpi_enum_abi_probe
+    {
+        EZPI_ENUM_ABI_PROBE_ZERO = 0,
+        EZPI_ENUM_ABI_PROBE_ONE
+    } e_ezpi_enum_abi_probe_t;
+
+    _Static_assert(sizeof(e_ezpi_enum_abi_probe_t) == sizeof(int),
+                   "An enum is no longer int-sized, so the 87 call sites that "
+                   "pass an enum field to CJSON_GET_VALUE_INT now write past "
+                   "it. Fix those call sites before changing this.");
+    _Static_assert(__alignof__(e_ezpi_enum_abi_probe_t) == __alignof__(int),
+                   "An enum is no longer int-aligned; see the comment above "
+                   "CJSON_GET_VALUE_INT.");
+
     int EZPI_core_cjson_get_value_gpio(cJSON *cj_root, const char *item_name_str);
     void EZPI_core_cjson_get_value_int(cJSON *cj_root, const char *item_name_str, int *item_val);
     void EZPI_core_cjson_get_value_bool(cJSON *cj_root, const char *item_name_str, bool *item_val);

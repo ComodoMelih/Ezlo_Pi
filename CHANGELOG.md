@@ -1266,6 +1266,38 @@ enumerators — so the live half of this component was never affected.
 
 ### Build and configuration — [infra]
 
+- **The enum-to-`int *` assumption under `CJSON_GET_VALUE_INT` is now
+  compile-time enforced.** The build emits 87 `-Wincompatible-pointer-types`
+  warnings from
+  [`ezlopi_core_cjson_macros.h`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_cjson_macros.h),
+  all the same shape: a device driver passes an enum-typed struct field to
+  `CJSON_GET_VALUE_INT`, which forwards its address as an `int *`, so
+  `EZPI_core_cjson_get_value_int()` writes an `int` through a pointer to an
+  enum.
+
+  **This is not a live defect**, and it is worth being precise about why
+  rather than filing it as a scare. On this toolchain with this project's
+  flags an enum is exactly int-sized and int-aligned, so the write is 4 bytes
+  into a 4-byte field. That was checked by asking the compiler, and the same
+  probe fails under `-fshort-enums`, which is what establishes it was
+  measuring something; there is no `-fshort-enums` anywhere in the generated
+  `compile_commands.json`.
+
+  The safety is an ABI accident, though, not a property of the code. Narrow
+  the enums and all 87 sites begin writing 4 bytes into fields as small as
+  one, corrupting adjacent struct members — silently, in drivers, at
+  configuration-parse time.
+
+  The 87 call sites are **deliberately not changed**: editing that many lines
+  across the device drivers to fix no present defect is exactly the churn most
+  likely to disturb working Ezlo behaviour. Instead the assumption they rest
+  on is stated as two `_Static_assert`s next to the macro, so if it ever stops
+  holding the build stops with a message naming the problem, instead of the
+  firmware misbehaving in the field. Verified by appending `-fshort-enums` to
+  the real project build and confirming the assert fires with that message,
+  then removing it; esp32 and esp32c3 (RISC-V, a different ABI) both build
+  clean with binary sizes unchanged, since the asserts cost nothing.
+
 - **`REQUIRES tinyusb` was unconditional while every use of it was not.**
   `ezlopi_service_uart.c` wraps all of its USB-CDC code — includes and calls
   alike — in `#if !defined(CONFIG_IDF_TARGET_ESP32) && !defined(CONFIG_IDF_TARGET_ESP32C3)`,
