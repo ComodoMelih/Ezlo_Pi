@@ -404,6 +404,110 @@ static void test_detach_clears_next_and_shifts_indices(void)
     cJSON_Delete(WHO, arr);
 }
 
+/**
+ * @brief str_value_len is not the length of the string, and the two parsers
+ *        do not agree about it either.
+ *
+ * This is pinned down here because it is a trap rather than a feature, and
+ * because the whole firmware is written around it without ever saying so.
+ *
+ * cJSON_Parse goes through parse_string(), which sets str_value_len from an
+ * *allocation* calculation -- the span from the opening quote to the closing
+ * quote, less any escape backslashes (cjext.c:723-726). For a string with no
+ * escapes that is strlen + 1. cJSON_CreateString sets it from strlen()
+ * (cjext.c:2890), so an item built in code and an item parsed off the wire
+ * report different numbers for the same text. cJSON_ParseWithRef subtracts the
+ * extra one (cjext.c:1154) and additionally leaves valuestring pointing into
+ * the payload, terminated by a quote and not a NUL.
+ *
+ * Nothing in the firmware noticed, because str_value_len is only ever used
+ * where an over-estimate is harmless: as a precision in "%.*s", as a length
+ * handed to strncmp, or as a buffer size. All of those stop at the first NUL.
+ * The tree's convention is visible in EZPI_STRNCMP_IF_EQUAL's own note in
+ * ezlopi_cloud_constants.h ("Add '+1' ... consider the '\0' char also") and in
+ * every caller that pairs str_value_len with strlen(literal) + 1.
+ *
+ * Code that does arithmetic on it does notice. A handler that bounds-checked
+ * an incoming field with it rejected a value of exactly the maximum length as
+ * one byte too long, and would have written its terminator one byte past a
+ * buffer sized for the maximum. That is the bug this test exists to stop
+ * someone rediscovering, and the reason the comment at
+ * ezlopi_core_api.c:89 warns against switching to the reference parser.
+ *
+ * These checks assert current behaviour, not desired behaviour. If cjext is
+ * ever made consistent, this test should fail -- and then every
+ * str_value_len + 1 pairing in the tree has to be revisited in the same
+ * commit.
+ */
+static void test_str_value_len_includes_the_terminator(void)
+{
+    const char *const text = "{\"k\":\"abcd\"}";
+
+    cJSON *parsed = cJSON_Parse(WHO, text);
+
+    CHECK(NULL != parsed, "fixture failed to parse");
+
+    if (NULL != parsed)
+    {
+        cJSON *value = cJSON_GetObjectItem(WHO, parsed, "k");
+
+        CHECK(NULL != value, "member lookup failed");
+
+        if (NULL != value)
+        {
+            CHECK(4u == strlen(value->valuestring),
+                  "the parsed value is NUL-terminated and four characters long");
+
+            /* The claim itself. */
+            CHECK(5u == value->str_value_len,
+                  "a parsed 4-character string reports str_value_len 5, got %u",
+                  (unsigned)value->str_value_len);
+        }
+
+        cJSON_Delete(WHO, parsed);
+    }
+
+    /* The other construction path, for the same four characters. */
+    cJSON *created = cJSON_CreateString(WHO, "abcd");
+
+    CHECK(NULL != created, "CreateString failed");
+
+    if (NULL != created)
+    {
+        CHECK(4u == created->str_value_len,
+              "a string built with cJSON_CreateString reports strlen, got %u",
+              (unsigned)created->str_value_len);
+
+        cJSON_Delete(WHO, created);
+    }
+
+    /* And an escape, where the over-estimate is larger than one: the source
+     * spans six characters between the quotes, two of which are a backslash
+     * pair that becomes a single byte. */
+    cJSON *escaped = cJSON_Parse(WHO, "{\"k\":\"a\\tbcd\"}");
+
+    CHECK(NULL != escaped, "escaped fixture failed to parse");
+
+    if (NULL != escaped)
+    {
+        cJSON *value = cJSON_GetObjectItem(WHO, escaped, "k");
+
+        CHECK(NULL != value, "escaped member lookup failed");
+
+        if (NULL != value)
+        {
+            CHECK(5u == strlen(value->valuestring),
+                  "the unescaped value is five bytes, got %u",
+                  (unsigned)strlen(value->valuestring));
+            CHECK(6u == value->str_value_len,
+                  "and still reports one more than that, got %u",
+                  (unsigned)value->str_value_len);
+        }
+
+        cJSON_Delete(WHO, escaped);
+    }
+}
+
 /*******************************************************************************
  *                          Public Function Definitions
  *******************************************************************************/
@@ -430,6 +534,7 @@ int main(void)
     test_type_predicates_are_null_safe();
     test_borrowed_member_is_still_linked_to_siblings();
     test_detach_clears_next_and_shifts_indices();
+    test_str_value_len_includes_the_terminator();
 
     printf("%u check(s), %u failure(s)\n", tests_run, tests_failed);
 

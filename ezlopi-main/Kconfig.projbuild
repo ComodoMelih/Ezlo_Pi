@@ -120,6 +120,21 @@ menu "EzloPi User Config"
             accepts commands that operate relays, which is not something to
             inherit by upgrading.
 
+            The five settings below are fallback defaults, not the live
+            configuration. Each is stored in NVS and can be changed at run time
+            with the hub.mqtt.config.get, .set and .reset API methods, so
+            pointing a controller at a different broker does not need a
+            rebuild. A Kconfig value is used only when NVS holds nothing for
+            that setting, or holds something that no longer passes validation.
+
+            Those methods are served over the local websocket API, so runtime
+            configuration also needs CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER: the
+            method table only exists when a websocket transport is enabled.
+            With this option on and both websocket options off -- the shape the
+            firmware-mqtt CI job builds -- the settings below are the only way
+            to configure the broker. Changes apply on the next boot either way;
+            the client is created once at startup.
+
             Items with no sensible Home Assistant representation -- an array,
             an opaque token -- are not published, rather than published as an
             entity that reads "unknown" forever. RGB lights, and dimmers
@@ -138,6 +153,12 @@ menu "EzloPi User Config"
             and the service logs and stops rather than retrying an address
             that cannot work. An unreachable broker is retried forever, which
             is the right behaviour for one that is merely switched off.
+
+            Leaving this empty and setting the URI at run time with
+            hub.mqtt.config.set is the intended path for a shipped image: one
+            binary, configured per site. An empty URI from both sources leaves
+            the service inert rather than failing, which is also how MQTT is
+            switched off again without reflashing -- set the URI to "".
 
             mqtts:// needs CONFIG_MQTT_TRANSPORT_SSL, which the committed
             sdkconfig.defaults files currently turn off, plus a CA certificate
@@ -166,6 +187,14 @@ menu "EzloPi User Config"
             a broker account scoped to this controller rather than one that
             can administer the broker.
 
+            A password set at run time with hub.mqtt.config.set goes into NVS
+            instead, which is also plain text: NVS encryption requires flash
+            encryption, and all four committed sdkconfig.defaults files have
+            CONFIG_FLASH_ENCRYPTION_ENABLED unset. So the advice above applies
+            to both paths. hub.mqtt.config.get never returns the password, only
+            a passwordSet flag saying whether one exists -- which is enough for
+            a settings screen to tell "leave unchanged" apart from "clear".
+
     config EZPI_MQTT_TOPIC_PREFIX
         string "MQTT topic prefix for this controller's own topics"
         depends on EZPI_ENABLE_MQTT
@@ -182,7 +211,14 @@ menu "EzloPi User Config"
             orphans them: the old discovery payloads point at the old topics,
             so those entities go unavailable. New ones are published on the
             next connect and the stale ones have to be deleted in Home
-            Assistant.
+            Assistant. That is true of changing it here and of changing it with
+            hub.mqtt.config.set, which is why that method does not pretend the
+            change has taken effect -- it reports rebootRequired and leaves the
+            running client on the old topics until the next boot.
+
+            Unlike the URI and the credentials, this cannot be set to an empty
+            string. There is no topic to publish on without it, and accepting
+            "" would produce topics beginning with "/".
 
     config EZPI_MQTT_DISCOVERY_PREFIX
         string "Home Assistant discovery prefix"

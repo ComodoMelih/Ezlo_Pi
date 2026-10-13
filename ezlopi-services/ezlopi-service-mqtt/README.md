@@ -19,6 +19,58 @@ exactly as before.
 | `EZPI_MQTT_TOPIC_PREFIX` | `ezlopi` | State and command topics live under this. |
 | `EZPI_MQTT_DISCOVERY_PREFIX` | `homeassistant` | Must match Home Assistant's MQTT integration setting. |
 
+### Configuring it without a rebuild
+
+The five settings above are **fallback defaults, not the live configuration**.
+Each is stored in NVS and reachable over the local websocket API, so a shipped
+image can be pointed at a site's broker without a toolchain:
+
+| Method | Params | Result |
+|---|---|---|
+| `hub.mqtt.config.get` | none | `uri`, `username`, `topicPrefix`, `discoveryPrefix`, `passwordSet` |
+| `hub.mqtt.config.set` | any subset of `uri`, `username`, `password`, `topicPrefix`, `discoveryPrefix` | `rebootRequired: true` |
+| `hub.mqtt.config.reset` | none | `rebootRequired: true` |
+
+A Kconfig value is used only when NVS holds nothing for that setting, or holds
+something that no longer passes validation. `reset` clears all five, which
+returns the hub to whatever was compiled in.
+
+Things worth knowing before building a UI on this:
+
+- **`get` never returns the password.** It returns `passwordSet`, which is what
+  a settings screen actually needs: it distinguishes "leave the existing
+  password alone" from "clear it".
+- **`set` takes a subset and applies all of it or none of it.** Every supplied
+  field is validated before anything is written, so a typo in the URI cannot
+  also wipe the username. It is not a transaction — a power cut between two NVS
+  writes still leaves a partial apply — but a *rejected* request changes
+  nothing, which is the case that happens to people. A partially written
+  setting is revalidated when read and falls back to the compiled-in default.
+- **Over-long values are refused, not truncated.** A 200-character URI
+  shortened to 128 is still a valid URI, and would have been stored as an
+  address nobody typed.
+- **`""` is meaningful for three fields.** An empty `uri` is how MQTT is
+  switched off again without reflashing; empty `username`/`password` mean an
+  anonymous broker. The two prefixes cannot be empty. An absent field and an
+  empty one are therefore different things, and are treated as such.
+- **A password may contain spaces** and non-ASCII bytes; a topic prefix may
+  not, and may never contain `+` or `#`.
+- **Nothing takes effect until the next boot.** The client is created once at
+  startup, so both `set` and `reset` report `rebootRequired: true` rather than
+  implying the broker has already changed.
+- **Runtime configuration needs `CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER`**, because
+  the method table it lives in only exists when a websocket transport is
+  enabled. With MQTT on and both websocket options off — the shape the
+  `firmware-mqtt` CI job builds — Kconfig is the only way in.
+- Authentication is the transport's, not these methods': the local websocket
+  server refuses every method except `hub.offline.login.ui` until a user is
+  logged in, so these inherit that and deliberately do not add a second check.
+
+Host tests for the three methods are in `tests/host/test_mqtt_api.c` (96
+checks), and for the validators in `tests/host/test_mqttcfg.c` (106 checks).
+None of it has yet been exercised against a real broker on hardware; see "What
+has been verified" below.
+
 ## Topics
 
 The node id is `ezlopi_` plus the low three bytes of the Wi-Fi station MAC. It
@@ -136,7 +188,24 @@ code differs.
 The mapping and topic layers are host-tested under ASan/UBSan and were
 mutation-tested at 12/12 caught.
 
+The runtime configuration added later was built for four configurations, and
+with MQTT off the image is byte-identical in size to the pre-change baseline
+(0x1903f0 either way) — the new component costs the default builds nothing. A
+symbol dump was the check that mattered: before the API methods existed, all
+five NVS setters were unreferenced and the linker discarded them, so the hub
+could *read* a broker URI it had no way to write. All five link now.
+
+The three methods are host-tested (`tests/host/test_mqtt_api.c`, 96 checks
+under ASan/UBSan) and mutation-tested at 6/6 caught: storing before validating,
+truncating instead of refusing, returning the password, treating `""` as
+absent, and ignoring a failed write are each caught by the group that claims to
+cover them. The test also found two real bugs on its first run, which is the
+better argument for it: a value of exactly the maximum length was rejected
+because cJSON's `str_value_len` counts the terminator, and a password
+containing a space was refused because the credential check was sharing a
+helper with the URI path.
+
 **None of this has run on hardware.** No broker has been connected, no entity
-has appeared in a real Home Assistant, and no command has switched a real
-relay. The compile-time and host-level evidence above is exactly that, and
-nothing more.
+has appeared in a real Home Assistant, no command has switched a real relay,
+and no `hub.mqtt.config.set` has been sent to a live websocket. The
+compile-time and host-level evidence above is exactly that, and nothing more.

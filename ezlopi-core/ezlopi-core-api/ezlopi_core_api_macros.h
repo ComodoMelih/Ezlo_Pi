@@ -211,6 +211,21 @@ extern "C"
     CLOUD_METHOD("hub.setting.value.set", EZPI_setting_value_set, EZPI_setting_value_set_broadcast_updater)
     CLOUD_METHOD("hub.settings.list", EZPI_settings_list, NULL)
 
+#ifdef CONFIG_EZPI_ENABLE_MQTT
+    /* Pointing this controller at a broker without rebuilding it. Guarded
+    ** because the handlers themselves are inside the same #ifdef -- with MQTT
+    ** off they do not exist, so an unguarded row here would fail to link every
+    ** configuration except the one CI job that enables MQTT.
+    **
+    ** No updater on any of the three: an updater broadcasts a change to
+    ** subscribers, and these settings only take effect on the next boot, so
+    ** there is nothing to tell anyone about yet. The result carries
+    ** "rebootRequired" instead. */
+    CLOUD_METHOD("hub.mqtt.config.get", EZPI_CLOUD_mqtt_config_get, NULL)
+    CLOUD_METHOD("hub.mqtt.config.set", EZPI_CLOUD_mqtt_config_set, NULL)
+    CLOUD_METHOD("hub.mqtt.config.reset", EZPI_CLOUD_mqtt_config_reset, NULL)
+#endif // CONFIG_EZPI_ENABLE_MQTT
+
     // CLOUD_METHOD("hub.protect.signal.list", EZPI_cloud_protect_signal_list, NULL)
 
 #endif // (defined(CONFIG_EZPI_WEBSOCKET_CLIENT) || defined(EZPI_LOCAL_WEBSOCKET_SERVER))

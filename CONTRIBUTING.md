@@ -202,9 +202,9 @@ entry says so in those words.
 **That sweep has already been run, so don't run it again.** The obvious way to
 generalise the paragraph above is to ask the compiler which other files are in
 the same position — `gcc -fsyntax-only -I<the file's own directory> <file>`,
-with no stubs and no other include path. 32 of 246 first-party `.c` files pass,
-and 27 of those have no tests. The honest result is that the list is nearly
-empty of opportunity:
+with no stubs and no other include path. When that sweep was first run, 27 of
+the files that passed had no tests. The honest result is that the list is
+nearly empty of opportunity:
 
 | what they turned out to be | count |
 | --- | --- |
@@ -220,11 +220,50 @@ empty of opportunity:
 The one file with logic in it was `ezlopi-core-actions`, and it did have a
 defect. But the lesson is that "compiles with no stubs" selects for *emptiness*
 far more strongly than for portability, and `ezlopi-util-uuid` was a genuine
-outlier rather than the first of a series. If you want more host coverage, the
-lever is not another sweep of this kind: it is a stub `sdkconfig.h`, which is
-the first missing header for 69 of the 214 files that do not compile. The next
-most common blockers are `ezlopi_core_cloud.h` (35), `ezlopi_util_trace.h` (17)
-and `cjext.h` (14).
+outlier rather than the first of a series.
+
+So where *is* the lever? This paragraph used to answer "a stub `sdkconfig.h`,
+which is the first missing header for 69 of the 214 files that do not compile".
+The first half is still true — it is the top blocker, 70 files as of this
+writing — and the conclusion drawn from it was wrong.
+
+The sweep is now a committed script,
+[`tests/ci/host_reachable.py`](tests/ci/host_reachable.py), so every figure
+below can be re-derived instead of trusted; a number that cannot be checked is
+a number nobody can correct. It states its own file set, including the two
+directories it deliberately leaves out, because the earlier totals could not be
+compared against anything without knowing that.
+
+It currently reports 34 of 250 first-party `.c` files compiling with nothing
+but their own directory on the include path. Eight of the 34 now have host
+tests — `ezlopi-core-actions`, `mb1013_parse`, and the `ezlopi-util` components
+`-ha`, `-improv`, `-localkey`, `-mqttcfg`, `-sanitize`, `-uuid`. The remaining
+26 are the same kinds of thing the table above describes: fourteen of them are
+`ezlopi-cloud-constants` string tables.
+
+| include path | of the 216 failures, now compile | …of those, define no symbols | net gain |
+|---|---|---|---|
+| plus an empty `sdkconfig.h` | 52 | **52** | **0** |
+| plus a real generated `sdkconfig.h` (510 `#define`s) | 9 | **9** | **0** |
+
+Every file `sdkconfig.h` blocks is a file wrapped end to end in
+`#ifdef CONFIG_SOMETHING`. An empty stub lets 52 through precisely because it
+leaves their bodies switched *off*: each compiles to an object with no symbols
+in it, and a test linked against one would pass while exercising nothing. Hand
+them the real configuration and the count *falls* to 9, because switching the
+bodies on makes them need ESP-IDF. After `sdkconfig.h` the blockers are
+`ezlopi_core_cloud.h` (41), `ezlopi_util_trace.h` (31), `cjext.h` (22) and
+`freertos/FreeRTOS.h` (22).
+
+The real lever is the unglamorous one: stub those four, which is what
+`tests/host/stubs/` already does for the handful of files that needed them.
+Each is a judgement call about how much of ESP-IDF to reimplement, which is why
+this suite has grown a file at a time instead of in a sweep.
+
+A stub `sdkconfig.h` is still sometimes the right answer — see
+`tests/host/stubs-mqtt-api/`, which exists to switch a subject *on* — but it
+belongs to one test rather than to the shared stub directory, for the reason
+that file documents.
 
 That table is generated, not counted by hand, and the first version of it was
 wrong in a way worth naming: it claimed 15 string tables by quietly folding in

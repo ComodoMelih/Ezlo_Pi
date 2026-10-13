@@ -869,6 +869,85 @@ failure.
   separator check refused them before the leaf check ever ran. Two four-byte
   wrong leaves (`/get` and `_set`) now isolate it.
 
+- **The broker can now be configured on a running hub, with no rebuild**, through
+  three new API methods: `hub.mqtt.config.get`, `.set` and `.reset`. The five
+  `CONFIG_EZPI_MQTT_*` strings became fallback defaults; the live values live in
+  NVS.
+
+  This closes a gap that made the NVS layer decorative. The settings store had
+  a read path and no writer: a symbol dump showed all five setters unreferenced
+  and discarded by the linker, so the firmware could *read* a broker URI out of
+  NVS that there was no way to put there. The store was shipped a release
+  earlier than the thing that uses it.
+
+  `set` takes any subset of the five fields and applies **all of it or none of
+  it**. Every supplied field is validated before anything is written, so a typo
+  in the URI cannot also wipe the username. This is deliberately not described
+  as a transaction: a power cut between two NVS writes still leaves a partial
+  apply. What the two passes buy is that a *rejected* request changes nothing,
+  which is the case that happens to people; the power-cut case is survivable
+  for a different reason, namely that every field is revalidated when read and
+  a half-written one falls back to the compiled-in default.
+
+  Over-long values are refused rather than truncated, which is why the tree's
+  own `EZPI_core_cjson_get_value_string_by_copy()` is not used here. It
+  truncates with `snprintf`, and a 200-character URI cut to 128 is still a
+  *valid* URI — it would pass validation and be stored as a plausible address
+  nobody typed. It also cannot distinguish an absent field from `""`, because
+  it leaves the caller's buffer untouched in both cases, and `""` is meaningful
+  for three of these five fields: an empty URI is how MQTT is switched off again
+  without reflashing.
+
+  `get` never returns the password, only a `passwordSet` flag — enough for a
+  settings screen to tell "leave unchanged" apart from "clear". Authentication
+  is the transport's: the local websocket server refuses every method but
+  `hub.offline.login.ui` until a user is logged in, and these inherit that
+  rather than adding a second check that could disagree with the real one.
+  Everything reports `rebootRequired: true`, because the client is created once
+  at startup and saying otherwise would imply the broker had already moved.
+
+  With MQTT off the image is byte-for-byte the same size as before the change
+  (0x1903f0), so the four committed default configurations pay nothing for any
+  of this.
+
+- **A password containing a space was refused, and nothing said it would be.**
+  `EZPI_util_mqttcfg_cred_is_valid()` was sharing a helper with the URI path,
+  which rejects spaces for good reasons of its own; the credential header has
+  always said credentials have "no alphabet restriction" and are refused only
+  for length and control characters. So the documentation was right and the
+  code was wrong. Credentials now reject `0x00`-`0x1F` and `0x7F` only, and
+  accept spaces and non-ASCII bytes — MQTT usernames are UTF-8 and passwords
+  are binary, and the byte-counted topic buffers that justify narrowing the
+  prefixes have nothing to do with a credential. The misleading helper is
+  renamed after what it actually enforces.
+
+  Found by the new host test using `"p@ss w0rd"` as its sample password, chosen
+  because a space in a password is exactly what an over-eager validator
+  refuses.
+
+- **`cJSON`'s `str_value_len` is not the length of the string, and the two
+  parsers in `cjext` disagree about it.** `cJSON_Parse` stores an allocation
+  size — for an unescaped string, `strlen + 1`; `cJSON_ParseWithRef` stores the
+  exact length; `cJSON_CreateString` stores `strlen`. Nothing in the firmware
+  had noticed, because it is only ever used where an over-estimate is harmless:
+  as a `"%.*s"` precision, as a length handed to `strncmp`, or as a buffer size,
+  all of which stop at the first NUL.
+
+  Code that does arithmetic on it does notice. The new config handler used it
+  to bounds-check incoming fields, which rejected a value of exactly the
+  maximum length as one byte too long and would have written its terminator one
+  byte past a buffer sized for the maximum. The handler now determines the
+  length the way `"%.*s"` does — up to `str_value_len` bytes, stopping at a NUL
+  — which is correct for all three construction paths.
+
+  The behaviour is now pinned by ten checks in `tests/host/test_cjext.c` and
+  documented at `ezlopi_core_api.c`, next to the commented-out
+  `cJSON_ParseWithRefWithLength()` line that someone will eventually be tempted
+  to enable: a referenced string is terminated by its closing quote rather than
+  a NUL, and `EZPI_STRNCMP_IF_EQUAL` is `strncmp` over the *longer* of the two
+  lengths, so switching parsers would make method dispatch stop matching
+  anything and read past each value into the payload.
+
 - **Two things that read as accidental are correct, and are now commented as
   such.** A payload larger than the client's buffer arrives as several
   `MQTT_EVENT_DATA` events, and only the first carries a topic — continuation
@@ -1147,8 +1226,8 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 3566 assertions across
-  eleven binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 3778 assertions across
+  thirteen binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
@@ -1547,6 +1626,43 @@ enumerators — so the live half of this component was never affected.
   being built by anyone routinely, so target-specific breakage could sit in the
   tree indefinitely. `fail-fast` is off so one chip failing does not hide the
   state of the other three.
+
+- **The suite reached `ezlopi-cloud` for the first time**, with
+  `tests/host/test_mqtt_api.c` (96 checks) covering the three
+  `hub.mqtt.config.*` handlers. That was only possible because the new file
+  depends on nothing from ESP-IDF; the API layer as a whole still does not
+  compile on a host.
+
+  Two things about it are worth copying rather than the test itself. The first
+  check in the file asserts the handlers are *present*: the subject is wrapped
+  end to end in `#ifdef CONFIG_EZPI_ENABLE_MQTT`, so if the stub `sdkconfig.h`
+  stopped defining it the translation unit would compile to nothing, the link
+  would still succeed against the test's own fakes, and every check would pass
+  while testing an empty file. Second, that stub lives in its own
+  `tests/host/stubs-mqtt-api/` rather than the shared `stubs/`, because five of
+  the thirteen binaries put `stubs/` on their include path — `test_cjext`,
+  `test_ze08`, `test_pms5003`, `test_gps6mv2` and this one — and a shared
+  `sdkconfig.h` would quietly decide the configuration of four tests that have
+  nothing to do with MQTT, three of them drivers full of `#ifdef`s.
+
+  Mutation-tested 6 of 6 caught — storing before validating, truncating instead
+  of refusing, returning the password, treating `""` as absent, ignoring a
+  failed write, and running against an empty subject. The better evidence is
+  that it found two real defects the first time it ran, both described above:
+  the `str_value_len` off-by-one and the credential validator refusing spaces.
+
+- **The trace stub had never type-checked a format argument.** `EZPI_TRACE_NOOP`
+  in `tests/host/stubs/ezlopi_util_trace.h` was `((void)sizeof(__VA_ARGS__))`,
+  which works for one argument and turns `TRACE_W("%s", x)` into a comma
+  expression that `-Werror=unused-value` rejects. Its own comment claimed the
+  arguments were still checked so that a typo in a traced expression stayed a
+  compile error; that was half true, and nothing noticed for as long as no
+  host-compiled file logged anything with a format argument. It is now a
+  variadic `static inline` no-op: unused, it is discarded; used, every argument
+  is still named and still has to exist. Deliberately not routed to `printf()`,
+  which would add format checking and simultaneously start failing the build on
+  format mismatches in driver files no test currently reaches — a change worth
+  making on purpose rather than as a side effect.
 
 ### Packaging — [infra]
 

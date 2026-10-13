@@ -21,6 +21,11 @@ GPS_DIR      := ../../ezlopi-sensors-devices/sensor-0053-UART-GYGPS6MV2
 UUID_DIR     := ../../ezlopi-util/ezlopi-util-uuid
 ACTIONS_DIR  := ../../ezlopi-core/ezlopi-core-actions
 LOCALKEY_DIR := ../../ezlopi-util/ezlopi-util-localkey
+MQTTCFG_DIR  := ../../ezlopi-util/ezlopi-util-mqttcfg
+MQTTAPI_DIR  := ../../ezlopi-cloud/ezlopi-cloud-mqtt-config
+MQTTCORE_DIR := ../../ezlopi-core/ezlopi-core-mqtt-config
+ERRORS_DIR   := ../../ezlopi-core/ezlopi-core-errors
+CONSTANTS_DIR := ../../ezlopi-cloud/ezlopi-cloud-constants
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -52,7 +57,8 @@ LDFLAGS += $(SANITIZERS)
 
 BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
-           test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey
+           test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
+           test_mqttcfg test_mqtt_api
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -198,8 +204,19 @@ $(BUILD)/test_uuid: test_uuid.c $(UUID_DIR)/ezlopi_util_uuid.c | $(BUILD)
 # that are a single #include, and three -- ezlopi_cloud_data.c,
 # ezlopi_core_event_queue.c, ezlopi_core_ethernet.c -- wrapped in `#if 0` end
 # to end. "Compiles with no stubs" selects for emptiness far more than for
-# portability, so there is no third uuid waiting in that list; the next lever
-# is a stub sdkconfig.h, which is the first missing header for 69 files.
+# portability, so there is no third uuid waiting in that list.
+#
+# A stub sdkconfig.h used to be named here as the next lever, on the strength
+# of being the first missing header for 69 of the files that fail. It is not
+# one, and tests/ci/host_reachable.py is now in the tree so that can be
+# re-checked rather than taken on trust: an empty sdkconfig.h lets 52 more
+# files compile and all 52 define no symbols whatsoever, because every file it
+# blocks is wrapped end to end in #ifdef CONFIG_SOMETHING and an empty stub
+# leaves the body switched off. Supply a real generated one and the number
+# falls to 9, all nine still empty, because switching the bodies on makes them
+# need ESP-IDF. The actual levers are stubs for ezlopi_core_cloud.h (41 files),
+# ezlopi_util_trace.h (31), cjext.h (22) and freertos/FreeRTOS.h (22) -- which
+# is what stubs/ holds today, one judgement call at a time. See CONTRIBUTING.md.
 #
 # What it found: EZLOPI_ACTION(HUB_UPDATE, "EZLOPI_ACTION_HUB_GET_ITEM") in
 # ezlopi_core_actions_list.h, so two distinct enum values stringified to one
@@ -239,6 +256,76 @@ $(BUILD)/test_localkey: LOCALKEY_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror
                                            $(SANITIZERS)
 $(BUILD)/test_localkey: test_localkey.c $(LOCALKEY_DIR)/ezlopi_util_localkey.c | $(BUILD)
 	$(CC) $(LOCALKEY_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# ezlopi-util-mqttcfg validates the MQTT settings that, as of this commit,
+# arrive at runtime from NVS instead of from CONFIG_EZPI_MQTT_* at build time.
+# That change is what makes the validation necessary: a Kconfig string was
+# vetted by whoever typed it into menuconfig, a value written over the network
+# is not.
+#
+# The check worth having a test for is the topic prefix. The service subscribes
+# to <prefix>/<node>/+/set and switches relays in response, so a prefix
+# containing '+' or '#' widens that subscription past this device's own topics
+# while making every publish invalid -- wildcards are forbidden in a topic
+# published to. The device goes silent and starts taking orders from elsewhere,
+# and neither half is visible on the device.
+#
+# One check here records a bug this validator already had: the first draft
+# compared URI schemes with strncmp() and refused "MQTT://host". esp-mqtt
+# resolves the scheme through esp_transport_list_get_transport(), which uses
+# strcasecmp(), so that URI works on hardware and refusing it was the validator
+# inventing a failure. test_scheme_case_is_accepted() pins the fix.
+$(BUILD)/test_mqttcfg: MQTTCFG_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                         -I$(MQTTCFG_DIR) \
+                                         $(SANITIZERS)
+$(BUILD)/test_mqttcfg: test_mqttcfg.c $(MQTTCFG_DIR)/ezlopi_util_mqttcfg.c | $(BUILD)
+	$(CC) $(MQTTCFG_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# The hub.mqtt.config.* API methods: the layer that decides which settings a
+# request writes, as opposed to test_mqttcfg above, which decides whether a
+# value is well formed. Both are needed and neither implies the other -- the
+# validators can be perfect while the handler stores a field it was told to
+# reject.
+#
+# This is the first test here to compile a file from ezlopi-cloud, and the only
+# reason it can is that ezlopi_cloud_mqtt_config.c was written to need nothing
+# from ESP-IDF: cjext, the two MQTT components and the keyword strings. The
+# seven EZPI_core_mqtt_config_* functions are supplied by the test as recording
+# fakes, because NVS cannot run here and because what is being tested is which
+# calls the handler *chooses* to make -- including the case where it correctly
+# makes none.
+#
+# The property worth the whole rule: a request carrying one bad field must
+# store none of the good ones. Walking params and storing as it goes is the
+# natural implementation and it leaves a half-applied configuration behind on
+# every typo. That is invisible in manual testing, because the error reply
+# looks the same either way.
+#
+# Two include paths are unusual here. stubs-mqtt-api/ holds a one-line
+# sdkconfig.h defining CONFIG_EZPI_ENABLE_MQTT, without which the whole subject
+# file preprocesses away to nothing and the suite would link and pass while
+# testing an empty object file -- test_the_subject_exists() exists to catch
+# precisely that. It is deliberately NOT in the shared stubs/ directory, which
+# ten other binaries include; see the comment in the file. The ordinary stubs/
+# comes second, for cjext's ezlopi_util_trace.h and EZLOPI_USER_CONFIG.h.
+#
+# cjext.c is compiled with its own relaxed flags for the same reason as in the
+# test_cjext rule above: it is vendored, and -Werror on third-party code only
+# makes the next update harder.
+$(BUILD)/test_mqtt_api: MQTTAPI_CFLAGS := -std=c99 -O1 -g \
+                                          -I$(MQTTAPI_DIR) -I$(MQTTCORE_DIR) \
+                                          -I$(MQTTCFG_DIR) -I$(ERRORS_DIR) \
+                                          -I$(CONSTANTS_DIR) -I$(CJEXT_DIR) \
+                                          -I stubs-mqtt-api -I$(STUBS_DIR) \
+                                          $(SANITIZERS)
+$(BUILD)/test_mqtt_api: test_mqtt_api.c $(MQTTAPI_DIR)/ezlopi_cloud_mqtt_config.c \
+                        $(MQTTCFG_DIR)/ezlopi_util_mqttcfg.c $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(MQTTAPI_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_mqtt_api_main.o test_mqtt_api.c
+	$(CC) $(MQTTAPI_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/mqtt_api_subject.o $(MQTTAPI_DIR)/ezlopi_cloud_mqtt_config.c
+	$(CC) $(MQTTAPI_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/mqtt_api_mqttcfg.o $(MQTTCFG_DIR)/ezlopi_util_mqttcfg.c
+	$(CC) $(MQTTAPI_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/mqtt_api_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_mqtt_api_main.o $(BUILD)/mqtt_api_subject.o \
+	      $(BUILD)/mqtt_api_mqttcfg.o $(BUILD)/mqtt_api_cjext.o $(LDFLAGS) -lm
 
 $(BUILD):
 	mkdir -p $(BUILD)

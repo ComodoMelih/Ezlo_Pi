@@ -87,6 +87,35 @@ cJSON *EZPI_core_api_consume(const char *who, const char *payload, uint32_t len,
     if (payload && len)
     {
         cJSON *cj_request = cJSON_ParseWithLength(who, payload, len);
+
+        /* Do not swap the line above for the one below without reading this.
+        **
+        ** cJSON_ParseWithRefWithLength() avoids copying every string by
+        ** pointing valuestring into the payload, which looks like free memory
+        ** on a device this size. Two things in this tree depend on it not
+        ** being used:
+        **
+        ** 1. A referenced string is terminated by its closing quote, not by a
+        **    NUL. EZPI_STRNCMP_IF_EQUAL() is strncmp() over the longer of the
+        **    two lengths, so it reads past the value and into the rest of the
+        **    payload.
+        ** 2. The two parsers disagree about str_value_len. parse_string()
+        **    stores an allocation size, which for an unescaped string is
+        **    strlen + 1; parse_string_with_ref() stores the exact length. The
+        **    whole tree is written for the first convention -- see the note on
+        **    EZPI_STRNCMP_IF_EQUAL in ezlopi_cloud_constants.h, which says to
+        **    add one for the terminator, and every caller that passes
+        **    strlen(literal) + 1 alongside str_value_len.
+        **
+        ** Together those mean method dispatch in ezlopi_core_api_methods.c
+        ** stops matching anything: the recorded length is one short, the
+        ** literal's is one long, strncmp() takes the longer, and the
+        ** comparison runs off the end of the value into a quote. Every request
+        ** would be answered "method not found".
+        **
+        ** Measured, not deduced: a parsed 128-character string reports
+        ** str_value_len 129 through cJSON_ParseWithLength and 128 through the
+        ** reference parser. */
         // cJSON *cj_request = cJSON_ParseWithRefWithLength(who, payload, len);
         if (cj_request)
         {

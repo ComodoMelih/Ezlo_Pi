@@ -60,6 +60,7 @@
 #include "ezlopi_cloud_constants.h"
 #include "ezlopi_cloud_items.h"
 
+#include "ezlopi_core_mqtt_config.h"
 #include "ezlopi_service_mqtt.h"
 
 #include "EZLOPI_USER_CONFIG.h"
@@ -77,6 +78,31 @@
 /* The object id is the reduced device name plus 17 bytes of ids. 64 leaves
  * room for a generous name; longer names lose their tail, which is cosmetic. */
 #define EZPI_MQTT_OBJECT_ID_LEN 64
+
+/* The prefixes are no longer compile-time constants -- they come from NVS at
+ * runtime -- so the fact that the longest possible topic still fits in
+ * EZPI_MQTT_TOPIC_LEN is no longer something a reader can check by looking at
+ * the Kconfig defaults. This asserts it instead.
+ *
+ * The worst case is the discovery topic:
+ *
+ *     <discovery_prefix>/<component>/<node>/<object>/config
+ *
+ * with the longest component name ("binary_sensor", 13), the node id
+ * ("ezlopi_" + 6 hex, 13), the longest object id (EZPI_MQTT_OBJECT_ID_LEN - 1),
+ * the longest leaf ("config"/"status", 6), four separators and a terminator.
+ *
+ * Without this, raising EZPI_MQTTCFG_PREFIX_MAX would compile cleanly and then
+ * make every publish and every discovery message fail on the device -- the
+ * topic builders refuse to truncate -- producing a hub that connects to the
+ * broker and publishes nothing, with a configuration that looks correct.
+ * tests/host/test_mqttcfg.c checks the same arithmetic, so the mistake is
+ * caught on a desktop too. */
+#define EZPI_MQTT_WORST_TOPIC (EZPI_MQTTCFG_PREFIX_MAX + 4u + 13u + 13u + \
+                               (EZPI_MQTT_OBJECT_ID_LEN - 1u) + 6u + 1u)
+
+typedef char assert_mqtt_worst_topic_fits[
+    (EZPI_MQTT_WORST_TOPIC <= EZPI_MQTT_TOPIC_LEN) ? 1 : -1];
 
 /* A state payload is one scalar: a bool, a number, or a short string. Strings
  * longer than this are truncated rather than dropped -- a clipped reading is
@@ -134,6 +160,22 @@ static char sg_node_id[24] = {0};
  * read costs one enqueue that esp-mqtt then drops. */
 static volatile bool sg_connected = false;
 
+/* The resolved settings: NVS where a valid value is stored, the compiled-in
+ * CONFIG_EZPI_MQTT_* value otherwise. Filled once by EZPI_service_mqtt_init()
+ * and read-only afterwards.
+ *
+ * At file scope rather than on init()'s stack because the topic-building code
+ * below reads the prefixes from six different functions, and because it is
+ * nearly 400 bytes -- which is not something to put on the stack of a task
+ * whose size this service does not control.
+ *
+ * It is not re-read when a setting changes. esp-mqtt fixes a client's URI and
+ * credentials when the client is created, so a new broker means a new client;
+ * until that exists, a changed setting applies on the next boot. Re-reading
+ * here without recreating the client would be worse than not re-reading at
+ * all: the topics would move while the connection stayed where it was. */
+static s_ezpi_mqtt_config_t sg_cfg;
+
 /*******************************************************************************
  *                          Extern Function Definitions
  *******************************************************************************/
@@ -148,20 +190,47 @@ void EZPI_service_mqtt_init(void)
         return;
     }
 
+    /* NVS first, compiled-in Kconfig second. This is what makes a broker
+     * configurable on a flashed device instead of only in menuconfig; see
+     * ezlopi_core_mqtt_config.h for the precedence and for why every stored
+     * value is revalidated on the way out. */
+    if (EZPI_SUCCESS != EZPI_core_mqtt_config_get(&sg_cfg))
+    {
+        TRACE_E("mqtt: could not resolve configuration, not starting");
+        return;
+    }
+
     /* An unset broker URI is a configuration that cannot work, as distinct
      * from a broker that is merely unreachable right now. Retrying the former
      * forever would fill the log with failures that look like a network
-     * problem. */
-    if ('\0' == CONFIG_EZPI_MQTT_BROKER_URI[0])
+     * problem.
+     *
+     * This is also the normal state of a stock image and the way MQTT is
+     * turned off again without reflashing -- clearing the URI. So it is not an
+     * error, and the message says "not starting" rather than reporting a
+     * fault. */
+    if ('\0' == sg_cfg.uri[0])
     {
         TRACE_W("mqtt: no broker URI configured, not starting");
+        return;
+    }
+
+    /* The URI was validated when it was stored and again when it was read, but
+     * it is checked once more here because this is the last point before it
+     * reaches esp-mqtt, and because the value may have come from Kconfig --
+     * which nothing validates, since menuconfig accepts any string. Without
+     * this, a typo in a build-time URI reaches the client and fails as a
+     * network error. */
+    if (false == EZPI_util_mqttcfg_uri_is_valid(sg_cfg.uri))
+    {
+        TRACE_E("mqtt: broker URI is not usable, not starting");
         return;
     }
 
     ezpi_mqtt_build_node_id();
 
     if (0 == EZPI_ha_topic_build(availability_topic, sizeof(availability_topic),
-                                 CONFIG_EZPI_MQTT_TOPIC_PREFIX, sg_node_id, NULL,
+                                 sg_cfg.topic_prefix, sg_node_id, NULL,
                                  EZPI_MQTT_LEAF_STATUS))
     {
         TRACE_E("mqtt: availability topic does not fit, not starting");
@@ -169,13 +238,13 @@ void EZPI_service_mqtt_init(void)
     }
 
     memset(&mqtt_cfg, 0, sizeof(mqtt_cfg));
-    mqtt_cfg.uri = CONFIG_EZPI_MQTT_BROKER_URI;
+    mqtt_cfg.uri = sg_cfg.uri;
     mqtt_cfg.client_id = sg_node_id;
 
-    if ('\0' != CONFIG_EZPI_MQTT_USERNAME[0])
+    if ('\0' != sg_cfg.username[0])
     {
-        mqtt_cfg.username = CONFIG_EZPI_MQTT_USERNAME;
-        mqtt_cfg.password = CONFIG_EZPI_MQTT_PASSWORD;
+        mqtt_cfg.username = sg_cfg.username;
+        mqtt_cfg.password = sg_cfg.password;
     }
 
     /* The last will is what makes a hub that loses power show as unavailable
@@ -225,7 +294,16 @@ void EZPI_service_mqtt_init(void)
         return;
     }
 
-    TRACE_I("mqtt: started as '%s' -> %s", sg_node_id, CONFIG_EZPI_MQTT_BROKER_URI);
+    /* The resolved URI, not the compiled-in one -- printing CONFIG_* here
+     * would report the build's default while the client connected somewhere
+     * else entirely, which is exactly the confusion runtime configuration
+     * introduces. The topic prefix is included because it is now a variable
+     * and it determines every topic a user has to subscribe to.
+     *
+     * The username is named but the password is not printed, in any form. */
+    TRACE_I("mqtt: started as '%s' -> %s (prefix '%s', user '%s')", sg_node_id,
+            sg_cfg.uri, sg_cfg.topic_prefix,
+            ('\0' != sg_cfg.username[0]) ? sg_cfg.username : "<anonymous>");
 }
 
 /*******************************************************************************
@@ -408,7 +486,7 @@ static ezlopi_error_t ezpi_mqtt_on_broadcast(char *data)
     }
 
     if (ezpi_mqtt_value_to_payload(cj_value, NULL, payload, sizeof(payload)) &&
-        0 != EZPI_ha_topic_build(topic, sizeof(topic), CONFIG_EZPI_MQTT_TOPIC_PREFIX,
+        0 != EZPI_ha_topic_build(topic, sizeof(topic), sg_cfg.topic_prefix,
                                  sg_node_id, object_id, EZPI_MQTT_LEAF_STATE))
     {
         /* Retained so that a Home Assistant restart shows the last known
@@ -479,10 +557,10 @@ static void ezpi_mqtt_publish_discovery_for_item(l_ezlopi_device_t *device,
         return;
     }
 
-    if (0 == EZPI_ha_topic_discovery(topic, sizeof(topic), CONFIG_EZPI_MQTT_DISCOVERY_PREFIX,
+    if (0 == EZPI_ha_topic_discovery(topic, sizeof(topic), sg_cfg.discovery_prefix,
                                      component, sg_node_id, object_id) ||
         0 == EZPI_ha_topic_build(state_topic, sizeof(state_topic),
-                                 CONFIG_EZPI_MQTT_TOPIC_PREFIX, sg_node_id, object_id,
+                                 sg_cfg.topic_prefix, sg_node_id, object_id,
                                  EZPI_MQTT_LEAF_STATE))
     {
         TRACE_E("mqtt: topics for '%s' do not fit", object_id);
@@ -541,7 +619,7 @@ static void ezpi_mqtt_publish_discovery_for_item(l_ezlopi_device_t *device,
         char command_topic[EZPI_MQTT_TOPIC_LEN];
 
         if (0 != EZPI_ha_topic_build(command_topic, sizeof(command_topic),
-                                     CONFIG_EZPI_MQTT_TOPIC_PREFIX, sg_node_id,
+                                     sg_cfg.topic_prefix, sg_node_id,
                                      object_id, EZPI_MQTT_LEAF_SET))
         {
             cJSON_AddStringToObject(__FUNCTION__, cj_config, "command_topic", command_topic);
@@ -552,7 +630,7 @@ static void ezpi_mqtt_publish_discovery_for_item(l_ezlopi_device_t *device,
         char availability_topic[EZPI_MQTT_TOPIC_LEN];
 
         if (0 != EZPI_ha_topic_build(availability_topic, sizeof(availability_topic),
-                                     CONFIG_EZPI_MQTT_TOPIC_PREFIX, sg_node_id, NULL,
+                                     sg_cfg.topic_prefix, sg_node_id, NULL,
                                      EZPI_MQTT_LEAF_STATUS))
         {
             cJSON_AddStringToObject(__FUNCTION__, cj_config, "availability_topic",
@@ -627,7 +705,7 @@ static void ezpi_mqtt_announce(void)
 
     /* Overwrites the retained "offline" the broker published on our behalf
      * last time the connection dropped. */
-    if (0 != EZPI_ha_topic_build(topic, sizeof(topic), CONFIG_EZPI_MQTT_TOPIC_PREFIX,
+    if (0 != EZPI_ha_topic_build(topic, sizeof(topic), sg_cfg.topic_prefix,
                                  sg_node_id, NULL, EZPI_MQTT_LEAF_STATUS))
     {
         esp_mqtt_client_enqueue(sg_client, topic, EZPI_MQTT_ONLINE_STR,
@@ -639,7 +717,7 @@ static void ezpi_mqtt_announce(void)
      * still needs exactly one subscription, and adding a device later needs
      * no new one. */
     if (0 != EZPI_ha_topic_build(subscription, sizeof(subscription),
-                                 CONFIG_EZPI_MQTT_TOPIC_PREFIX, sg_node_id, "+",
+                                 sg_cfg.topic_prefix, sg_node_id, "+",
                                  EZPI_MQTT_LEAF_SET))
     {
         if (0 > esp_mqtt_client_subscribe(sg_client, subscription, 1))

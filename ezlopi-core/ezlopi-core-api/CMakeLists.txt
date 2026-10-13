@@ -28,6 +28,7 @@ set(EZLOPI_CLOUD_COMPONENTS
         ezlopi-cloud-hub-data-list
         ezlopi-cloud-setting-commands
         ezlopi-cloud-protect
+        ezlopi-cloud-mqtt-config
 )
 
 set(EZLOPI_CORE_COMPONENTS
