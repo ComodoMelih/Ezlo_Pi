@@ -707,7 +707,13 @@ static int __provision_update(char *arg)
         else
         {
             ret = -1;
-            TRACE_E("key \"%s\" not found.", cj_root_prov_data);
+            /* This used to pass cj_root_prov_data -- a cJSON * -- to a "%s",
+             * so the logger started reading at the head of the cJSON struct,
+             * whose first member is the "next" pointer, and ran on until it
+             * happened to find a zero byte. Reached whenever the response
+             * parses as JSON but carries neither "data" nor "error_code".
+             * The key that is actually missing is a constant, so name it. */
+            TRACE_E("key \"%s\" not found.", ezlopi_data_str);
         }
 
         cJSON_Delete(__FUNCTION__, cj_root_prov_data);

@@ -20,21 +20,31 @@ Severity markers:
 
 ### Memory safety — [sec]
 
-All of these are reachable by anyone in BLE range, or anyone with physical
-access to the UART header. No pairing or authentication is required to reach
-the parsers involved: the GATT characteristics are declared
+All but the last of these are reachable by anyone in BLE range, or anyone with
+physical access to the UART header. No pairing or authentication is required to
+reach the parsers involved: the GATT characteristics are declared
 `ESP_GATT_PERM_WRITE` rather than `ESP_GATT_PERM_WRITE_ENCRYPTED`, and
 `CONFIG_EZPI_BLE_ENABLE_PASSKEY` is unset in every shipped
-`sdkconfig.defaults.*`.
+`sdkconfig.defaults.*`. The final item — the `cJSON *` passed to a `%s` — sits
+instead on the cloud provisioning path, which is an *outbound* HTTPS GET
+validated against the bundled CA, so reaching it means controlling that
+response; it is listed here because the defect class it exposed was tree-wide.
 
-The first four are covered by regression tests in [`tests/host/`](tests/host/).
-The BLE chunk-reassembly defects below are covered instead by
-[`tests/ci/check_ble_chunk_clamp.py`](tests/ci/check_ble_chunk_clamp.py), which
-fails on the pre-fix revision of each file and passes on the current tree — the
-reassembly functions are `static` inside translation units that need the
-ESP-IDF GATT headers, so there is no host harness for them yet. That is a gap,
-and it is why the check pairs clamps and frees structurally rather than relying
-on anyone re-reading these files.
+Evidence differs by item, so it is worth being explicit about which:
+
+- The first four are covered by regression tests in [`tests/host/`](tests/host/).
+- The BLE chunk-reassembly defects are covered by
+  [`tests/ci/check_ble_chunk_clamp.py`](tests/ci/check_ble_chunk_clamp.py),
+  which fails on the pre-fix revision of each file and passes on the current
+  tree. The reassembly functions are `static` inside translation units that
+  need the ESP-IDF GATT headers, so there is no host harness for them yet.
+  That is a gap, and it is why the check pairs clamps and frees structurally
+  rather than relying on anyone re-reading these files.
+- The format-attribute defect is covered by the compiler itself: with the
+  attribute in place and `-Werror=format` already on, reintroducing the bad
+  call fails the build. That was verified by reintroducing it, not assumed.
+
+None of these have been exercised on physical hardware; see Known gaps.
 
 - **Stack buffer overflow parsing a device `chipset` string.**
   `ezlopi_core_devices.c` copied an attacker-supplied `chipset` value into a
@@ -115,6 +125,33 @@ on anyone re-reading these files.
   deliberately unchanged** — the mobile app and cloud appear to depend on that
   field, and changing the wire format is out of scope for a hardening pass. See
   the privacy note in the README.
+
+- **A `cJSON *` passed to a `%s`, in every shipped image.**
+  `__provision_update()` in
+  [`ezlopi_service_webprov.c:710`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L710)
+  logged `TRACE_E("key \"%s\" not found.", cj_root_prov_data)` — a `cJSON *`
+  where a `char *` was expected. The logger started reading at the first byte
+  of the `cJSON` struct, whose leading member is the `next` pointer, and ran
+  on until it happened to meet a zero byte, printing whatever lay in between.
+  The branch is reached whenever a provisioning response parses as JSON but
+  carries neither `data` nor `error_code`.
+
+  The reason it survived so long is the more useful finding: every `TRACE_*`
+  expands into `trace_color_print()`, a variadic function that **had no
+  `printf` format attribute**, so no format string anywhere in the tree was
+  ever compared against its arguments. (The macro form that might have given
+  the compiler a hint is behind an `#if 0`.) `CONFIG_EZPI_UTIL_TRACE_EN=y` in
+  all four shipped `sdkconfig.defaults.*`, so the line was compiled in
+  everywhere.
+
+  `trace_color_print()` and `trace_otel()` now carry
+  `__attribute__((format(printf, …)))`. Because `-Werror=format` was already
+  enabled, that converts the whole class into build failures — and it is worth
+  recording that across all four targets it found **exactly one** defect, the
+  one above, so the attribute costs nothing to keep. Guarded by
+  `tests/ci/check_trace_format_attr.py`, which exists for the case where the
+  attribute itself gets deleted; the build would go green again and silently
+  stop checking.
 
 ### UART sensor dispatch — [sec]
 
@@ -1324,6 +1361,31 @@ enumerators — so the live half of this component was never affected.
   the finished check against the pre-fix revision of both files, where it
   reports all four defects at the right functions, and against the current
   tree, where it reports none.
+
+- **New CI check that `TRACE_*` stays compiler-checked,
+  [`tests/ci/check_trace_format_attr.py`](tests/ci/check_trace_format_attr.py).**
+  The underlying fix is a one-line `__attribute__((format(printf, …)))` on
+  `trace_color_print()` and `trace_otel()`, and since `-Werror=format` was
+  already enabled, the *build* is now the check — a `TRACE_*` whose arguments
+  disagree with its format string cannot compile. Verified in both directions
+  by reintroducing the `cJSON *`-to-`%s` call and confirming the build fails
+  with the expected diagnostic, then removing it and confirming four clean
+  target builds with zero format diagnostics.
+
+  So this script guards something narrower and easier to lose: the attribute
+  itself. Delete it in a refactor and the build goes green while every format
+  string in the tree silently stops being checked — the same failure shape as
+  the pasted BLE assembler above, where the fix was right and the thing that
+  kept it right was missing.
+
+  Its own first draft was wrong in an instructive way. The header carries a
+  commented-out historical prototype of `trace_color_print()` above the live
+  declaration, and the check matched the comment — reporting the attribute
+  absent while it sat two lines below. The self-test passed throughout, because
+  the fixtures had no comments in them. Comment stripping was added and so was
+  `SELF_TEST['commented_decoy']`, which reproduces the real header's shape. It
+  is also run against the pre-fix header from git, where it reports both
+  declarations unguarded.
 
 - **`ezlopi-util-uuid` joined the suite** — `tests/host/test_uuid.c`, 431
   checks. It ties MB1013 for the shortest build rule in the `Makefile` — one

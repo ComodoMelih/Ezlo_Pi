@@ -97,8 +97,29 @@ extern "C"
 
 #if (1 == ENABLE_TRACE)
 
-    void trace_otel(uint8_t severity, const char *file, int line, const char *format, ...);
-    void trace_color_print(const char *txt_color, uint8_t severity, const char *file, int line, const char *format, ...);
+    /* EZPI_PRINTF_FMT tells the compiler these are printf-shaped, so a format
+    ** string that disagrees with its arguments is a -Wformat diagnostic instead
+    ** of a runtime surprise.
+    **
+    ** This was missing, and the cost was real: webprov's __provision_update()
+    ** carried TRACE_E("key \"%s\" not found.", cj_root_prov_data), passing a
+    ** cJSON * where a char * was expected, so the logger walked a cJSON struct
+    ** -- whose first member is a pointer -- looking for a NUL terminator. Every
+    ** shipped sdkconfig.defaults.* sets CONFIG_EZPI_UTIL_TRACE_EN=y, so that
+    ** line was live in every image. No warning was ever emitted, because
+    ** without this attribute the compiler has no idea the fifth parameter is a
+    ** format string.
+    **
+    ** Keep the attribute. It is the only thing standing between a typo'd
+    ** TRACE_* and a log statement that reads memory it does not own. */
+#if defined(__GNUC__)
+#define EZPI_PRINTF_FMT(fmt_idx, args_idx) __attribute__((format(printf, fmt_idx, args_idx)))
+#else
+#define EZPI_PRINTF_FMT(fmt_idx, args_idx)
+#endif
+
+    void trace_otel(uint8_t severity, const char *file, int line, const char *format, ...) EZPI_PRINTF_FMT(4, 5);
+    void trace_color_print(const char *txt_color, uint8_t severity, const char *file, int line, const char *format, ...) EZPI_PRINTF_FMT(5, 6);
     void __dump(const char *file_name, uint32_t line, char *buffer_name, void *_buff, uint32_t ofs, uint32_t cnt);
 
 #define COLOR_FONT_BLACK "30"

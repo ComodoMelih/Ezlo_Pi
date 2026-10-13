@@ -113,6 +113,18 @@ jobs:
       - name: BLE chunk copies are clamped and trees are freed
         run: python3 tests/ci/check_ble_chunk_clamp.py
 
+      # Every TRACE_* funnels into trace_color_print(), which had no printf
+      # format attribute, so no format string in the tree was ever checked
+      # against its arguments. webprov passed a cJSON * to a "%s" and the
+      # logger read a struct as a string; CONFIG_EZPI_UTIL_TRACE_EN=y in all
+      # four shipped defaults, so it was in every image. Adding the attribute
+      # found that one defect and nothing else across all four targets.
+      #
+      # -Werror=format then enforces this on every build, but only while the
+      # attribute exists. This check is what notices if it is ever removed.
+      - name: TRACE_* format strings stay compiler-checked
+        run: python3 tests/ci/check_trace_format_attr.py
+
       # 83 files used to include the generated config as
       # "../../build/config/sdkconfig.h", which pins both the build
       # directory's name and its position relative to the source file -- so the
