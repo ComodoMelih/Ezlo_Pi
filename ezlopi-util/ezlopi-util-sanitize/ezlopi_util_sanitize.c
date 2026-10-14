@@ -214,3 +214,36 @@ uint32_t EZPI_util_copy_str_bounded(char *dst, uint32_t dst_size, const char *sr
 
     return len;
 }
+
+uint32_t EZPI_util_pem_store_len(const char *value, const char *end_marker, uint32_t region_size)
+{
+    if ((NULL == value) || (NULL == end_marker) || (0 == region_size))
+    {
+        return 0;
+    }
+
+    const char *end_pos = strstr(value, end_marker);
+
+    if (NULL == end_pos)
+    {
+        /* Refuse. The caller must not write: see the header for why erasing
+         * the field on a malformed value was the old behaviour and is wrong. */
+        return 0;
+    }
+
+    /* Both operands are within one NUL-terminated string, so this cannot
+     * overflow: end_pos is a pointer into value, and the marker was found
+     * entirely inside it. */
+    const size_t length = (size_t)(end_pos - value) + strlen(end_marker);
+
+    /* The writer appends a terminator, so the field must hold length + 1.
+     * Compared this way round rather than as (region_size - 1) because
+     * region_size is unsigned and a zero would wrap -- it is rejected above,
+     * but the comparison should not depend on that happening first. */
+    if ((length + 1u) > (size_t)region_size)
+    {
+        return 0;
+    }
+
+    return (uint32_t)length;
+}

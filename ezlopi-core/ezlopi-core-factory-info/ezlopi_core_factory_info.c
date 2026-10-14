@@ -46,6 +46,7 @@
 
 #include "ezlopi_core_nvs.h"
 #include "ezlopi_core_factory_info.h"
+#include "ezlopi_util_sanitize.h"
 #include "EZLOPI_USER_CONFIG.h"
 
 /*******************************************************************************
@@ -97,19 +98,14 @@ static char *__pub_key = NULL;
 /*******************************************************************************
  *                          Extern Function Definitions
  *******************************************************************************/
-int ezlopi_calculate_certificate_length(const char *certificate_string, const char *end_marker)
-{
-    char *end_pos = strstr(certificate_string, end_marker);
-    if (end_pos != NULL)
-    {
-        int length_up_to_end_marker = (end_pos - certificate_string) + strlen(end_marker);
-        return length_up_to_end_marker;
-    }
-    else
-    {
-        return 0;
-    }
-}
+/* ezlopi_calculate_certificate_length() used to live here. It returned the
+** offset of a PEM end marker with no upper bound and 0 when the marker was
+** absent, and all four PEM setters passed that straight to a 4 KB flash write
+** -- see the block comment above those setters for what that did. It had
+** external linkage but no declaration in any header, so nothing outside this
+** file could call it; EZPI_util_pem_store_len() replaces it and is bounded and
+** host-tested. Removed rather than left in place so it cannot be picked up
+** again by the next person who needs a certificate length. */
 
 uint32_t EZPI_core_factory_info_v3_get_abs_address(uint32_t relative_offset, e_factory_info_v3_partition_type_t partition_type)
 {
@@ -821,26 +817,82 @@ int EZPI_core_factory_info_v3_set_wifi(char *ssid, char *password)
     return ret;
 }
 
+/* THE FOUR PEM SETTERS BELOW USED TO BE UNBOUNDED
+**
+** Each took the length from ezlopi_calculate_certificate_length(), which is
+** the position of the PEM end marker in a client-supplied string, and handed
+** it to __EZPI_core_factory_info_v3_set_4kb(). That function erases one 4 KB
+** field and then writes len + 1 bytes, so a value longer than the field wrote
+** straight past it. The fields are contiguous --
+**
+**     EZLOPI_CONFIG_JSON  0x1000
+**     CA_CERTIFICATE      0x3000
+**     SSL_PRIVATE_KEY     0x4000
+**     SSL_SHARED_KEY      0x5000
+**     (hub data)          0x6000   serial number, Wi-Fi SSID and password, MAC
+**
+** -- all inside one 32 KB partition, so an over-long CA certificate landed in
+** the private key, and an over-long shared key landed in the hub data. The
+** overflowing bytes also went into a region this call had not erased, and NOR
+** flash can only clear bits on write, so the result was corruption rather
+** than a clean overwrite.
+**
+** Reachable from BLE provisioning, which is unauthenticated in every shipped
+** sdkconfig.defaults, and from the UART command channel, which checks nothing.
+**
+** A missing end marker was the second half of the problem: the helper returned
+** 0 for "not found", and 0 was passed to the writer, which erased the field
+** and stored an empty string. Sending a malformed certificate destroyed the
+** stored one.
+**
+** EZPI_util_pem_store_len() now answers both questions and returns 0 to mean
+** "do not write". It is host-tested in tests/host/test_sanitize.c, including
+** at 4094 / 4095 / 4096 bytes, because the boundary is the whole point. */
 int EZPI_core_factory_info_v3_set_ssl_private_key(cJSON *cj_data)
 {
     int ret = 0;
     if (cj_data && cj_data->valuestring && cj_data->str_value_len)
     {
-        cj_data->str_value_len = ezlopi_calculate_certificate_length(cj_data->valuestring, "-----END PRIVATE KEY-----"); // Workaround : cJSON is not giving correct length
-        // TRACE_E("%.*s", cj_data->str_value_len, cj_data->valuestring);
-        ret = __EZPI_core_factory_info_v3_set_4kb(cj_data->valuestring, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_SSL_PRIVATE_KEY, E_EZLOPI_FACTORY_INFO_CONN_DATA), cj_data->str_value_len);
+        const uint32_t store_len = EZPI_util_pem_store_len(cj_data->valuestring, "-----END PRIVATE KEY-----", EZLOPI_FINFO_LEN_SSL_PRIVATE_KEY);
+        if (store_len)
+        {
+            cj_data->str_value_len = store_len; // Workaround : cJSON is not giving correct length
+            ret = __EZPI_core_factory_info_v3_set_4kb(cj_data->valuestring, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_SSL_PRIVATE_KEY, E_EZLOPI_FACTORY_INFO_CONN_DATA), store_len);
+        }
+        else
+        {
+            TRACE_E("private key refused: no end marker, or longer than the %d-byte field. Stored key left alone.", EZLOPI_FINFO_LEN_SSL_PRIVATE_KEY);
+        }
     }
     return ret;
 }
 
+/* NOTE: writes to SSL_SHARED_KEY, which is also where set_ssl_shared_key()
+** below writes. That is pre-existing and is left alone deliberately: there is
+** no SSL_PUBLIC_KEY offset in the partition layout, and the reader
+** EZPI_core_factory_info_v3_get_ssl_shared_key() caches what it finds there
+** into a variable called __pub_key, so this firmware treats the shared key and
+** the public key as one stored value. Changing the layout would change the
+** factory partition format, which provisioning tooling outside this repository
+** also writes. The consequence worth knowing is that
+** ezlopi_service_webprov.c calls set_ssl_public_key() and then
+** set_ssl_shared_key(), so when the cloud supplies both, the second overwrites
+** the first. Recorded in the changelog rather than changed here. */
 int EZPI_core_factory_info_v3_set_ssl_public_key(cJSON *cj_data)
 {
     int ret = 0;
     if (cj_data && cj_data->valuestring && cj_data->str_value_len)
     {
-        cj_data->str_value_len = ezlopi_calculate_certificate_length(cj_data->valuestring, "-----END PUBLIC KEY-----"); // Workaround : cJSON is not giving correct length
-        // TRACE_E("%.*s", cj_data->str_value_len, cj_data->valuestring);
-        ret = __EZPI_core_factory_info_v3_set_4kb(cj_data->valuestring, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_SSL_SHARED_KEY, E_EZLOPI_FACTORY_INFO_CONN_DATA), cj_data->str_value_len);
+        const uint32_t store_len = EZPI_util_pem_store_len(cj_data->valuestring, "-----END PUBLIC KEY-----", EZLOPI_FINFO_LEN_SSL_SHARED_KEY);
+        if (store_len)
+        {
+            cj_data->str_value_len = store_len; // Workaround : cJSON is not giving correct length
+            ret = __EZPI_core_factory_info_v3_set_4kb(cj_data->valuestring, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_SSL_SHARED_KEY, E_EZLOPI_FACTORY_INFO_CONN_DATA), store_len);
+        }
+        else
+        {
+            TRACE_E("public key refused: no end marker, or longer than the %d-byte field. Stored key left alone.", EZLOPI_FINFO_LEN_SSL_SHARED_KEY);
+        }
     }
     return ret;
 }
@@ -850,9 +902,16 @@ int EZPI_core_factory_info_v3_set_ssl_shared_key(cJSON *cj_data)
     int ret = 0;
     if (cj_data && cj_data->valuestring && cj_data->str_value_len)
     {
-        cj_data->str_value_len = ezlopi_calculate_certificate_length(cj_data->valuestring, "-----END CERTIFICATE-----"); // Workaround : cJSON is not giving correct length
-        // TRACE_E("%.*s", cj_data->str_value_len, cj_data->valuestring);
-        ret = __EZPI_core_factory_info_v3_set_4kb(cj_data->valuestring, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_SSL_SHARED_KEY, E_EZLOPI_FACTORY_INFO_CONN_DATA), cj_data->str_value_len);
+        const uint32_t store_len = EZPI_util_pem_store_len(cj_data->valuestring, "-----END CERTIFICATE-----", EZLOPI_FINFO_LEN_SSL_SHARED_KEY);
+        if (store_len)
+        {
+            cj_data->str_value_len = store_len; // Workaround : cJSON is not giving correct length
+            ret = __EZPI_core_factory_info_v3_set_4kb(cj_data->valuestring, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_SSL_SHARED_KEY, E_EZLOPI_FACTORY_INFO_CONN_DATA), store_len);
+        }
+        else
+        {
+            TRACE_E("shared key refused: no end marker, or longer than the %d-byte field. Stored key left alone.", EZLOPI_FINFO_LEN_SSL_SHARED_KEY);
+        }
     }
     return ret;
 }
@@ -862,9 +921,16 @@ int EZPI_core_factory_info_v3_set_ca_cert(cJSON *cj_data)
     int ret = 0;
     if (cj_data && cj_data->valuestring && cj_data->str_value_len)
     {
-        cj_data->str_value_len = ezlopi_calculate_certificate_length(cj_data->valuestring, "-----END CERTIFICATE-----"); // Workaround : cJSON is not giving correct length
-        // TRACE_E("%.*s", cj_data->str_value_len, cj_data->valuestring);
-        ret = __EZPI_core_factory_info_v3_set_4kb(cj_data->valuestring, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_CA_CERTIFICATE, E_EZLOPI_FACTORY_INFO_CONN_DATA), cj_data->str_value_len);
+        const uint32_t store_len = EZPI_util_pem_store_len(cj_data->valuestring, "-----END CERTIFICATE-----", EZLOPI_FINFO_LEN_CA_CERTIFICATE);
+        if (store_len)
+        {
+            cj_data->str_value_len = store_len; // Workaround : cJSON is not giving correct length
+            ret = __EZPI_core_factory_info_v3_set_4kb(cj_data->valuestring, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_CA_CERTIFICATE, E_EZLOPI_FACTORY_INFO_CONN_DATA), store_len);
+        }
+        else
+        {
+            TRACE_E("CA certificate refused: no end marker, or longer than the %d-byte field. Stored certificate left alone.", EZLOPI_FINFO_LEN_CA_CERTIFICATE);
+        }
     }
     return ret;
 }
@@ -1002,6 +1068,21 @@ static bool __ezlopi_check_mac_validity(const char *mac)
 static int __EZPI_core_factory_info_v3_set_4kb(const char *data, uint32_t offset, uint32_t len)
 {
     int ret = 0;
+
+    /* The erase below clears exactly EZLOPI_FINFO_READ_LEN_4KB bytes and the
+    ** write below puts down len + 1, so anything larger lands outside the
+    ** field -- in flash this call has not erased, and in the next field along.
+    ** Every caller is now bounded before it gets here, so this is the second
+    ** line of defence rather than the first; it exists because the name of
+    ** this function promises a 4 KB write and nothing used to enforce it. A
+    ** caller that gets it wrong should fail loudly rather than corrupt the
+    ** neighbouring field. */
+    if ((len + 1u) > EZLOPI_FINFO_READ_LEN_4KB)
+    {
+        TRACE_E("refusing a %u-byte write to a %d-byte field at offset 0x%04X", len, EZLOPI_FINFO_READ_LEN_4KB, offset);
+        return 0;
+    }
+
     char *tmp_variable = ezlopi_malloc(__FUNCTION__, len + 1);
 
     if (tmp_variable)

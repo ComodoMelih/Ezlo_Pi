@@ -123,6 +123,92 @@ None of these have been exercised on physical hardware; see Known gaps.
   `EZLOPI_FINFO_OFFSET_HUB_DATA` (`0x6000`), and base64 expands by 4/3, so 4/3
   of that region already exceeds any storable payload.
 
+- **Flash overflow writing certificates and keys: one field could overwrite
+  the next.** The four PEM setters in
+  [`ezlopi_core_factory_info.c`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c)
+  — CA certificate, SSL private key, public key and shared key — each took
+  their length from `ezlopi_calculate_certificate_length()`, which returns the
+  position of the PEM end marker in a client-supplied string and has no upper
+  bound. That length went to a writer whose name promises otherwise:
+  `__EZPI_core_factory_info_v3_set_4kb()` erases exactly `0x1000` bytes and
+  then writes `len + 1`.
+
+  The fields are contiguous inside one 32 KB partition, so the overflow had
+  somewhere to go:
+
+  | field | offset | what an over-long value runs into |
+  |---|---|---|
+  | `EZLOPI_CONFIG_JSON` | `0x1000` | 4 KB of unused space at `0x2000` |
+  | `CA_CERTIFICATE` | `0x3000` | the SSL private key |
+  | `SSL_PRIVATE_KEY` | `0x4000` | the shared key |
+  | `SSL_SHARED_KEY` | `0x5000` | **hub data — serial number, Wi-Fi SSID and password, MAC** |
+
+  The spilled bytes also landed in flash this call had *not* erased, and NOR
+  flash can only clear bits on write, so the neighbouring field was corrupted
+  rather than cleanly replaced. The write stays inside the partition, so
+  `esp_partition_write` had no reason to refuse it.
+
+  Reached from BLE provisioning
+  ([`ezlopi_service_ble_provisioning.c:472`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c#L472)),
+  which is unauthenticated in every shipped `sdkconfig.defaults`, and from
+  UART `cmd` handling, which checks nothing. Both pass a JSON string straight
+  through.
+
+- **A malformed certificate destroyed the stored one.** The same helper
+  returned `0` when the end marker was *absent*, and the setters passed that
+  `0` to the writer — which duly erased the whole 4 KB field and stored an
+  empty string. So supplying a certificate without its `-----END ... -----`
+  trailer was not rejected; it wiped the real certificate. The non-zero guard
+  on the way in (`cj_data->str_value_len`) did not help, because it tested the
+  length *before* the recalculation replaced it with 0.
+
+  Both are now decided by `EZPI_util_pem_store_len()` in
+  `ezlopi-util-sanitize`, which bounds the value against the field it is going
+  into and **refuses rather than truncates** — a truncated certificate is not a
+  certificate, and storing a prefix would trade a clear failure for a device
+  that fails to connect for no visible reason. A missing end marker refuses
+  too, so the stored value is left alone. `set_4kb()` additionally refuses any
+  write larger than the field as a second line of defence, since its name
+  promised a bound that nothing enforced. `ezlopi_calculate_certificate_length()`
+  is deleted rather than left available: it had external linkage but no
+  declaration in any header, so nothing outside that file could call it, and
+  leaving it invites the next person who needs a certificate length to reuse
+  it.
+
+  Covered by 26 host checks in `tests/host/test_sanitize.c` (72 → 98 in that
+  binary), testing the boundary at 4094 / 4095 / 4096 bytes rather than at one
+  arbitrary "big" value, and mutation-tested 4 of 4 caught (removing the bound,
+  an off-by-one that forgets the terminator, falling back to `strlen` when the
+  marker is missing, and truncating instead of refusing) against a control
+  reporting 0. **Untested on hardware** — no board has been provisioned with an
+  over-long certificate, and the flash-level consequence above is read from the
+  layout constants and the ESP-IDF write semantics rather than observed.
+
+  The arithmetic is host-tested, but the two things that make it load-bearing
+  are not reachable from a host test, because
+  `ezlopi_core_factory_info.c` needs `esp_partition` and cannot be
+  host-compiled at all: that the setters actually call the bounded helper, and
+  that the backstop inside `set_4kb()` still exists. Both are silent when
+  undone — deleting the backstop leaves a function whose name promises a 4 KB
+  write and whose body writes whatever it is handed, and all four images still
+  build clean. So
+  [`tests/ci/check_finfo_pem_bound.py`](tests/ci/check_finfo_pem_bound.py)
+  enforces them textually, self-testing its own scanner against eleven samples
+  on every run — including the prose in that file, which names the deleted
+  helper and would otherwise make the check fire on the fixed source. Verified
+  against the pre-fix file, where it reports ten findings and exits 1.
+
+  Noted but deliberately *not* changed: `set_ssl_public_key()` writes to the
+  `SSL_SHARED_KEY` offset, the same field `set_ssl_shared_key()` uses. There is
+  no `SSL_PUBLIC_KEY` offset in the layout and the reader caches that field
+  into a variable named `__pub_key`, so this firmware treats the two as one
+  stored value. The visible consequence is that
+  [`ezlopi_service_webprov.c`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c)
+  calls `set_ssl_public_key()` and then `set_ssl_shared_key()`, so when the
+  cloud supplies both the second overwrites the first. Fixing it means adding a
+  field to the factory partition layout, which provisioning tooling outside
+  this repository also writes, so it is recorded rather than changed.
+
 - **Unauthenticated heap exhaustion: three leaked cJSON trees per BLE write.**
   `ezpi_provisioning_info_write_func()` parsed the envelope of every inbound
   chunk and never freed it; the reassembly loop above parsed and leaked one
@@ -1865,7 +1951,7 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 3981 assertions across
+- **New host test suite, [`tests/host/`](tests/host/)**: 4007 assertions across
   fifteen binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under

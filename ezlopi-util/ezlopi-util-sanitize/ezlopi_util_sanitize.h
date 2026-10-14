@@ -134,6 +134,43 @@ extern "C"
      */
     uint32_t EZPI_util_copy_str_bounded(char *dst, uint32_t dst_size, const char *src, uint32_t src_len);
 
+    /**
+     * @brief Decide how much of a PEM field may be written to a fixed region.
+     *
+     * Returns the number of bytes to store, counting up to and including
+     * @p end_marker and excluding the NUL terminator, or **0 meaning refuse**.
+     *
+     * Exists because the factory-info partition stores certificates and keys
+     * in adjacent fixed 4 KB fields, and the length handed to the writer was
+     * the position of the PEM end marker in a client-supplied string --
+     * unbounded. The writer erases one field and then writes `len + 1` bytes,
+     * so a value longer than the field wrote into whatever follows it. The
+     * fields are contiguous (CA certificate, private key, shared key) and the
+     * hub-data block holding the serial number and Wi-Fi credentials follows
+     * the last of them inside the same partition, so an over-long value
+     * corrupted the next field rather than being rejected.
+     *
+     * Two deliberate choices:
+     *
+     * - **Refuse rather than truncate.** A truncated certificate is not a
+     *   certificate, and storing a prefix of one would replace a clear failure
+     *   with a device that fails to connect for a reason nobody can see.
+     * - **A missing end marker refuses too.** The previous code returned 0 for
+     *   "marker not found" and the callers passed that straight to the writer,
+     *   which erased the whole field and stored an empty string. Supplying a
+     *   malformed certificate therefore destroyed the stored one. Since 0 is
+     *   also this function's refusal value, callers must treat it as "do not
+     *   write" rather than "write nothing".
+     *
+     * @param value       NUL-terminated candidate. NULL refuses.
+     * @param end_marker  PEM trailer to search for, e.g.
+     *                    "-----END CERTIFICATE-----". NULL refuses.
+     * @param region_size Size of the destination field in bytes, including
+     *                    room for the NUL the writer appends.
+     * @return Bytes to store, or 0 to refuse.
+     */
+    uint32_t EZPI_util_pem_store_len(const char *value, const char *end_marker, uint32_t region_size);
+
 #ifdef __cplusplus
 }
 #endif

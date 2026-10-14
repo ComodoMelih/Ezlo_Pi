@@ -46,6 +46,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h> /* malloc/free, for the 4 KB boundary cases */
 #include <string.h>
 
 #include "ezlopi_util_sanitize.h"
@@ -269,6 +270,159 @@ static void test_copy_str_bounded(void)
     CHECK('Z' == g.dst[1], "one-byte destination wrote past its size");
 }
 
+/* The factory-info fields are 4 KB each and the writer appends a terminator,
+ * so 4095 bytes of content is the largest that fits. The boundary is the whole
+ * point of the function, so it is tested at 4094 / 4095 / 4096 rather than at
+ * one "big" value. */
+#define PEM_REGION 4096u
+
+static const char CERT_END[] = "-----END CERTIFICATE-----";
+
+/* Build a PEM-shaped string whose total length up to and including the end
+ * marker is exactly 'total'. Returns NULL if 'total' cannot hold the marker. */
+static char *make_pem(size_t total)
+{
+    const size_t marker_len = strlen(CERT_END);
+
+    if (total < marker_len)
+    {
+        return NULL;
+    }
+
+    char *buf = malloc(total + 1);
+
+    if (NULL == buf)
+    {
+        return NULL;
+    }
+
+    memset(buf, 'A', total - marker_len);
+    memcpy(buf + (total - marker_len), CERT_END, marker_len);
+    buf[total] = '\0';
+
+    return buf;
+}
+
+static void test_pem_store_len(void)
+{
+    puts("-- the bound that was missing --");
+
+    /* The defect: the length was the marker position, handed to a writer that
+     * erases 4 KB and then writes len + 1 bytes. Anything over the region
+     * wrote into the next field, which for the shared key is the hub-data
+     * block holding the serial number and Wi-Fi credentials. */
+    for (size_t total = PEM_REGION - 2u; total <= PEM_REGION + 2u; total++)
+    {
+        char *pem = make_pem(total);
+        CHECK(NULL != pem, "could not build a %zu-byte PEM", total);
+
+        if (NULL == pem)
+        {
+            continue;
+        }
+
+        const uint32_t got = EZPI_util_pem_store_len(pem, CERT_END, PEM_REGION);
+
+        if (total + 1u <= PEM_REGION)
+        {
+            CHECK(total == got, "%zu bytes fits in %u, got %u", total, PEM_REGION, got);
+        }
+        else
+        {
+            CHECK(0 == got, "%zu bytes must be refused in %u, got %u", total, PEM_REGION, got);
+        }
+
+        free(pem);
+    }
+
+    /* Exactly the largest accepted value, stated as a literal so the boundary
+     * is readable without re-deriving it from the loop above. */
+    {
+        char *pem = make_pem(4095);
+        CHECK(NULL != pem, "could not build the exact-fit PEM");
+
+        if (NULL != pem)
+        {
+            CHECK(4095 == EZPI_util_pem_store_len(pem, CERT_END, PEM_REGION),
+                  "4095 bytes is the exact fit in a 4096-byte field");
+            free(pem);
+        }
+    }
+
+    puts("-- a missing end marker must refuse, not erase --");
+
+    /* This is the second defect. The old helper returned 0 here and the
+     * callers passed it straight to the writer, which erased the field and
+     * stored an empty string -- so sending a malformed certificate destroyed
+     * the stored one. The value is still 0, but it now means "do not write". */
+    CHECK(0 == EZPI_util_pem_store_len("no marker here at all", CERT_END, PEM_REGION),
+          "a value with no end marker must be refused");
+    CHECK(0 == EZPI_util_pem_store_len("", CERT_END, PEM_REGION),
+          "an empty value must be refused");
+    CHECK(0 == EZPI_util_pem_store_len("-----BEGIN CERTIFICATE-----", CERT_END, PEM_REGION),
+          "a truncated PEM with only a header must be refused");
+
+    puts("-- the marker position is what counts, not the string length --");
+
+    /* Trailing bytes after the marker are excluded, which is the behaviour the
+     * original length calculation had and which must not change: the stored
+     * field ends at the marker. */
+    CHECK(strlen(CERT_END) == EZPI_util_pem_store_len(CERT_END, CERT_END, PEM_REGION),
+          "a bare marker stores exactly its own length");
+
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s%s", CERT_END, "trailing junk");
+        CHECK(strlen(CERT_END) == EZPI_util_pem_store_len(buf, CERT_END, PEM_REGION),
+              "bytes after the marker are not stored");
+    }
+
+    /* A marker that appears twice ends the field at the first one, matching
+     * strstr and the original calculation. */
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s%s", CERT_END, CERT_END);
+        CHECK(strlen(CERT_END) == EZPI_util_pem_store_len(buf, CERT_END, PEM_REGION),
+              "the first marker ends the field");
+    }
+
+    puts("-- a long value is refused even when the marker is early --");
+
+    /* The marker position bounds the result, so a megabyte of trailing junk
+     * after an early marker is still accepted -- only the stored part is
+     * measured. Worth asserting, because clamping on strlen() instead would
+     * reject this and break legitimate input. */
+    {
+        char *buf = malloc(8192);
+        CHECK(NULL != buf, "allocation for the trailing-junk case");
+
+        if (NULL != buf)
+        {
+            memcpy(buf, CERT_END, strlen(CERT_END));
+            memset(buf + strlen(CERT_END), 'B', 8192 - strlen(CERT_END) - 1);
+            buf[8191] = '\0';
+
+            CHECK(strlen(CERT_END) == EZPI_util_pem_store_len(buf, CERT_END, PEM_REGION),
+                  "an early marker is accepted however long the rest is");
+            free(buf);
+        }
+    }
+
+    puts("-- argument checks --");
+
+    CHECK(0 == EZPI_util_pem_store_len(NULL, CERT_END, PEM_REGION), "NULL value");
+    CHECK(0 == EZPI_util_pem_store_len("x", NULL, PEM_REGION), "NULL marker");
+    CHECK(0 == EZPI_util_pem_store_len(CERT_END, CERT_END, 0), "zero region refuses");
+
+    /* A region too small for even the marker. Checks the comparison does not
+     * underflow on the way to saying no. */
+    CHECK(0 == EZPI_util_pem_store_len(CERT_END, CERT_END, 1), "one-byte region refuses");
+    CHECK(0 == EZPI_util_pem_store_len(CERT_END, CERT_END, (uint32_t)strlen(CERT_END)),
+          "a region one byte short of the marker refuses");
+    CHECK(strlen(CERT_END) == EZPI_util_pem_store_len(CERT_END, CERT_END, (uint32_t)strlen(CERT_END) + 1u),
+          "a region exactly big enough including the NUL accepts");
+}
+
 /*******************************************************************************
  *                          Public Function Definitions
  *******************************************************************************/
@@ -283,6 +437,7 @@ int main(void)
     test_redact_secrets();
     test_clamp_copy_len();
     test_copy_str_bounded();
+    test_pem_store_len();
 
     printf("%u check(s), %u failure(s)\n", tests_run, tests_failed);
 

@@ -145,6 +145,32 @@ jobs:
       - name: factory-info field copies stay bounded by the source
         run: python3 tests/ci/check_finfo_bounded_store.py
 
+      # The same partition, a different unbounded write. The four PEM setters
+      # -- private key, public key, shared key, CA certificate -- took their
+      # length from the position of a PEM end marker inside a client-supplied
+      # string, with no upper bound, and handed it to a function that erases
+      # one 4 KB field and writes len + 1. The fields are contiguous, so an
+      # over-long CA certificate wrote into the private key and an over-long
+      # shared key wrote into the hub data at 0x6000, which holds the serial
+      # number and the Wi-Fi credentials. The spilled bytes land in flash the
+      # call never erased, and NOR flash only clears bits on write, so the
+      # neighbour is corrupted rather than replaced; the write stays inside
+      # the partition, so esp_partition_write does not refuse it. Reachable
+      # over BLE provisioning, unauthenticated in every shipped defaults
+      # file, and over UART, which checks nothing.
+      #
+      # A missing marker was the other half: the old helper returned 0, and 0
+      # reached the writer, which erased the field and stored an empty string
+      # -- so a malformed certificate destroyed the stored one.
+      #
+      # The arithmetic is host-tested at 4094/4095/4096 in test_sanitize, but
+      # this file needs esp_partition and cannot be host-compiled, so neither
+      # "the setters call the bounded helper" nor "the backstop inside the
+      # writer still exists" is reachable from a host test. That is what this
+      # checks. It fails with ten findings against the pre-fix file.
+      - name: 4 KB factory-info writes stay inside their field
+        run: python3 tests/ci/check_finfo_pem_bound.py
+
       # 83 files used to include the generated config as
       # "../../build/config/sdkconfig.h", which pins both the build
       # directory's name and its position relative to the source file -- so the
