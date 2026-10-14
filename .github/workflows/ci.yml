@@ -236,6 +236,33 @@ jobs:
           fi
           echo "mDNS service advert is linked in for ${{ matrix.target }}."
 
+      # The certificate bundle is embedded in all four shipped images whether
+      # or not OTA is enabled, because ezlopi_core_http.c calls
+      # esp_crt_bundle_attach() and that links both the code and the blob. So
+      # its contents are a property of every build, not just the OTA ones, and
+      # this runs here rather than only in firmware-ota-bundle.
+      #
+      # What it guards is a documentation claim with no other enforcement. The
+      # four targets do not agree on which root set they use -- esp32 is CMN
+      # (36 roots), the other three are FULL (136) -- and the Kconfig help for
+      # EZPI_OTA_CA_BUNDLE now states, per target, which roots a self-hosted
+      # firmware server can present. Nothing in a build would notice that going
+      # stale: ESP-IDF generates the bundle from its own CSV and PEM, embeds
+      # whatever is in it, and esp_crt_bundle_attach() returns ESP_OK either
+      # way. Bumping the IDF pin is enough to make the documentation wrong, and
+      # the first symptom would be a hub in the field failing an update with a
+      # TLS error.
+      #
+      # The check is bidirectional, which matters: it fails if a root the docs
+      # promise goes missing, and equally if a root the docs warn is absent
+      # turns up. The esp32 "Let's Encrypt does not work here" warning is only
+      # worth printing while it is true, and CMN still carries the expired DST
+      # Root CA X3 that Let's Encrypt used to cross-sign from, so "an ISRG root
+      # is in there somewhere" is not a safe assumption to leave unchecked.
+      - name: Confirm the embedded CA bundle holds the roots the docs promise
+        shell: bash
+        run: python3 tests/ci/check_ota_ca_bundle_roots.py build
+
       # A flashable install is four images at four offsets: bootloader,
       # partition table, OTA data, application. The artifact below uploads
       # "build/*.bin", which is a non-recursive glob -- it matched the
@@ -420,9 +447,16 @@ jobs:
           # The pinned chain has to actually reach the image. ca_mios is a
           # file-scope array, so it survives in the symbol table -- and unlike
           # esp_crt_bundle_attach it genuinely discriminates between the two
-          # modes. esp_crt_bundle_attach is linked in BOTH (mbedtls pulls it in
-          # regardless of whether this code references it), so asserting on it
-          # would pass either way and prove nothing. Checked, not assumed.
+          # modes. esp_crt_bundle_attach is linked in BOTH, so asserting on it
+          # would pass either way and prove nothing.
+          #
+          # Not because "mbedtls links it regardless", which is what this
+          # comment used to say and is wrong -- the linker does drop it when
+          # nothing references it. It is because ezlopi_core_http.c references
+          # it unconditionally for the outbound provision-sync call, which
+          # pulls in both the function and the embedded bundle blob on every
+          # target whether OTA is on or off. Read out of the .map of real
+          # esp32 and esp32c3 builds, not assumed.
           xtensa-esp32-elf-nm build/*.elf > ota-symbols.txt
           if ! grep -q ' ca_mios$' ota-symbols.txt; then
             echo "::error::CONFIG_EZPI_OTA_CA_HEADER is set but ca_mios is not in the image,"
@@ -489,10 +523,10 @@ jobs:
           done
           xtensa-esp32-elf-nm build/*.elf > ota-bundle-symbols.txt
           # The discriminator is ca_mios, NOT esp_crt_bundle_attach. The latter
-          # is present in both modes because mbedtls links it regardless of
-          # whether this code takes its address, so it cannot tell the two
-          # configurations apart. ca_mios can: it only exists when the pinned
-          # header was compiled in.
+          # is present in both modes -- ezlopi_core_http.c references it
+          # unconditionally, which links it and the bundle blob regardless of
+          # this option -- so it cannot tell the two configurations apart.
+          # ca_mios can: it only exists when the pinned header was compiled in.
           if grep -q ' ca_mios$' ota-bundle-symbols.txt; then
             echo "::error::ca_mios is in the image even though the bundle was selected."
             echo "::error::The pinned header leaked past its #if in ezlopi_core_ota.c."

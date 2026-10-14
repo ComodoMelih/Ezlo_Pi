@@ -787,16 +787,15 @@ failure.
     self-signed CA.
   - `EZPI_OTA_CA_BUNDLE` — verify against the root certificates ESP-IDF already
     embeds, the way a browser would. **No `ca_mios.h` is needed, so an
-    OTA-capable image builds from a clean clone.** Any server with an ordinary
-    public certificate works, so a GitHub release asset or anything behind
-    Let's Encrypt is enough.
+    OTA-capable image builds from a clean clone.** A server with an ordinary
+    public certificate works, with the per-target caveat below.
 
-  This is close to free: `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` with the common
-  root set is already in every shipped target's configuration, and
-  `esp_crt_bundle.h` was already `#include`d in `ezlopi_core_ota.c` but unused.
-  Measured on esp32 with OTA on: pinned `0x191b60`, bundle `0x191b10` — the
-  bundle build is 80 bytes *smaller*, because it drops the embedded PEM string
-  and starts using bytes the image was already carrying.
+  This is close to free: `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` is already in
+  every shipped target's configuration, and `esp_crt_bundle.h` was already
+  `#include`d in `ezlopi_core_ota.c` but unused. Measured on esp32 with OTA on:
+  pinned `0x191b60`, bundle `0x191b10` — the bundle build is 80 bytes
+  *smaller*, because it drops the embedded PEM string and starts using bytes
+  the image was already carrying.
 
   The trade-off is stated in the Kconfig help rather than hidden: selecting the
   bundle widens trust from one chain to every CA in it.
@@ -811,10 +810,148 @@ failure.
 
   The link-presence check is on the `ca_mios` symbol, not on
   `esp_crt_bundle_attach`. The latter looks like the obvious thing to assert and
-  is useless: mbedtls links it regardless of whether this code takes its
-  address, so it is present in *both* configurations and an assertion on it
+  is useless: it is present in *both* configurations, so an assertion on it
   would pass either way. `ca_mios` genuinely discriminates, and both assertions
   were checked against the opposite build to confirm they fail when they should.
+
+  > The reason `esp_crt_bundle_attach` is present either way was recorded here
+  > as "mbedtls links it regardless". That is not right, and the real reason
+  > matters more. The linker does drop it when nothing references it — what
+  > references it is `ezlopi_core_http.c`, unconditionally, for the outbound
+  > provision-sync call. Read out of the `.map` of real builds: on esp32
+  > `esp_crt_bundle_attach` is at `0x4017f040` and the 14,746-byte blob at
+  > `0x3f427d05`, pulled in by
+  > `libezlopi-core-http.a(ezlopi_core_http.c.obj) (_binary_x509_crt_bundle_start)`;
+  > same on esp32c3 with the 63,739-byte blob. So the bundle is already in
+  > every shipped image whether OTA is on or off, which is what makes
+  > `EZPI_OTA_CA_BUNDLE` cost nothing — and it is also why the symbol cannot
+  > discriminate. Right conclusion, wrong mechanism, now checked.
+
+- **Corrected: the bundle does not reach Let's Encrypt on esp32.** The entry
+  above, and the Kconfig help it describes, both said a self-hosted firmware
+  server behind "a GitHub release asset or anything behind Let's Encrypt" would
+  work. The GitHub half is true on all four targets. The Let's Encrypt half is
+  false on esp32, and the reason is drift in configuration this project
+  inherited rather than anything it did.
+
+  ESP-IDF ships two root sets, and the four committed `sdkconfig.defaults.*`
+  files do not agree on which to use —
+  `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN` on esp32,
+  `..._DEFAULT_FULL` on esp32c3, esp32s3 and esp32s2. Both lines come from the
+  same upstream commit (`f2a74e5`), so this is drift and not a decision.
+  Reading the bundle out of real builds rather than trusting the CSV:
+
+  | Target | Root set | Roots | Bytes | ISRG Root X1 / X2 |
+  |---|---|---|---|---|
+  | esp32 | CMN | 36 | 14,746 | **absent** |
+  | esp32c3 | FULL | 136 | 63,739 | present |
+
+  Let's Encrypt has issued from ISRG Root X1 since the `DST Root CA X3`
+  cross-sign ended in 2021. `DST Root CA X3` is *still in the CMN set*, which
+  is the part that makes this worth writing down: the root is there, it is
+  expired, and it signs nothing current — so "an ISRG root is in the bundle
+  somewhere" and "grep found a Let's Encrypt root" are both the wrong question.
+  The same opt-in configuration therefore verifies a Let's Encrypt firmware
+  host on three targets and fails TLS on the fourth, with no diagnostic beyond
+  a TLS error on a hub in the field.
+
+  The shipped root sets are **left alone.** Aligning esp32 to `FULL` was built
+  and measured rather than estimated — `0x19c3a0` against `0x190440`, so 48,992
+  bytes, taking it from 19% free to 17%, which is almost exactly the
+  48,993-byte difference between the two embedded blobs. Affordable, then, but
+  it would also widen trust for `ezlopi_core_http.c`, which already uses the
+  bundle for the outbound provision-sync call, and that is upstream's call
+  rather than a side effect of a documentation fix.
+  What changed is that the Kconfig help and README now state the per-target
+  answer and what to do about it, instead of a sentence that was true on three
+  targets out of four.
+
+- **The per-target root sets are now a check, not a claim.**
+  `tests/ci/check_ota_ca_bundle_roots.py` walks the bundle the build actually
+  embedded — `gen_crt_bundle.py` writes a big-endian count, then per
+  certificate a 2+2 byte length header, the subject-name DER and the key DER —
+  and compares the subject CNs against the set the documentation promises for
+  that variant.
+
+  It has to be a check because the thing being asserted is the content of a
+  file this repository does not own: ESP-IDF generates it from its own CSV and
+  PEM, and bumping the IDF pin can change it. No build would notice. The bundle
+  is generated, embedded and linked whatever is in it, and
+  `esp_crt_bundle_attach()` returns `ESP_OK` either way.
+
+  It fails in **both** directions, which is the part an earlier draft got
+  wrong. A root the docs promise going missing is the obvious failure. A root
+  the docs warn is absent turning up is also a failure, because then the esp32
+  Let's Encrypt warning has quietly become a lie and self-hosters are being
+  steered away from something that would have worked.
+
+  Verified by mutation on real artifacts, not only on fixtures: presenting the
+  real esp32 CMN bundle to the FULL expectations reports both ISRG roots
+  missing; presenting the real esp32c3 FULL bundle to the CMN expectations
+  reports both as unexpectedly present; and flipping one byte of a real bundle
+  is rejected by the parser as `certificate 2 of 36 claims 33282+8752 bytes but
+  only 14319 remain` rather than silently yielding a short list that would read
+  as "roots are missing". The ten self-test cases cover the same ground plus an
+  empty bundle, which must not pass as "nothing required is missing".
+
+  It runs in the four-target `firmware` matrix rather than only in
+  `firmware-ota-bundle`, because the bundle is in all four images regardless of
+  OTA, so its contents are a property of every build.
+
+- **OTA stays off by default, and the Kconfig help now says why.** The goal was
+  to turn it on. Having checked what that would take, it should not be turned
+  on, and leaving `default n` with the word "Enable OTA" as its entire help text
+  made a deliberate position look like an oversight.
+
+  Everything mechanical is already in place. The partition table carries `ota0`
+  and `ota1` at `0x1EFC00` each plus `otadata` at `0x15000`; all four
+  `sdkconfig.defaults.*` have `CONFIG_EZPI_ENABLE_WIFI=y` and
+  `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y`; and the OTA client itself was hardened
+  in earlier work in this changelog. Measured on esp32 with
+  `CONFIG_EZPI_ENABLE_OTA=y` and `CONFIG_EZPI_OTA_CA_BUNDLE=y`, built from a
+  tree containing no `ca_mios.h`: `0x1923f0` against `0x190440` for the default
+  build, so **8,112 bytes**, still 19% free. It builds, links, and the image
+  contains `esp_https_ota` and no `ca_mios`.
+
+  The blocker is that neither certificate source is defensible *as a default*:
+
+  - `EZPI_OTA_CA_HEADER`, the current default, needs `ca_mios.h`. That file is
+    in `.gitignore` — `git blame` puts the line in upstream commit `f2a74e5`,
+    so it is upstream's decision, not this fork's. `default y` with this CA
+    source would mean **a clean clone fails to build**, which is worse for a
+    new user than OTA being off. Committing a CA header to work around it would
+    reverse an upstream decision.
+  - `EZPI_OTA_CA_BUNDLE` builds from a clean clone, but as the default it
+    widens trust from one chain to every public root. The `firmware-ota` job
+    already asserts the default has not moved off the pinned header, which is a
+    guard an earlier session put there on purpose; silently flipping it would
+    just be defeating that guard from the other side.
+
+  So it remains opt-in, with the two lines to add written out in the help text
+  and in README §6.1, and both paths built in CI. Worth noting what the choice
+  does *not* buy either way: **no shipped configuration verifies the firmware
+  image itself.** `CONFIG_SECURE_BOOT` and
+  `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` are unset on all four targets
+  (esp32c3 carries `CONFIG_SECURE_BOOT_SUPPORTS_RSA=y`, which is a chip
+  capability, not a configuration), so an image is trusted on the strength of
+  where it was downloaded from and nothing else — and what the pinned option
+  pins is a CA root, not Ezlo's host, so an attacker holding any certificate
+  from that one root is not excluded by it either.
+
+  Both triggers were traced rather than assumed. `hub.firmware.update.start` is
+  registered in `ezlopi_core_api_macros.h` behind `CONFIG_EZPI_ENABLE_OTA` and
+  reachable from two places: Ezlo's cloud websocket, and the local websocket
+  server — where `__message_upcall()` admits nothing but `hub.offline.login.ui`
+  until `EZPI_core_offline_is_user_logged_in()`, whose token is compared
+  against the stored local key. The local key is **write-only** across every
+  external surface (grep of BLE and UART for `local_key` finds only the two
+  provisioning writers, and the BLE device-info payload does not carry it), so
+  there is no unauthenticated path to an update. The README and Kconfig help
+  now record the signed-OTA option —
+  `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT`, which makes
+  `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` default on and needs no
+  eFuses burned — as the answer for self-hosters, along with the reason it
+  cannot be a default here: a hub built that way refuses Ezlo's images.
 
 ### Local API credentials — [sec]
 
@@ -1569,6 +1706,15 @@ enumerators — so the live half of this component was never affected.
   rather than argued from the source, and the claim that the fix preserves
   stored bytes was tested across eight cases with a harness that was mutated
   to prove it can report a mismatch.
+
+- **New CI check that the embedded CA bundle holds the roots the docs promise,
+  [`tests/ci/check_ota_ca_bundle_roots.py`](tests/ci/check_ota_ca_bundle_roots.py).**
+  Runs on all four targets in the `firmware` matrix. Full reasoning under
+  **OTA — [feat]** above; the short version is that it polices a documentation
+  claim about a file ESP-IDF generates, so an IDF pin bump can falsify it with
+  nothing in any build going red. It fails in both directions — a promised root
+  going missing, and a root the docs warn is absent appearing — and was
+  verified by mutating real bundles, not just its own ten fixtures.
 
 - **`ezlopi-util-uuid` joined the suite** — `tests/host/test_uuid.c`, 431
   checks. It ties MB1013 for the shortest build rule in the `Makefile` — one

@@ -284,7 +284,44 @@ menu "EzloPi User Config"
         bool "Enable OTA"
         default n
         help
-            Enable OTA
+            Over-the-air firmware update, via hub.firmware.update.start.
+
+            Everything needed is already in place: the partition tables
+            carry ota0, ota1 and otadata, and all four committed
+            sdkconfig.defaults.* files enable Wi-Fi and the mbedTLS
+            certificate bundle. Turning this on is two lines, and costs
+            8112 bytes on esp32 (0x1923f0 against 0x190440), leaving 19%
+            of the app partition free.
+
+            WHY IT IS STILL OFF BY DEFAULT. Not an oversight, and not
+            because the code is untrusted -- it is because neither available
+            certificate source is a defensible default:
+
+              * EZPI_OTA_CA_HEADER, the default, needs
+                ezlopi-core-ota/ca_mios.h. That file is in .gitignore, put
+                there by upstream, so a clean clone does not have it and
+                this being "y" by default would mean a clean clone fails to
+                build. Shipping a CA header here would reverse an upstream
+                decision, so it is not done.
+
+              * EZPI_OTA_CA_BUNDLE builds from a clean clone, but making it
+                the default widens trust from one chain to every public root
+                ESP-IDF embeds. The CI job firmware-ota asserts the default
+                is still the pinned header, deliberately, so that cannot
+                happen by accident.
+
+            So enabling OTA is an opt-in with one decision attached, rather
+            than a default with a hidden one. To turn it on, add to
+            sdkconfig.defaults.<target>:
+
+                CONFIG_EZPI_ENABLE_OTA=y
+                CONFIG_EZPI_OTA_CA_BUNDLE=y
+
+            and read the EZPI_OTA_CA_BUNDLE help below -- particularly the
+            part about which roots your target actually carries, and the
+            fact that no shipped configuration verifies the firmware image
+            itself. Both CA paths are built in CI (firmware-ota and
+            firmware-ota-bundle), so neither rots.
 
     choice EZPI_OTA_CA_SOURCE
         prompt "OTA server certificate verification"
@@ -326,15 +363,56 @@ menu "EzloPi User Config"
                 ESP-IDF already embeds, the way a browser would. No
                 ca_mios.h is needed, so OTA builds from a clean clone.
 
-                This is the option for hosting firmware yourself: any server
-                with a certificate from a public CA works, so a GitHub
-                release asset or anything behind Let's Encrypt is enough,
-                with no certificate handling in the firmware at all.
+                This is the option for hosting firmware yourself: a server
+                with a certificate from a public CA works, with no
+                certificate handling in the firmware at all. A GitHub
+                release asset is fine on every target -- those chain to
+                DigiCert, which both root sets carry.
 
-                The bundle is already enabled and already in the image for
-                every shipped target (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE is
-                on, with the common root set), so selecting this adds
-                essentially no flash. It starts using bytes already carried.
+                WHICH ROOTS, PER TARGET. ESP-IDF ships two root sets and the
+                committed defaults do not agree on which to use:
+
+                    esp32                   CMN,   36 roots
+                    esp32c3/s3/s2           FULL, 136 roots
+
+                CMN does not contain ISRG Root X1 or X2, so Let's Encrypt
+                does not verify on esp32. It does on the other three. CMN
+                still carries DST Root CA X3, which is the trap -- Let's
+                Encrypt stopped issuing from that cross-sign in 2021, so the
+                root is present, expired, and signs nothing current.
+
+                If you are self-hosting on esp32, either use a certificate
+                from a commercial CA (DigiCert, Sectigo/USERTrust, Amazon,
+                GlobalSign, GoDaddy, Google Trust Services) or set
+                CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL, measured at
+                48992 bytes on esp32 (0x19c3a0 against 0x190440), which takes
+                it from 19% free to 17%.
+                tests/ci/check_ota_ca_bundle_roots.py
+                checks these statements against the bundle a build actually
+                embedded, so they cannot quietly rot when the IDF pin moves.
+
+                The bundle is already in the image on every shipped target
+                regardless of this option -- ezlopi_core_http.c calls
+                esp_crt_bundle_attach(), which links both the code and the
+                blob -- so selecting this adds essentially no flash. It
+                starts using bytes already carried. Verified in the .map of
+                real esp32 and esp32c3 builds, not assumed.
+
+                WHAT THIS DOES NOT GIVE YOU. Widening trust from one chain
+                to every public root only matters if someone can choose the
+                URL, and both callers of hub.firmware.update.start are
+                authenticated (Ezlo's cloud socket, or the local websocket
+                behind hub.offline.login.ui). But note that neither option
+                verifies the image itself: there is no secure boot and no
+                signed-app verification in any shipped configuration, so the
+                firmware is trusted because of where it came from and
+                nothing else. If you self-host and want that gap closed, set
+                CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT, which makes
+                CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT the default and
+                has esp_ota_ops reject any image not signed by your key. It
+                burns no eFuses and needs no secure boot -- but a hub built
+                that way will refuse Ezlo's images, and Ezlo's hubs will
+                refuse yours.
 
                 The trade-off against pinning is real and worth stating:
                 trust widens from one chain to every CA in the bundle, so a

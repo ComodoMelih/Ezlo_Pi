@@ -312,17 +312,18 @@ tool that rewrote line endings across the whole tree. Restore it with
 `git checkout -- ezlopi-components/`.
 
 **Build fails with `ca_mios.h is missing`, or `ca_mios.h: No such file or
-directory`.** You have `CONFIG_EZPI_ENABLE_OTA` enabled. That header holds the
-CA chain for the OTA server, is listed in `.gitignore`, and is therefore not in
-this repository — you have to supply your own:
+directory`.** You have `CONFIG_EZPI_ENABLE_OTA` enabled with the default CA
+source, `CONFIG_EZPI_OTA_CA_HEADER`. That header holds the pinned CA chain for
+the OTA server, is listed in `.gitignore` by upstream, and is therefore not in
+this repository. Either supply your own:
 
 ```c
 /* ezlopi-core/ezlopi-core-ota/ca_mios.h */
 static const char ca_mios[] = "-----BEGIN CERTIFICATE-----\n...";
 ```
 
-Otherwise leave OTA off, which is the default on all four targets. OTA is
-untested in this fork for exactly this reason.
+or select the other CA source and build with no header at all — see
+[§6.1](#61-enabling-ota).
 
 **The board boots but nothing you configured appears.** Devices are only
 instantiated at boot (§4). Power-cycle and re-check.
@@ -339,6 +340,76 @@ set `CONFIG_EZPI_OPENTELEMETRY_CLOUD_ENDPOINT` to your own collector.
 **Switching targets doesn't take effect.** `idf.py set-target` regenerates
 `sdkconfig`; if you hand-edited it, your edits are gone, and if you have a
 stale `build/` try `idf.py fullclean`.
+
+## 6.1 Enabling OTA
+
+OTA is **off in all four shipped configurations.** Everything it needs is
+already there — the [partition table](ezlopi_partitions_v3_1_4_181_4mb.csv)
+carries `ota0`, `ota1` and `otadata`, and all four `sdkconfig.defaults.*`
+enable Wi-Fi and the mbedTLS certificate bundle — so turning it on is two
+lines in `sdkconfig.defaults.<target>`:
+
+```
+CONFIG_EZPI_ENABLE_OTA=y
+CONFIG_EZPI_OTA_CA_BUNDLE=y
+```
+
+That costs 8,112 bytes on ESP32 — `0x1923f0` against `0x190440` for the
+default build, leaving 19% of the app partition free. Verified from a tree
+with no `ca_mios.h` in it, so it is the clean-clone case.
+
+It is off by default because neither certificate source is a defensible
+default, not because the code is in doubt. `CONFIG_EZPI_OTA_CA_HEADER` (the
+Kconfig default) pins one chain but needs the gitignored `ca_mios.h`, so
+making OTA default-on with it would mean a clean clone fails to build — and
+committing a CA header here would reverse an upstream decision.
+`CONFIG_EZPI_OTA_CA_BUNDLE` builds from a clean clone but trusts every public
+root ESP-IDF embeds; CI asserts the Kconfig default stays on the pinned header
+so that cannot change by accident. Both paths are built in CI
+(`firmware-ota`, `firmware-ota-bundle`).
+
+**Which roots your target actually has.** The four targets do not agree, and
+this bites self-hosters:
+
+| Target | Root set | Roots | Let's Encrypt (ISRG Root X1) |
+|---|---|---|---|
+| ESP32 | `..._DEFAULT_CMN` | 36 | **no** |
+| ESP32-C3 / S3 / S2 | `..._DEFAULT_FULL` | 136 | yes |
+
+Both lines come from the same upstream commit, so this is drift rather than a
+decision. GitHub release assets work everywhere (they chain to DigiCert, which
+both sets carry). A Let's Encrypt host works on C3/S3/S2 and **fails TLS on
+ESP32** — note that CMN still carries the expired `DST Root CA X3` that Let's
+Encrypt cross-signed from until 2021, so "an ISRG root is in there" is not a
+safe assumption. On ESP32, either use a commercial CA (DigiCert, Sectigo,
+Amazon, GlobalSign, GoDaddy, Google Trust Services) or set
+`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL`. That was measured rather
+than estimated: `0x19c3a0` against `0x190440`, so **48,992 bytes**, taking the
+app partition from 19% free to 17%. It is almost exactly the 48,993-byte
+difference between the two embedded blobs, because the blob is the whole cost.
+
+These counts are not claims to take on trust:
+`tests/ci/check_ota_ca_bundle_roots.py` reads the bundle each build embedded
+and fails if it disagrees with the table above — in either direction, so the
+ESP32 warning cannot quietly become false after an IDF bump. It runs on all
+four targets.
+
+**What OTA does not check.** No shipped configuration verifies the firmware
+image itself: there is no secure boot and no signed-app verification, so an
+image is trusted because of where it was downloaded from and nothing else.
+Both callers of `hub.firmware.update.start` are authenticated — Ezlo's cloud
+socket, and the local websocket behind `hub.offline.login.ui` — so a URL
+cannot be injected by an unauthenticated party. If you self-host and want the
+image itself verified, set `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT`; that
+makes `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` default on and has
+`esp_ota_ops` reject any image not signed by your key, with no eFuses burned
+and no secure boot needed. A hub built that way will refuse Ezlo's images, and
+Ezlo's hubs will refuse yours.
+
+**Untested on hardware.** Neither CA path has been exercised against a real
+server on a real board. What is demonstrated is that both compile and link
+correctly on all four targets, and that the bundle contains the roots
+documented above.
 
 # 7. Privacy note
 
