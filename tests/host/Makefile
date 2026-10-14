@@ -22,6 +22,7 @@ UUID_DIR     := ../../ezlopi-util/ezlopi-util-uuid
 ACTIONS_DIR  := ../../ezlopi-core/ezlopi-core-actions
 LOCALKEY_DIR := ../../ezlopi-util/ezlopi-util-localkey
 DEVCFG_DIR   := ../../ezlopi-util/ezlopi-util-devcfg
+DEVCFGVAL_DIR := ../../ezlopi-util/ezlopi-util-devcfgval
 WSSESSION_DIR := ../../ezlopi-util/ezlopi-util-wssession
 MQTTCFG_DIR  := ../../ezlopi-util/ezlopi-util-mqttcfg
 MQTTAPI_DIR  := ../../ezlopi-cloud/ezlopi-cloud-mqtt-config
@@ -60,7 +61,7 @@ LDFLAGS += $(SANITIZERS)
 BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
-           test_mqttcfg test_mqtt_api test_devcfg test_wssession
+           test_mqttcfg test_mqtt_api test_devcfg test_devcfgval test_wssession
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -308,9 +309,10 @@ $(BUILD)/test_mqttcfg: test_mqttcfg.c $(MQTTCFG_DIR)/ezlopi_util_mqttcfg.c | $(B
 # file preprocesses away to nothing and the suite would link and pass while
 # testing an empty object file -- test_the_subject_exists() exists to catch
 # precisely that. It is deliberately NOT in the shared stubs/ directory, which
-# four other binaries include -- test_cjext, test_ze08, test_pms5003 and
-# test_gps6mv2, which is what -I$(STUBS_DIR) above greps to; the comment used to
-# say "ten", which was never true of any revision of this file. See the comment
+# five other binaries include -- test_cjext, test_ze08, test_pms5003,
+# test_gps6mv2 and test_devcfgval, which is what -I$(STUBS_DIR) above greps to;
+# the comment used to say "ten", which was never true of any revision of this
+# file. See the comment
 # in stubs-mqtt-api/sdkconfig.h for why that matters. The ordinary stubs/
 # comes second, for cjext's ezlopi_util_trace.h and EZLOPI_USER_CONFIG.h.
 #
@@ -350,6 +352,44 @@ $(BUILD)/test_devcfg: DEVCFG_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
                                        $(SANITIZERS)
 $(BUILD)/test_devcfg: test_devcfg.c $(DEVCFG_DIR)/ezlopi_util_devcfg.c | $(BUILD)
 	$(CC) $(DEVCFG_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# ezlopi-util-devcfgval: whether a device configuration arriving from outside is
+# worth writing to flash. Next door to test_devcfg above and a different
+# question -- that one decides what to do when the *stored* configuration will
+# not parse, this one decides whether to store the configuration at all.
+#
+# It exists because the two paths that write a configuration today, the BLE
+# dynamic-config characteristic and the UART command channel, check only that
+# cJSON_Parse returned non-NULL. So {"hello":"world"} is written, and the consequence
+# arrives on the next boot as a hub with no devices and nothing linking that to
+# the configuration sent earlier.
+#
+# A host test rather than a board test for a reason that is not convenience:
+# there is no dry run. ezlopi_device_parse_json_v3() is static and instantiates
+# devices as it walks, so the only way to ask hardware whether a configuration
+# is acceptable is to store it and reboot, and the answer comes back as an
+# absence. The checks that would be hardest to get from a board are the ones
+# that matter most here -- the first-bad-entry index, the 4 KB boundary, and
+# the long-list walk under the sanitizers.
+#
+# cjext is linked rather than stubbed because the subject's whole job is
+# reading a cJSON tree: a fake tree would let this file agree with itself about
+# what cJSON_IsArray means. The four keyword strings are defined in the test
+# instead of linking ezlopi_cloud_keywords.c, as in test_mqtt_api above, and
+# cjext.c gets the same relaxed flags it does everywhere here, being vendored.
+$(BUILD)/test_devcfgval: DEVCFGVAL_CFLAGS := -std=c99 -O1 -g \
+                                             -I$(DEVCFGVAL_DIR) \
+                                             -I$(CONSTANTS_DIR) \
+                                             -I$(CJEXT_DIR) -I$(STUBS_DIR) \
+                                             $(SANITIZERS)
+$(BUILD)/test_devcfgval: test_devcfgval.c \
+                         $(DEVCFGVAL_DIR)/ezlopi_util_devcfgval.c \
+                         $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(DEVCFGVAL_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_devcfgval_main.o test_devcfgval.c
+	$(CC) $(DEVCFGVAL_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/devcfgval_subject.o $(DEVCFGVAL_DIR)/ezlopi_util_devcfgval.c
+	$(CC) $(DEVCFGVAL_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/devcfgval_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_devcfgval_main.o $(BUILD)/devcfgval_subject.o \
+	      $(BUILD)/devcfgval_cjext.o $(LDFLAGS) -lm
 
 # ezlopi-util-wssession: who is allowed to call the local API.
 #

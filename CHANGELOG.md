@@ -1399,6 +1399,130 @@ would change that, and it is listed under Known gaps rather than claimed here.
   fails to parse, so the loop is established by reading the code and the
   termination by the host test, not by watching a board recover.
 
+### Device configuration — [feat]
+
+- **There is now something that can say whether a device configuration is worth
+  storing.** New component
+  [`ezlopi-util-devcfgval`](ezlopi-util/ezlopi-util-devcfgval/), one function
+  and a reason enum, with
+  [`tests/host/test_devcfgval.c`](tests/host/test_devcfgval.c) — 211 checks.
+
+  The two paths that write a device configuration today — the BLE
+  *dynamic-config* characteristic and the UART command channel, not the BLE
+  provisioning characteristic, which writes connection data and never touches
+  the device config — check nothing about what they were handed beyond "cJSON
+  parsed it". From
+  [`ezlopi_service_ble_dynamic_config.c:243`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_dynamic_config.c#L243),
+  and the same shape at
+  [`ezlopi_service_uart.c:1397`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1397):
+
+  ```c
+  cJSON *cjson_config = cJSON_Parse(__FUNCTION__, decoded_data);
+  if (cjson_config)
+  {
+      if (EZPI_core_factory_info_v3_set_ezlopi_config(cjson_config))
+  ```
+
+  So `{"hello":"world"}` is accepted and written to flash. It is valid JSON and
+  it is not a device configuration. Nothing complains at the time. On the next
+  boot `ezlopi_device_parse_json_v3()` reports `EZPI_ERR_JSON_PARSE_FAILED`
+  because there is no `"chipset"`, the recovery rule added above stamps the
+  chipset name and restarts once, and the boot after that finds a chipset that
+  matches and no `"dev_detail"` at all — which is not an error to the parser,
+  so it reports success with an empty device list.
+
+  What the user sees is a controller that works and has forgotten every sensor,
+  with nothing connecting that to the configuration they sent some minutes
+  earlier.
+
+  The quietest of the five refused shapes is a device entry whose `id_item` is
+  absent, not a number, or zero. The parser reads it through
+  `CJSON_GET_VALUE_INT`, which writes `0` and only overwrites it for a
+  `cJSON_Number`, and then looks for a driver only `if (0 != id_item)`. An
+  entry without a usable one is skipped in silence — no error, no device, no
+  log line naming the entry. That is the failure that cannot be diagnosed from
+  outside the device, so it is refused before the write instead.
+
+  A missing `device_id` is refused for a different reason, found while writing
+  the justification for each rule down. The parser sets
+  `error = EZPI_ERR_JSON_PARSE_FAILED` for it
+  ([`ezlopi_core_devices.c:934`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.c#L934))
+  and then carries straight on: the entry is still instantiated if its
+  `id_item` is usable, and `error` is reassigned on every iteration, so whether
+  the configuration is reported as broken depends on whether a *later* entry
+  overwrites it with `EZPI_SUCCESS`. A hub whose boot verdict turns on the
+  ordering of the device list is not something to leave reachable from the
+  network.
+
+- **It is deliberately asymmetric, because the Ezlo app writes these.** Unknown
+  members, extra members and anything this component has no opinion about are
+  accepted. A configuration carrying a key added by a newer app must not be
+  refused by an older hub — that failure breaks a hub that was working, which
+  is worse than the one being fixed.
+
+  The same reasoning covers a quirk that would have been easy to get wrong in
+  the strict direction. `cJSON_GetObjectItem` is case insensitive and the boot
+  parser uses it, so a configuration spelling the member `"ChipSet"` builds
+  devices on a board today. The check therefore accepts it, and
+  `test_member_lookup_matches_the_parser()` pins that. The chipset *value* is
+  still compared case sensitively, because that is what the parser's `strncmp`
+  does.
+
+  A mismatched chipset is refused rather than adopted, which is the one place
+  this is stricter than it needs to be on purpose: the pin numbers in an ESP32-S3
+  configuration were chosen for an S3, so honouring it here would instantiate
+  devices on whatever GPIOs those numbers happen to name on this part.
+
+- **Why it is a separate component rather than a check inside the parser.**
+  There is no dry run. `ezlopi_device_parse_json_v3()` is `static` and
+  *instantiates devices as it walks* — it calls each driver's
+  `EZLOPI_ACTION_PREPARE`. So it cannot be asked whether a configuration is
+  acceptable; the only way to find out on hardware is to store it and reboot,
+  and the answer arrives as an absence. `ezlopi_core_devices.c` also cannot be
+  host-compiled at all: it reads the factory-info partition, drives the device
+  table and calls `esp_restart()`.
+
+  Separated out, it answers one question with no side effects and no
+  allocation, and the host test puts a few hundred shapes through it in
+  milliseconds. The checks hardest to get from a board are the ones that matter
+  most: that the *first* bad entry in document order is the one named, that
+  4095 serialised bytes fit a 4096-byte field and 4096 do not, and that a
+  2000-entry list walks clean under ASan and UBSan.
+
+  `test_the_tree_is_not_modified()` is the one worth copying. The callers hold
+  a tree they are about to serialise and write, so a check that stamped a
+  default or dropped a member would mean the thing stored is not the thing
+  judged — and that difference would only surface on the next boot. Every shape
+  in the table is serialised before and after and the two must be identical.
+
+- **Mutation-tested 10 of 10 caught.** Not checking `id_item`; comparing
+  `valuedouble` against `0.0` instead of the parser's `(int)` cast, which
+  accepts `0.4` — a non-zero number that truncates to zero and builds nothing;
+  not checking that `dev_detail` is an array; the size check off by one;
+  reporting the last bad entry instead of the first; comparing the chipset as a
+  prefix, so `ESP32S3XX` matches `ESP32S3`; returning `NULL` for a value
+  outside the enum; two reasons sharing a token; not checking that an entry is
+  an object; and rewriting `chipset` in place to be helpful, which
+  `test_the_tree_is_not_modified()` catches twice. A control run with the
+  component restored passes.
+
+- **Nothing calls it yet.** The method that will —
+  `hub.ezlopi.config.get`/`.set`, the no-recompile configuration path — is the
+  next piece of work, and it needs one thing this component deliberately does
+  not do: say whether an `id_item` names a driver *this image was built with*.
+  That depends on the device table in `ezlopi_core_devices_list.c`, which
+  differs between builds and is not available here.
+
+  Because nothing references it, the linker drops it: the esp32 image is
+  `0x190c70`, **byte-identical in size** to the previous commit, with the
+  component compiled into `libezlopi-util-devcfgval.a` and no `devcfgval`
+  symbol in the ELF. **Untested on hardware** in the only sense that applies —
+  no board has run this code, because no board can reach it yet.
+
+- **Not checked, and listed under Known gaps rather than half-done:** whether
+  the GPIOs a configuration names are valid for the target, free, or claimed
+  twice. That needs the HAL and is a larger piece of work than this.
+
 ### Local operation — [feat]
 
 - **A self-flashed device can now log in to its own local API.** This was the
@@ -1978,8 +2102,8 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 4007 assertions across
-  fifteen binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 4218 assertions across
+  sixteen binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
@@ -2536,11 +2660,12 @@ enumerators — so the live half of this component was never affected.
   stopped defining it the translation unit would compile to nothing, the link
   would still succeed against the test's own fakes, and every check would pass
   while testing an empty file. Second, that stub lives in its own
-  `tests/host/stubs-mqtt-api/` rather than the shared `stubs/`, because five of
-  the fifteen binaries put `stubs/` on their include path — `test_cjext`,
-  `test_ze08`, `test_pms5003`, `test_gps6mv2` and this one — and a shared
-  `sdkconfig.h` would quietly decide the configuration of four tests that have
-  nothing to do with MQTT, three of them drivers full of `#ifdef`s.
+  `tests/host/stubs-mqtt-api/` rather than the shared `stubs/`, because six of
+  the sixteen binaries put `stubs/` on their include path — `test_cjext`,
+  `test_ze08`, `test_pms5003`, `test_gps6mv2`, `test_devcfgval` and this one —
+  and a shared `sdkconfig.h` would quietly decide the configuration of five
+  tests that have nothing to do with MQTT, three of them drivers full of
+  `#ifdef`s.
 
   Mutation-tested 6 of 6 caught — storing before validating, truncating instead
   of refusing, returning the password, treating `""` as absent, ignoring a
@@ -2743,6 +2868,45 @@ enumerators — so the live half of this component was never affected.
 ## Known gaps
 
 Listed because a changelog that only mentions what was finished is misleading.
+
+- **The GPIOs a device configuration names are not checked before it is
+  stored.** `ezlopi-util-devcfgval` above refuses the shapes that cannot
+  produce a device at all; it has no opinion on the pin numbers inside a well
+  formed entry.
+
+  The first draft of this entry claimed the drivers do not check either, and
+  that was wrong. 49 driver files call `GPIO_IS_VALID_GPIO` or
+  `GPIO_IS_VALID_OUTPUT_GPIO` before configuring a pin, and 35 of the 37
+  `gpio_config()` call sites in `ezlopi-sensors-devices` test the return. A
+  pin that does not exist on the target is caught at init by most drivers,
+  which fail with `EZPI_ERR_INIT_DEVICE_FAILED`.
+
+  Two real holes are left, and they are the ones a pre-store check would close:
+
+  - **Pins that are "valid" but already in use by the system.** On esp32
+    `SOC_GPIO_VALID_GPIO_MASK` excludes only 24 and 28–31
+    (`soc/esp32/include/soc/soc_caps.h:131`), so GPIOs 6–11 — the SPI flash —
+    pass `GPIO_IS_VALID_GPIO` and `gpio_config()` succeeds on them. Nothing in
+    this tree knows which pins the build has claimed for the flash, the console
+    UART, or a configured I²C or SPI bus, and the last two depend on
+    `sdkconfig`.
+
+  - **Two devices claiming the same pin.** There is no registry of claimed
+    pins, so the second driver reconfigures the first one's GPIO and both
+    devices then appear in the device list, one of them reporting someone
+    else's pin.
+
+  The intent to check at the HAL level is visible and disabled: the
+  `GPIO_IS_VALID_OUTPUT_GPIO` and `GPIO_IS_VALID_GPIO` tests at
+  [`ezlopi_hal_gpio.c:76`](ezlopi-hal/ezlopi-hal-gpio/ezlopi_hal_gpio.c#L76)
+  and [line 96](ezlopi-hal/ezlopi-hal-gpio/ezlopi_hal_gpio.c#L96) are commented
+  out.
+
+  Not done here because a reserved-pin table written from memory would refuse
+  valid configurations, which is the failure mode this whole area is trying to
+  avoid, and because the answer differs per target and per `sdkconfig`. It is a
+  piece of work in its own right rather than a few lines on the end of this
+  one.
 
 - **The BLE chunk accumulator is still unbounded, and is not reset on
   disconnect.** Separate from the overflow fixed above, and deliberately not

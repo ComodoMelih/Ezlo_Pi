@@ -234,17 +234,29 @@ a number nobody can correct. It states its own file set, including the two
 directories it deliberately leaves out, because the earlier totals could not be
 compared against anything without knowing that.
 
-It currently reports 36 of 252 first-party `.c` files compiling with nothing
+It currently reports 36 of 253 first-party `.c` files compiling with nothing
 but their own directory on the include path. Ten of the 36 now have host
 tests — `ezlopi-core-actions`, `mb1013_parse`, and the `ezlopi-util` components
 `-devcfg`, `-ha`, `-improv`, `-localkey`, `-mqttcfg`, `-sanitize`, `-uuid`,
 `-wssession`. The remaining 26 are the same kinds of thing the table above
 describes: fourteen of them are `ezlopi-cloud-constants` string tables.
 
-| include path | of the 216 failures, now compile | …of those, define no symbols | net gain |
+Being in the 36 is not the same as being testable, in either direction.
+`ezlopi-util-devcfgval` is not in it — it reads a `cJSON` tree, so it needs
+`cjext.h` — and it has one of the larger test files here. The 36 is a measure
+of how little a file includes, which is why the rest of this section is about
+how badly that correlates with anything.
+
+| include path | of the 217 failures, now compile | …of those, define no symbols | net gain |
 |---|---|---|---|
 | plus an empty `sdkconfig.h` | 52 | **52** | **0** |
 | plus a real generated `sdkconfig.h` (510 `#define`s) | 9 | **9** | **0** |
+
+Those last two rows depend on *which* configuration, which is worth saying
+because re-running the script will not reproduce them exactly. Against a
+differently configured 504-`#define` header the second row reads 11 and 11, and
+the blocker counts below shift by one or two — the conclusion, that the net
+gain is zero either way, is what survives the difference.
 
 Every file `sdkconfig.h` blocks is a file wrapped end to end in
 `#ifdef CONFIG_SOMETHING`. An empty stub lets 52 through precisely because it
