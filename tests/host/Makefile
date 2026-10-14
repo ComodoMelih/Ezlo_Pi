@@ -21,6 +21,7 @@ GPS_DIR      := ../../ezlopi-sensors-devices/sensor-0053-UART-GYGPS6MV2
 UUID_DIR     := ../../ezlopi-util/ezlopi-util-uuid
 ACTIONS_DIR  := ../../ezlopi-core/ezlopi-core-actions
 LOCALKEY_DIR := ../../ezlopi-util/ezlopi-util-localkey
+DEVCFG_DIR   := ../../ezlopi-util/ezlopi-util-devcfg
 MQTTCFG_DIR  := ../../ezlopi-util/ezlopi-util-mqttcfg
 MQTTAPI_DIR  := ../../ezlopi-cloud/ezlopi-cloud-mqtt-config
 MQTTCORE_DIR := ../../ezlopi-core/ezlopi-core-mqtt-config
@@ -58,7 +59,7 @@ LDFLAGS += $(SANITIZERS)
 BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
-           test_mqttcfg test_mqtt_api
+           test_mqttcfg test_mqtt_api test_devcfg
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -326,6 +327,25 @@ $(BUILD)/test_mqtt_api: test_mqtt_api.c $(MQTTAPI_DIR)/ezlopi_cloud_mqtt_config.
 	$(CC) $(MQTTAPI_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/mqtt_api_cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_mqtt_api_main.o $(BUILD)/mqtt_api_subject.o \
 	      $(BUILD)/mqtt_api_mqttcfg.o $(BUILD)/mqtt_api_cjext.o $(LDFLAGS) -lm
+
+# ezlopi-util-devcfg decides whether the hub may restart itself during boot
+# because the stored device configuration would not parse. It was extracted for
+# the same reason as localkey above -- to be testable -- but the thing being
+# bounded is different and worth stating: the old code restarted on every parse
+# failure while being able to repair only one of them, and the restart happens
+# inside EZPI_init(), before UART, BLE and the websocket start. A config naming
+# the wrong chip therefore produced a board that rebooted about once a second,
+# rewrote flash each time, and offered no interface to fix it through.
+#
+# Three booleans and no dependencies, so test_devcfg.c can enumerate all eight
+# inputs and bound the restart count by construction rather than by my having
+# reasoned about the cases. It also keeps the old rule as legacy_action() and
+# fails if that one *stops* looping, so the file is the evidence for the change.
+$(BUILD)/test_devcfg: DEVCFG_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                       -I$(DEVCFG_DIR) \
+                                       $(SANITIZERS)
+$(BUILD)/test_devcfg: test_devcfg.c $(DEVCFG_DIR)/ezlopi_util_devcfg.c | $(BUILD)
+	$(CC) $(DEVCFG_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

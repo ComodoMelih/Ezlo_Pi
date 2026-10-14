@@ -234,12 +234,12 @@ a number nobody can correct. It states its own file set, including the two
 directories it deliberately leaves out, because the earlier totals could not be
 compared against anything without knowing that.
 
-It currently reports 34 of 250 first-party `.c` files compiling with nothing
-but their own directory on the include path. Eight of the 34 now have host
+It currently reports 35 of 251 first-party `.c` files compiling with nothing
+but their own directory on the include path. Nine of the 35 now have host
 tests — `ezlopi-core-actions`, `mb1013_parse`, and the `ezlopi-util` components
-`-ha`, `-improv`, `-localkey`, `-mqttcfg`, `-sanitize`, `-uuid`. The remaining
-26 are the same kinds of thing the table above describes: fourteen of them are
-`ezlopi-cloud-constants` string tables.
+`-devcfg`, `-ha`, `-improv`, `-localkey`, `-mqttcfg`, `-sanitize`, `-uuid`. The
+remaining 26 are the same kinds of thing the table above describes: fourteen of
+them are `ezlopi-cloud-constants` string tables.
 
 | include path | of the 216 failures, now compile | …of those, define no symbols | net gain |
 |---|---|---|---|

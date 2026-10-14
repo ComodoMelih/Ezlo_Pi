@@ -13,7 +13,7 @@
  *
  * On a target build sdkconfig.h is generated into build/config/ and every
  * CONFIG_* macro in the firmware comes from it. There is no stub of it in the
- * shared stubs/ directory, and that is on purpose: five of the thirteen test
+ * shared stubs/ directory, and that is on purpose: five of the fourteen test
  * binaries put stubs/ on their include path -- test_cjext, test_ze08,
  * test_pms5003, test_gps6mv2 and this one -- so a shared sdkconfig.h would
  * silently decide the configuration of all of them, three of which are drivers

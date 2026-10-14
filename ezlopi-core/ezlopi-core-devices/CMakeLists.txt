@@ -5,6 +5,7 @@ set(EZLOPI_IDF_COMPONENTS
 
 set(EZLOPI_UTIL_COMPONENTS
         ezlopi-util-sanitize
+        ezlopi-util-devcfg
 )
 
 set(EZLOPI_CORE_COMPONENTS 

@@ -43,6 +43,7 @@
 #include <ctype.h>
 
 #include "ezlopi_util_sanitize.h"
+#include "ezlopi_util_devcfg.h"
 
 #include "ezlopi_core_factory_info.h"
 #include "ezlopi_core_cjson_macros.h"
@@ -80,6 +81,7 @@ static void ____ezlopi_device_clear_bottom_children(l_ezlopi_device_t *curr_node
 static void __ezlopi_device_free_parent_tree(l_ezlopi_device_t *parent_device, uint32_t parent_dev_id);
 
 static ezlopi_error_t ezlopi_device_parse_json_v3(cJSON *cj_config);
+static const char *__expected_chipset_name(void);
 #if (1 == ENABLE_TRACE)
 #if 0 // Defined but not used
 static void ezlopi_device_print_controller_cloud_information_v3(void);
@@ -567,6 +569,34 @@ l_ezlopi_item_t *EZPI_core_device_add_item_to_device(l_ezlopi_device_t *device, 
     return new_item;
 }
 
+/* The chipset name this build expects to find in the stored configuration.
+ *
+ * Deliberately the single source for both halves of the chipset handling in
+ * EZPI_device_prepare() -- the presence test and the value that gets stamped.
+ * Those were separate #if chains, which is the sort of duplication that
+ * quietly stops agreeing when a target is added: a target present in one chain
+ * and missing from the other gives a hub that stamps a name its own parser
+ * will then reject, i.e. the loop this is all here to prevent.
+ *
+ * NULL means this build is for a chip with no name here, in which case there is
+ * nothing to stamp and nothing a restart would fix. ezlopi_device_parse_json_v3()
+ * has the matching gap: with no CONFIG_IDF_TARGET_* match its comparison is
+ * compiled out entirely. */
+static const char *__expected_chipset_name(void)
+{
+#if defined(CONFIG_IDF_TARGET_ESP32)
+    return ezlopi_ESP32_str;
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+    return ezlopi_ESP32S3_str;
+#elif defined(CONFIG_IDF_TARGET_ESP32S2)
+    return ezlopi_ESP32S2_str;
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+    return ezlopi_ESP32C3_str;
+#else
+    return NULL;
+#endif
+}
+
 void EZPI_device_prepare(void)
 {
     s_controller_information.battery_powered = false;
@@ -598,23 +628,83 @@ void EZPI_device_prepare(void)
             {
                 TRACE_E("parsing devices-config failed!!!!");
 
-#if defined(CONFIG_IDF_TARGET_ESP32)
-                cJSON_AddStringToObject(__FUNCTION__, cj_config, ezlopi_chipset_str, ezlopi_ESP32_str);
-#elif defined(CONFIG_IDF_TARGET_ESP32S3)
-                cJSON_AddStringToObject(__FUNCTION__, cj_config, ezlopi_chipset_str, ezlopi_ESP32S3_str);
-#elif defined(CONFIG_IDF_TARGET_ESP32S2)
-                cJSON_AddStringToObject(__FUNCTION__, cj_config, ezlopi_chipset_str, ezlopi_ESP32S2_str);
-#elif defined(CONFIG_IDF_TARGET_ESP32C3)
-                cJSON_AddStringToObject(__FUNCTION__, cj_config, ezlopi_chipset_str, ezlopi_ESP32C3_str);
-#endif
-                char *tmp_str = cJSON_PrintUnformatted(__FUNCTION__, cj_config);
-                if (tmp_str)
+                /* Whether stamping the chipset can possibly help. cjext's
+                 * cJSON_AddStringToObject() appends and get_object_item()
+                 * returns the first match, so adding a key that is already
+                 * there produces a duplicate nothing ever reads -- and this
+                 * function restarts the hub, from inside EZPI_init(), before
+                 * UART, BLE and the websocket start. Restarting on a cause the
+                 * stamp cannot fix therefore loops forever with no interface
+                 * left to recover through. See ezlopi-util-devcfg. */
+                const char *expected_chipset = __expected_chipset_name();
+                const bool chipset_key_present =
+                    (NULL != cJSON_GetObjectItem(__FUNCTION__, cj_config, ezlopi_chipset_str));
+
+                switch (EZPI_util_devcfg_recovery(false, chipset_key_present,
+                                                  (NULL != expected_chipset)))
                 {
+                case EZPI_DEVCFG_STAMP_AND_REBOOT:
+                {
+                    /* The config predates the chipset key. Stamp it and
+                     * restart so the next boot parses it -- the migration this
+                     * code was written for, kept as it was. Bounded to one
+                     * restart because the key is absent here by construction.
+                     *
+                     * The store is no longer conditional on the trace below
+                     * succeeding: it used to sit inside `if (tmp_str)`, so an
+                     * allocation failure while printing silently skipped both
+                     * the write and the restart. */
+                    cJSON_AddStringToObject(__FUNCTION__, cj_config, ezlopi_chipset_str, expected_chipset);
                     EZPI_core_factory_info_v3_set_ezlopi_config(cj_config);
-                    TRACE_D("added-chipset: %s", tmp_str);
+
+                    char *tmp_str = cJSON_PrintUnformatted(__FUNCTION__, cj_config);
+                    if (tmp_str)
+                    {
+                        TRACE_D("added-chipset: %s", tmp_str);
+                        /* cjext returns this from ezlopi_realloc over an
+                         * ezlopi_malloc (cjext.c:1331 and 1349), so this has to
+                         * be the matching ezlopi_free rather than plain free().
+                         * Equivalent in the shipped configurations, where
+                         * CONFIG_EZPI_HEAP_ENABLE is off and ezlopi_free is
+                         * free(); it is the heap-tracking build that was left
+                         * with a stale entry. */
+                        ezlopi_free(__FUNCTION__, tmp_str);
+                    }
+
                     vTaskDelay(1000);
-                    free(tmp_str);
                     EZPI_core_reset_reboot();
+                    break;
+                }
+
+                case EZPI_DEVCFG_CONTINUE_BOOT:
+                default:
+                {
+                    /* Deliberately carry on. The configuration is faulty and a
+                     * restart cannot change that, so the useful thing is to
+                     * finish booting: the services come up and the hub can be
+                     * given a corrected config over BLE or the local API, or
+                     * factory reset. A reachable hub is recoverable; a
+                     * rebooting one is not.
+                     *
+                     * Whatever devices did instantiate are kept. The parse
+                     * builds each device as it walks the list and reports only
+                     * the last entry's outcome, so a fault in a late entry
+                     * still leaves the earlier devices working -- better than
+                     * discarding them, and the reason this is not phrased as
+                     * "boot with no devices".
+                     *
+                     * The stored configuration is left exactly as it is, so
+                     * whatever the user sent can still be read back and
+                     * diagnosed. In particular a chipset naming another chip is
+                     * not rewritten to match this one: its pin numbers were
+                     * chosen for different hardware. */
+                    TRACE_E("devices-config is faulty and restarting cannot repair it; "
+                            "continuing so the hub stays reachable "
+                            "(chipset key present: %s, expected chipset: %s)",
+                            chipset_key_present ? "yes" : "no",
+                            expected_chipset ? expected_chipset : "unknown-target");
+                    break;
+                }
                 }
             }
             else

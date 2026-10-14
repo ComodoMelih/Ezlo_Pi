@@ -1030,6 +1030,128 @@ failure.
   the shipped app authenticates against. Enforcing strict equality here while
   that path deliberately does not would be incoherent.
 
+### Device configuration — [bug]
+
+- **A device configuration that will not parse no longer bricks the hub.**
+  `EZPI_device_prepare()` reads the stored configuration once per boot, and when
+  the parse failed it stamped this chip's name into the config, wrote it back
+  and restarted — unconditionally, for every possible cause of failure.
+
+  That is a correct repair for exactly one cause: a configuration saved without
+  a `chipset` key, which is the migration it was written for. For the others it
+  is an unrecoverable reboot loop, and the reason is in `cjext` rather than in
+  the caller. `add_item_to_object()` ends in `add_item_to_array()`, which
+  appends — there is no replace and no duplicate check — while
+  `get_object_item()` walks from `object->child` forward and returns the
+  **first** key whose name matches. So when a `chipset` key is already present
+  and is itself why the parse failed, the stamp appends a second key that
+  nothing will ever read. The next boot fails in the same place, appends a
+  third, and restarts again.
+
+  `ezlopi_device_parse_json_v3()` reports failure in four places, and only the
+  first is repaired by stamping:
+
+  | Cause | Line | Stamping helps? |
+  |---|---|---|
+  | No `chipset` key at all | `devices.c:977` | yes — this is the migration |
+  | `chipset` present but not a string | `devices.c:971` | no — duplicate key, never read |
+  | `chipset` names a different chip | `devices.c:964` | no — duplicate key, never read |
+  | A device entry left `error` set | `devices.c:933` | no — irrelevant to the cause |
+
+  The third row is the realistic one: move a config between an ESP32 and a C3,
+  or have the app send the wrong chipset, and the board is finished.
+
+  **Why it was worse than a loop.** The restart is issued from inside
+  `EZPI_init()`, which [`ezlopi_main.c:139`](ezlopi-main/ezlopi_main.c#L139)
+  calls before `EZPI_SERV_uart_init()` (line 143) and
+  `EZPI_ble_service_init()` (line 150). During such a loop neither ever runs,
+  nor does the websocket server, so the hub is unreachable over every interface
+  it has — which removes the BLE factory reset too, the one documented
+  recovery. `CONFIG_FREERTOS_HZ=1000` in all four committed
+  `sdkconfig.defaults.*` files makes the `vTaskDelay(1000)` ahead of the
+  restart one second, so the cycle also rewrote the configuration into flash
+  about once a second for as long as the board had power. Recovery was a serial
+  erase.
+
+  The configuration that triggers it is app- or attacker-supplied: it arrives
+  over BLE characteristic `0xE501` or over UART.
+
+  **The fix is to restart only when restarting can change the answer**, which
+  is only when the key being added was absent. Everything else finishes booting
+  instead, so the services come up and the hub can be given a corrected config
+  over BLE or the local API, or factory reset. A reachable hub is recoverable;
+  a rebooting one is not. The legitimate migration is unchanged and still costs
+  exactly one restart.
+
+  A mismatched chipset is deliberately **not** rewritten to match the running
+  chip. The pin numbers in such a config were chosen for different hardware, so
+  adopting it silently would instantiate devices on whatever GPIOs those
+  numbers happen to name here. Refusing it and staying reachable is the weaker
+  action and the safer one.
+
+  Whatever devices did instantiate are kept, and the enum is named
+  `EZPI_DEVCFG_CONTINUE_BOOT` rather than "boot without devices" for that
+  reason: the parse builds each device as it walks the list and reports only
+  the last entry's outcome, so a fault in a late entry leaves the earlier
+  devices working. The two chipset failures do give an empty list, because they
+  return before the device loop is entered.
+
+- **The decision is a tested component rather than an inline branch.** The
+  three-way choice moved to `ezlopi-util-devcfg`, which has no `REQUIRES` for
+  the same reason as `ezlopi-util-sanitize`, `-ha` and `-localkey`: the
+  function it came from touches the factory-info partition, `cjext` and
+  `esp_restart()`, so it could only be exercised by flashing a board and
+  deliberately storing a broken configuration on it — and the failure under
+  test takes away the interfaces you would watch it through.
+
+  Reduced to three booleans, [`tests/host/test_devcfg.c`](tests/host/test_devcfg.c)
+  enumerates all eight inputs and asserts the property that actually matters:
+  **no input restarts more than once.** That is checked by construction rather
+  than by my having reasoned about the cases. Termination is structural —
+  `EZPI_DEVCFG_STAMP_AND_REBOOT` is returned only when `chipset_key_present` is
+  false, and stamping makes it true, so the input that caused a restart cannot
+  recur after it.
+
+  The old rule is kept in the file as `legacy_action()` and a check fails if it
+  ever *stops* looping, so the file demonstrates the defect rather than
+  asserting it. Proven able to fail, on three mutations of the real
+  implementation: reverting to the unconditional stamp reports 11 restarts on
+  each of the four failing inputs (7 failures); never restarting breaks the
+  migration (2 failures); and transposing the two boolean arguments — the exact
+  wiring mistake the file names as being outside its reach — is caught with 4
+  failures.
+
+  The model is deliberately generous to the old code in the one way that
+  matters: it assumes stamping always succeeds in making the key present,
+  whereas the real `cjext` appends a duplicate the parser never sees. That can
+  only make the old behaviour look better than it is, so a loop reported on the
+  host is at least as bad in firmware.
+
+- Also on that path: the store is no longer conditional on the diagnostic
+  `cJSON_PrintUnformatted()` succeeding. It used to sit inside `if (tmp_str)`,
+  so an allocation failure while printing silently skipped both the write and
+  the restart. And the print buffer is now released with `ezlopi_free()`:
+  `cjext` allocates it through `ezlopi_malloc`
+  ([`cjext.c:1331`](ezlopi-components/cjext/cjext.c#L1331)) and resizes it with
+  `ezlopi_realloc` ([line 1349](ezlopi-components/cjext/cjext.c#L1349)) before
+  returning it, so the plain `free()` there was a mismatch. Equivalent in the shipped configurations,
+  where `CONFIG_EZPI_HEAP_ENABLE` is `default n` and unset in all four
+  `sdkconfig.defaults.*` files so `ezlopi_free` *is* `free()`; it is the
+  opt-in heap-tracking build that was left with a stale entry.
+
+  The expected chipset name also comes from one `__expected_chipset_name()`
+  helper now, instead of the presence test and the stamped value each having
+  their own `#if` chain. Two chains are what quietly stop agreeing when a
+  target is added, and a target present in one but missing from the other gives
+  a hub that stamps a name its own parser then rejects — the loop above, from
+  the opposite direction.
+
+  Costs 304 bytes on esp32 (`0x190570` against `0x190440`) and 272 on esp32c3
+  (`0x1a22f0` against `0x1a21e0`), with the free-space percentage unchanged on
+  both. **Untested on hardware:** no board has been made to store a config that
+  fails to parse, so the loop is established by reading the code and the
+  termination by the host test, not by watching a board recover.
+
 ### Local operation — [feat]
 
 - **A self-flashed device can now log in to its own local API.** This was the
@@ -1609,8 +1731,8 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 3778 assertions across
-  thirteen binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 3796 assertions across
+  fourteen binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
@@ -1740,6 +1862,18 @@ enumerators — so the live half of this component was never affected.
   nibbles repeat, so a single hard-coded UUID had roughly a one-in-sixteen
   chance of turning this bug into a green run. That is the argument for
   sweeping inputs instead of picking one, in numbers rather than in principle.
+
+- **`ezlopi-util-devcfg` joined the suite** — `tests/host/test_devcfg.c`, 18
+  checks, covering the boot-loop fix described under **Device configuration —
+  [bug]** above. The interesting part is not the count but that the property is
+  a *bound* rather than a case list: all eight combinations of the three
+  booleans are enumerated and none may restart more than once. A case list
+  would have been me re-deriving the same reasoning that produced the bug.
+
+  It is also the second file here, after `test_localkey.c`, to keep the
+  superseded behaviour alongside the new one and fail if the old rule *stops*
+  misbehaving. That shape has now earned its place twice: it turns "I believe
+  this was broken" into something a reader can run.
 
 - **`ezlopi-core-actions` joined the suite** — `tests/host/test_actions.c`, 144
   checks, and the last file the zero-stub sweep had to offer. It found the
@@ -2112,7 +2246,7 @@ enumerators — so the live half of this component was never affected.
   would still succeed against the test's own fakes, and every check would pass
   while testing an empty file. Second, that stub lives in its own
   `tests/host/stubs-mqtt-api/` rather than the shared `stubs/`, because five of
-  the thirteen binaries put `stubs/` on their include path — `test_cjext`,
+  the fourteen binaries put `stubs/` on their include path — `test_cjext`,
   `test_ze08`, `test_pms5003`, `test_gps6mv2` and this one — and a shared
   `sdkconfig.h` would quietly decide the configuration of four tests that have
   nothing to do with MQTT, three of them drivers full of `#ifdef`s.
