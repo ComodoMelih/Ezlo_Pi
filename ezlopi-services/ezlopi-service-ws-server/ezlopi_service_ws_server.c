@@ -61,6 +61,11 @@
 
 #include "sdkconfig.h"
 
+/* For close(). Overriding httpd's close_fn makes closing the socket this
+** file's responsibility: ESP-IDF does `if (close_fn) close_fn(); else
+** close(fd);` in httpd_sess_delete(), so the default close is not also run. */
+#include <unistd.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -91,6 +96,7 @@
 #include "ezlopi_core_cjson_macros.h"
 #include "ezlopi_core_local_key.h"
 #include "ezlopi_core_offline_login.h"
+#include "ezlopi_util_wssession.h"
 
 #include "ezlopi_service_ws_server.h"
 #include "ezlopi_service_ws_server_clients.h"
@@ -269,8 +275,20 @@ static ezlopi_error_t ezpi_ws_server_broadcast(char *data)
             {
                 while (curr_client)
                 {
+                    /* Read the link BEFORE sending. ezpi_ws_server_send() can
+                    ** evict this client when its failure count is exceeded,
+                    ** which frees the node -- and the loop used to reach for
+                    ** curr_client->next afterwards, reading memory it had just
+                    ** released. That was a use-after-free even with a single
+                    ** client; it only became easy to hit once more than one
+                    ** client could be registered at a time. */
+                    l_ws_server_client_conn_t *next_client = curr_client->next;
+
                     ret = ezpi_ws_server_send(curr_client, data, strlen(data));
-                    if (NULL == (curr_client = curr_client->next))
+
+                    curr_client = next_client;
+
+                    if (NULL == curr_client)
                     {
                         break;
                     }
@@ -298,6 +316,17 @@ static void __message_upcall(httpd_req_t *req, const char *payload, uint32_t pay
     cJSON *cj_method = NULL;
     cJSON *cj_response = NULL;
     bool proceed_to_api_consume = false;
+
+    /* Which connection this request arrived on. Everything about
+    ** authorisation below is answered for this descriptor and no other; the
+    ** check used to consult one flag shared by every connection to this port,
+    ** so any peer that could merely connect was admitted for as long as
+    ** somebody else was logged in. */
+    const int connection = httpd_req_to_sockfd(req);
+
+    /* Claimed for the whole of this function, not just around the dispatch,
+    ** because the gate below also has to be answered for this connection. */
+    EZPI_core_offline_login_claim_connection(connection);
 
     if (!EZPI_core_offline_is_user_logged_in())
     {
@@ -355,6 +384,53 @@ static void __message_upcall(httpd_req_t *req, const char *payload, uint32_t pay
     }
 
     cJSON_Delete(__FUNCTION__, cj_request);
+
+    /* Released on the way out, so that nothing dispatched later on this task
+    ** -- or read from another one -- can act on a connection that is no longer
+    ** being served. The function has a single exit, which is why one call here
+    ** is enough; a second return added above would need one too. */
+    EZPI_core_offline_login_claim_connection(-1);
+}
+
+/* Accept hook. Gives this socket a fresh, unauthenticated session.
+**
+** Returning anything but ESP_OK would close the socket immediately. A full
+** table is therefore deliberately NOT treated as a reason to drop the
+** connection: it can still be served, it simply cannot log in, and
+** EZPI_util_wssession_authorise() refuses it. Dropping sockets would turn a
+** capacity problem into an outage. */
+static esp_err_t ezpi_ws_session_open(httpd_handle_t hd, int sockfd)
+{
+    (void)hd;
+
+    if (!EZPI_util_wssession_open(sockfd))
+    {
+        TRACE_E("WSL: no session slot for fd %d; it will not be able to log in "
+                "(%d sessions held)",
+                sockfd, EZPI_util_wssession_count());
+    }
+
+    return ESP_OK;
+}
+
+/* Close hook. Runs for every terminated session, including sockets dropped by
+** the network stack without a CLOSE frame, which is the case the frame handler
+** cannot observe and the old code therefore leaked.
+**
+** The descriptor may already be invalid here, which is fine: nothing below
+** touches the socket, it only forgets about it. */
+static void ezpi_ws_session_close(httpd_handle_t hd, int sockfd)
+{
+    EZPI_util_wssession_close(sockfd);
+    EZPI_service_ws_server_clients_remove_by_fd(sockfd);
+
+    /* The server still owns the socket itself; closing it is ESP-IDF's job and
+    ** the default close_fn is what would normally do it. Overriding the hook
+    ** means that job now falls to us, and omitting it would leak the
+    ** descriptor. */
+    close(sockfd);
+
+    (void)hd;
 }
 
 static void ezpi_ws_async_send(void *arg)
@@ -410,9 +486,43 @@ static esp_err_t ezpi_msg_handler(httpd_req_t *req)
 
         if (req->method == HTTP_GET)
         {
-            TRACE_I("Handshake done, the new connection was opened, id: %p", req);
-            EZPI_service_ws_server_clients_add((void *)req->handle, httpd_req_to_sockfd(req));
-            ret = ESP_OK;
+            /* A GET reaching this handler does NOT prove a websocket was
+            ** negotiated. esp_http_server only performs the handshake when the
+            ** request carried the Upgrade header (httpd_uri.c, the
+            ** is_websocket && ws_handshake_detect branch) -- but it invokes the
+            ** handler either way. So a plain browser or `curl http://hub:17001/`
+            ** arrived here too, and the old code logged "Handshake done" and
+            ** registered that socket as a broadcast target. Broadcasts then
+            ** wrote websocket frames into a connection that had never agreed to
+            ** speak the protocol.
+            **
+            ** Ask the server what the socket actually is instead of assuming. */
+            const int fd = httpd_req_to_sockfd(req);
+
+            if (HTTPD_WS_CLIENT_WEBSOCKET == httpd_ws_get_fd_info(req->handle, fd))
+            {
+                TRACE_I("Handshake done, the new connection was opened, id: %p", req);
+                EZPI_service_ws_server_clients_add((void *)req->handle, fd);
+                ret = ESP_OK;
+            }
+            else
+            {
+                /* Not a websocket. Nothing is registered and nothing is
+                ** authorised; the session for this descriptor was already
+                ** created unauthenticated by the accept hook. Answering
+                ** rather than failing keeps a stray GET from closing the
+                ** socket noisily, and gives a person who points a browser at
+                ** the port something to read. */
+                TRACE_W("WSL: plain HTTP request on the websocket port, fd: %d", fd);
+
+                static const char msg[] =
+                    "EzloPi local API. This port speaks WebSocket; "
+                    "connect with ws:// and call hub.offline.login.ui first.\n";
+
+                httpd_resp_set_type(req, "text/plain");
+                httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
+                ret = ESP_OK;
+            }
         }
         else
         {
@@ -431,9 +541,18 @@ static esp_err_t ezpi_msg_handler(httpd_req_t *req)
             {
                 if (HTTPD_WS_TYPE_CLOSE == ws_pkt.type)
                 {
+                    /* This connection is going away, so drop this
+                    ** connection's registration and session -- by descriptor.
+                    ** It used to remove by req->handle, which ESP-IDF
+                    ** documents as the handle to the *server instance* and is
+                    ** therefore the same value for every connection, and then
+                    ** call the global logout. A close frame from any peer,
+                    ** authenticated or not, consequently removed whichever
+                    ** single client was registered and logged out the
+                    ** legitimate session. */
                     TRACE_D("closing connection!");
-                    EZPI_service_ws_server_clients_remove_by_handle(req->handle);
-                    EZPI_core_offline_logout_perform();
+                    EZPI_service_ws_server_clients_remove_by_fd(httpd_req_to_sockfd(req));
+                    EZPI_util_wssession_close(httpd_req_to_sockfd(req));
                 }
                 else if (0 < ws_pkt.len)
                 {
@@ -460,9 +579,12 @@ static esp_err_t ezpi_msg_handler(httpd_req_t *req)
                             }
                             else if (HTTPD_WS_TYPE_CLOSE == ws_pkt.type)
                             {
+                                /* Same as the zero-length close above: by
+                                ** descriptor, so it affects this connection
+                                ** only. */
                                 TRACE_D("closing connection!");
-                                EZPI_service_ws_server_clients_remove_by_handle(req->handle);
-                                EZPI_core_offline_logout_perform();
+                                EZPI_service_ws_server_clients_remove_by_fd(httpd_req_to_sockfd(req));
+                                EZPI_util_wssession_close(httpd_req_to_sockfd(req));
                             }
                             else
                             {
@@ -525,6 +647,36 @@ static void ezpi_start_server(void)
     config.task_priority = 8;
     config.server_port = EZPI_SERV_WS_SERVER_PORT;
     config.stack_size = 1024 * 4;
+
+    /* Per-connection session lifetime. open_fn runs when a socket is accepted
+    ** and close_fn when it is terminated, and ESP-IDF documents the latter as
+    ** running "for all terminated sessions, including sessions where the
+    ** socket was closed by the network stack" -- so it fires for a client that
+    ** vanishes without sending a CLOSE frame, which the frame handler cannot
+    ** see. Relying on the frame alone is what left stale registrations behind.
+    **
+    ** Starting every accepted socket as an unauthenticated session is what
+    ** makes a reused descriptor safe: see the note in ezlopi_util_wssession.h. */
+    config.open_fn = ezpi_ws_session_open;
+    config.close_fn = ezpi_ws_session_close;
+
+    /* Sessions are per socket, so the table must not be smaller than the
+    ** number of sockets the server will accept, or the last connections to
+    ** arrive could never log in. Checked against the value actually in the
+    ** config rather than against a copy of the default, because the point is
+    ** to notice if that default changes under us. The consequence of being
+    ** wrong is a refused login rather than an admitted stranger, so this
+    ** reports instead of refusing to start. */
+    if (config.max_open_sockets > EZPI_WSSESSION_MAX)
+    {
+        TRACE_E("WSL: %d sockets but only %d session slots; "
+                "connections beyond the %dth will not be able to log in",
+                config.max_open_sockets, EZPI_WSSESSION_MAX, EZPI_WSSESSION_MAX);
+    }
+
+    /* All sockets are gone when the server restarts, so no session may
+    ** outlive it. */
+    EZPI_util_wssession_reset_all();
 
     TRACE_I("Starting ws-server on port: '%d'", config.server_port);
 
@@ -632,9 +784,15 @@ static ezlopi_error_t ezpi_ws_server_send(l_ws_server_client_conn_t *client, cha
 
             if (client->fail_count > 5)
             {
+                /* By descriptor. Removing by client->http_handle evicted
+                ** whichever entry happened to be first, because that field
+                ** holds the server-instance handle and so compares equal for
+                ** every client -- meaning a failing connection could evict a
+                ** healthy one. The session goes with it: this socket is not
+                ** accepting writes, so it should not keep an authorisation. */
                 TRACE_E("fail count reached maximum!");
-                EZPI_service_ws_server_clients_remove_by_handle(client->http_handle);
-                EZPI_core_offline_logout_perform();
+                EZPI_util_wssession_close(client->http_descriptor);
+                EZPI_service_ws_server_clients_remove_by_fd(client->http_descriptor);
             }
         }
     }

@@ -42,6 +42,9 @@
 
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "cjext.h"
 #include "ezlopi_core_nvs.h"
 #include "EZLOPI_USER_CONFIG.h"
@@ -49,6 +52,7 @@
 #include "ezlopi_core_local_key.h"
 #include "ezlopi_core_offline_login.h"
 #include "ezlopi_util_localkey.h"
+#include "ezlopi_util_wssession.h"
 
 /*******************************************************************************
  *                          Extern Data Declarations
@@ -66,11 +70,49 @@
  *                          Static Function Prototypes
  *******************************************************************************/
 static bool __user_id_accepted(const char *supplied_user);
+static int __current_connection(void);
 
 /*******************************************************************************
  *                          Static Data Definitions
  *******************************************************************************/
-static bool logged_in = false;
+
+/* WHAT USED TO BE HERE
+**
+**     static bool logged_in = false;
+**
+** One flag for the whole hub, with nothing tying it to the connection a
+** request arrived on. The local websocket server binds INADDR_ANY, so while
+** one client was logged in, any other peer on the network passed the gate in
+** __message_upcall() and could call any API method without presenting the
+** local key; and a websocket CLOSE frame from any peer reached
+** EZPI_core_offline_logout_perform() with no check of who sent it, ending the
+** legitimate client's session. Authorisation now lives in
+** ezlopi-util-wssession, keyed on the connection, and is host-tested.
+**
+** THE CONNECTION A REQUEST ARRIVED ON
+**
+** The API dispatcher does not carry the connection's identity -- every method
+** handler has the signature (cj_request, cj_response) -- so the transport
+** records it here for the duration of one dispatch, and the handler for
+** "hub.offline.login.ui" reads it back.
+**
+** The task handle is stored alongside it, and the value is honoured only when
+** read from the task that claimed it. That is not belt-and-braces: two
+** different tasks dispatch methods through EZPI_core_api_consume*(), the cloud
+** websocket client in ezlopi_service_webprov.c and the local server in
+** ezlopi_service_ws_server.c, which is the same hazard ezlopi_core_ota.c
+** documents at its __ota_guard_spinlock. Without the ownership check, a login
+** arriving over the cloud while the local server happened to have a
+** connection claimed would authorise that local connection instead. With it,
+** a read from any other task answers "no connection", so the login simply
+** fails -- the safe direction.
+**
+** No lock is needed for the pair, because only the claiming task ever writes
+** them and only that task can satisfy the ownership test. A reader on another
+** task sees a mismatched owner whatever ordering it observes, which is why
+** the owner is set first on claim and cleared last on release. */
+static volatile TaskHandle_t __dispatch_owner = NULL;
+static volatile int __dispatch_connection = -1;
 
 /*******************************************************************************
  *                          Extern Data Definitions
@@ -82,8 +124,18 @@ static bool logged_in = false;
 ezlopi_error_t EZPI_core_offline_login_perform(cJSON *cj_params)
 {
     ezlopi_error_t error = EZPI_SUCCESS;
-    if (logged_in)
+
+    const int connection = __current_connection();
+
+    if (EZPI_util_wssession_is_authorised(connection))
     {
+        /* This connection has already logged in. Refusing a second login on
+        ** the SAME connection is the old behaviour preserved; what changed is
+        ** that it no longer refuses a different client. The old check read the
+        ** one global flag, so once anybody was logged in the next honest
+        ** client was turned away -- while an unauthenticated one was admitted
+        ** without asking. A local UI and the Ezlo app being open at the same
+        ** time is ordinary use and now works. */
         error = EZPI_FAILED;
     }
     else
@@ -112,7 +164,23 @@ ezlopi_error_t EZPI_core_offline_login_perform(cJSON *cj_params)
                 if (EZPI_util_localkey_match(password_saved,
                                              cj_token->valuestring))
                 {
-                    logged_in = true;
+                    /* Authorise THIS connection and nothing else. The call
+                    ** fails if the transport never announced the connection --
+                    ** which is the case for a login arriving over the cloud
+                    ** path, where there is no local socket to authorise -- and
+                    ** the error is reported rather than swallowed, because
+                    ** silently answering "logged in" to a caller that holds no
+                    ** session is how the original defect behaved. */
+                    if (!EZPI_util_wssession_authorise(connection))
+                    {
+                        /* NOT_AVAILABLE rather than FAILED, because FAILED is
+                        ** reported to the client as "Already logged in" and
+                        ** that would be untrue. There is no local connection
+                        ** to authorise: either this request came in over the
+                        ** cloud, which has no socket on the local server, or
+                        ** the session table was full. */
+                        error = EZPI_NOT_AVAILABLE;
+                    }
                 }
                 else
                 {
@@ -144,22 +212,72 @@ ezlopi_error_t EZPI_core_offline_login_perform(cJSON *cj_params)
 ezlopi_error_t EZPI_core_offline_logout_perform()
 {
     ezlopi_error_t error = EZPI_FAILED;
-    if (logged_in)
+
+    const int connection = __current_connection();
+
+    if (EZPI_util_wssession_is_authorised(connection))
     {
-        logged_in = false;
+        /* Ends the session of the connection the request came in on, and of no
+        ** other. The old version cleared the single global flag, so this was
+        ** reachable -- from an unauthenticated peer, via a CLOSE frame -- as a
+        ** way of logging out somebody else.
+        **
+        ** The whole session is dropped rather than just its authorised flag.
+        ** If the connection is in fact still open it must log in again, which
+        ** fails closed. Connections going away are handled by the transport's
+        ** close hook calling EZPI_util_wssession_close() directly, not by this
+        ** function. */
+        EZPI_util_wssession_close(connection);
         error = EZPI_SUCCESS;
     }
+
     return error;
 }
 
 bool EZPI_core_offline_is_user_logged_in()
 {
-    return logged_in;
+    /* Answers for the connection currently being dispatched. A caller with no
+    ** claimed connection -- any task other than the one that claimed it, or
+    ** the cloud path, which has no local socket -- gets false. */
+    return EZPI_util_wssession_is_authorised(__current_connection());
+}
+
+void EZPI_core_offline_login_claim_connection(int connection)
+{
+    if (0 > connection)
+    {
+        /* Release. Clear the value first and the owner last, so no ordering a
+        ** reader on another task can observe leaves it matching the owner
+        ** while a stale descriptor is still readable. */
+        __dispatch_connection = -1;
+        __dispatch_owner = NULL;
+    }
+    else
+    {
+        __dispatch_owner = xTaskGetCurrentTaskHandle();
+        __dispatch_connection = connection;
+    }
 }
 
 /*******************************************************************************
  *                         Static Function Definitions
  *******************************************************************************/
+
+/* The connection being dispatched on this task, or -1 if there is none.
+**
+** The ownership test is the load-bearing line: a task that did not claim the
+** connection is told there isn't one, so it can neither authorise nor consult
+** somebody else's socket. See the note by __dispatch_owner for why two tasks
+** reach this code. */
+static int __current_connection(void)
+{
+    if (__dispatch_owner && (xTaskGetCurrentTaskHandle() == __dispatch_owner))
+    {
+        return __dispatch_connection;
+    }
+
+    return -1;
+}
 
 /**
  * @brief Check the "user" field, if this build is configured to.

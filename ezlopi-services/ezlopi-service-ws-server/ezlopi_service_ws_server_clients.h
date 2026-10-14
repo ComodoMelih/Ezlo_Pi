@@ -62,8 +62,17 @@ extern "C"
      */
     typedef struct l_ws_server_client_conn
     {
-        void *http_handle;   /**< HTTP connection handle */
-        int http_descriptor; /**< HTTP descriptor */
+        /**
+         * The httpd SERVER-instance handle, as ESP-IDF's httpd_req_t.handle
+         * documents itself. NOT a per-connection value: it is the same for
+         * every client of this server. It is kept only because
+         * httpd_ws_send_data() wants it alongside the descriptor, and it must
+         * never be used to tell one client from another -- the comment here
+         * used to read "HTTP connection handle", and the lookups that believed
+         * it meant only one client was ever registered.
+         */
+        void *http_handle;
+        int http_descriptor; /**< Socket descriptor. This identifies the connection. */
         uint32_t fail_count; /**< Connection failed count */
 
         struct l_ws_server_client_conn *next; /**< Points to the next clinet handle */
@@ -77,12 +86,16 @@ extern "C"
      *                          Extern Function Prototypes
      *******************************************************************************/
     /**
-     * @brief Function to remove clinet connected to the websoket server using client connection handle
+     * @brief Remove the client registered for a socket descriptor.
      *
-     * @param[in] http_handle Pointer to the connection handle belonging to the client to remove
-     * @return int
+     * Keyed on the descriptor, which identifies one connection. The previous
+     * version keyed on the server-instance handle and so removed an arbitrary
+     * client whenever any connection closed.
+     *
+     * @param[in] http_descriptor Socket descriptor of the client to remove
+     * @return int 1 if a client was removed, 0 if none was registered
      */
-    int EZPI_service_ws_server_clients_remove_by_handle(void *http_handle);
+    int EZPI_service_ws_server_clients_remove_by_fd(int http_descriptor);
     /**
      * @brief Function to get clinet list head
      *
@@ -91,28 +104,34 @@ extern "C"
      */
     l_ws_server_client_conn_t *EZPI_service_ws_server_clients_get_head(void);
     /**
-     * @brief Function to pop client using client connection handle from the client list
+     * @brief Unlink the client for a socket descriptor without freeing it.
      *
-     * @param[in] http_handle Pointer to the connection handle belonging to the client to pop
+     * @param[in] http_descriptor Socket descriptor of the client to pop
      * @return l_ws_server_client_conn_t*
-     * @retval Pointer to the client poped
+     * @retval Pointer to the client popped, or NULL if none matched
      */
-    l_ws_server_client_conn_t *EZPI_service_ws_server_clients_pop(void *http_handle);
+    l_ws_server_client_conn_t *EZPI_service_ws_server_clients_pop_by_fd(int http_descriptor);
     /**
-     * @brief Function to get websocket client by handle
+     * @brief Find the client registered for a socket descriptor.
      *
-     * @param[in] http_handle Pointer to the connection handle belonging to the client to get
+     * @param[in] http_descriptor Socket descriptor to look for
      * @return l_ws_server_client_conn_t*
-     * @retval Pointer to the required client handle
+     * @retval Pointer to the client, or NULL if none matched
      */
-    l_ws_server_client_conn_t *EZPI_service_ws_server_clients_get_by_handle(void *http_handle);
+    l_ws_server_client_conn_t *EZPI_service_ws_server_clients_get_by_fd(int http_descriptor);
     /**
-     * @brief Function to add new client to the websocket client handle list
+     * @brief Register a client, or refresh one already registered.
      *
-     * @param[in] http_handle Pointer to the client http handle
-     * @param[in] http_desc HTTP descriptro for the clinent
+     * More than one client can be registered at a time; that is the point of
+     * the change. The old version compared the server-instance handle, found a
+     * match for every client after the first, and so silently kept the list at
+     * one entry -- a second local client got no broadcasts.
+     *
+     * @param[in] http_handle The httpd server-instance handle, stored for
+     *                        httpd_ws_send_data() and not used as an identity
+     * @param[in] http_desc   Socket descriptor, which identifies the client
      * @return l_ws_server_client_conn_t*
-     * @retval Pointer to the cliend handle added to the list
+     * @retval Pointer to the client record, or NULL if allocation failed
      */
     l_ws_server_client_conn_t *EZPI_service_ws_server_clients_add(void *http_handle, int http_desc);
 

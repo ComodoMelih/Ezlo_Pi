@@ -96,12 +96,34 @@ l_ws_server_client_conn_t *EZPI_service_ws_server_clients_get_head(void)
     return l_client_conn_head;
 }
 
-l_ws_server_client_conn_t *EZPI_service_ws_server_clients_get_by_handle(void *http_handle)
+/* WHY EVERY LOOKUP BELOW CHANGED FROM http_handle TO http_descriptor
+**
+** These functions used to match on http_handle, and the caller passed
+** req->handle for it. ESP-IDF documents that field as "Handle to server
+** instance": it is one value for the whole server, identical for every
+** connection. The struct's own comment called it an "HTTP connection handle",
+** which is how the mistake survived.
+**
+** Matching on a constant had three consequences:
+**
+**   - add() found the "duplicate" immediately for every client after the
+**     first, so only ONE client was ever registered. A second local client --
+**     a second phone, or a local UI alongside the app -- received no
+**     broadcasts at all, while appearing to connect fine.
+**   - remove_by_handle() removed whichever entry it found first, so a close
+**     from any connection deregistered the one client that was registered.
+**   - the fail-count eviction in ezpi_ws_server_send() could evict a healthy
+**     client on behalf of a failing one.
+**
+** The descriptor identifies the connection, so that is what these key on now.
+** The server handle is still stored, because httpd_ws_send_data() needs it
+** alongside the descriptor, but it is no longer used to tell clients apart. */
+l_ws_server_client_conn_t *EZPI_service_ws_server_clients_get_by_fd(int http_descriptor)
 {
     l_ws_server_client_conn_t *curr_client = l_client_conn_head;
     while (curr_client)
     {
-        if (curr_client->http_handle == http_handle)
+        if (curr_client->http_descriptor == http_descriptor)
         {
             break;
         }
@@ -113,41 +135,36 @@ l_ws_server_client_conn_t *EZPI_service_ws_server_clients_get_by_handle(void *ht
 
 l_ws_server_client_conn_t *EZPI_service_ws_server_clients_add(void *http_handle, int http_descriptor)
 {
-    l_ws_server_client_conn_t *ws_client_conn = NULL;
-    if (l_client_conn_head)
-    {
-        if (l_client_conn_head->http_handle != http_handle)
-        {
-            uint32_t dup_flag = 0;
-            l_ws_server_client_conn_t *curr_conn = l_client_conn_head;
-            while (curr_conn->next)
-            {
-                if (curr_conn->next->http_handle == http_handle)
-                {
-                    dup_flag = 1;
-                    break;
-                }
-                curr_conn = curr_conn->next;
-            }
+    /* A descriptor already registered is a genuine duplicate -- the same
+    ** connection announced twice -- and is refreshed rather than added again,
+    ** so the list cannot grow an entry per request. Descriptors are reused by
+    ** the operating system, so refreshing also clears a stale failure count
+    ** that belonged to the previous owner of the number. */
+    l_ws_server_client_conn_t *existing = EZPI_service_ws_server_clients_get_by_fd(http_descriptor);
 
-            if (0 == dup_flag)
-            {
-                curr_conn->next = ezpi_create_new_client(http_handle, http_descriptor);
-                if (curr_conn->next)
-                {
-                    __number_of_clients++;
-                }
-            }
-        }
+    if (existing)
+    {
+        existing->http_handle = http_handle;
+        existing->fail_count = 0;
+
+        TRACE_I("numbers of clients: %u", __number_of_clients);
+
+        return existing;
+    }
+
+    l_ws_server_client_conn_t *ws_client_conn = ezpi_create_new_client(http_handle, http_descriptor);
+
+    if (ws_client_conn)
+    {
+        /* Prepended rather than appended: it costs no traversal and the order
+        ** broadcasts go out in is not meaningful. */
+        ws_client_conn->next = l_client_conn_head;
+        l_client_conn_head = ws_client_conn;
+        __number_of_clients++;
     }
     else
     {
-        ws_client_conn = ezpi_create_new_client(http_handle, http_descriptor);
-        if (ws_client_conn)
-        {
-            __number_of_clients++;
-            l_client_conn_head = ws_client_conn;
-        }
+        TRACE_E("WSL: could not allocate a client record for fd %d", http_descriptor);
     }
 
     TRACE_I("numbers of clients: %u", __number_of_clients);
@@ -155,18 +172,17 @@ l_ws_server_client_conn_t *EZPI_service_ws_server_clients_add(void *http_handle,
     return ws_client_conn;
 }
 
-int EZPI_service_ws_server_clients_remove_by_handle(void *http_handle)
+int EZPI_service_ws_server_clients_remove_by_fd(int http_descriptor)
 {
     int ret = 0;
 
-    if (http_handle)
+    l_ws_server_client_conn_t *ws_popped_con = EZPI_service_ws_server_clients_pop_by_fd(http_descriptor);
+
+    if (ws_popped_con)
     {
-        l_ws_server_client_conn_t *ws_popped_con = EZPI_service_ws_server_clients_pop(http_handle);
-        if (ws_popped_con)
-        {
-            __number_of_clients--;
-            ezlopi_free(__FUNCTION__, ws_popped_con);
-        }
+        __number_of_clients--;
+        ezlopi_free(__FUNCTION__, ws_popped_con);
+        ret = 1;
     }
 
     TRACE_I("numbers of clients: %u", __number_of_clients);
@@ -174,13 +190,13 @@ int EZPI_service_ws_server_clients_remove_by_handle(void *http_handle)
     return ret;
 }
 
-l_ws_server_client_conn_t *EZPI_service_ws_server_clients_pop(void *http_handle)
+l_ws_server_client_conn_t *EZPI_service_ws_server_clients_pop_by_fd(int http_descriptor)
 {
     l_ws_server_client_conn_t *pop_con = NULL;
 
     if (l_client_conn_head)
     {
-        if (http_handle == l_client_conn_head->http_handle)
+        if (http_descriptor == l_client_conn_head->http_descriptor)
         {
             pop_con = l_client_conn_head;
             l_client_conn_head = l_client_conn_head->next;
@@ -191,7 +207,7 @@ l_ws_server_client_conn_t *EZPI_service_ws_server_clients_pop(void *http_handle)
             l_ws_server_client_conn_t *curr_conn = l_client_conn_head;
             while (curr_conn->next)
             {
-                if (curr_conn->next->http_handle == http_handle)
+                if (curr_conn->next->http_descriptor == http_descriptor)
                 {
                     pop_con = curr_conn->next;
                     curr_conn->next = curr_conn->next->next;

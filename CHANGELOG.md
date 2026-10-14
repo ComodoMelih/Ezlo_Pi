@@ -9,7 +9,10 @@ most useful part.
 
 Severity markers:
 
-- **[sec]** — reachable from an unauthenticated BLE or UART client.
+- **[sec]** — reachable from an unauthenticated BLE, UART, or local-network
+  client. The local-network case was added to this list for the session-model
+  entry below; before that every **[sec]** item here was BLE or UART, and the
+  marker said so.
 - **[bug]** — incorrect behaviour, not a security issue.
 - **[feat]** — new capability. Off by default unless an entry says otherwise.
 - **[infra]** — build, test, packaging or documentation.
@@ -1030,6 +1033,137 @@ failure.
   the shipped app authenticates against. Enforcing strict equality here while
   that path deliberately does not would be incoherent.
 
+### Local API sessions — [sec]
+
+These four defects are one defect wearing four hats: nothing in the local
+websocket server ever associated a request, a logout, or a broadcast with *the
+connection it belonged to*. Each symptom below follows from that.
+
+This was found while scoping a no-compile local configuration UI — the feature
+the next section's groundwork is for. The UI would have been served from this
+server and gated by this login, so the gate was checked before anything was
+built on it. It did not hold.
+
+- **One login authorised every connection on the network.** The whole hub
+  shared `static bool logged_in = false`
+  ([pre-fix `ezlopi_core_offline_login.c:73`](ezlopi-core/ezlopi-core-offline-login/ezlopi_core_offline_login.c)).
+  The per-request gate in `__message_upcall()` (pre-fix `:302`) consulted that
+  flag and nothing else, so it asked "has *anyone* logged in?" rather than "has
+  *this caller* logged in?"
+
+  The gate itself was in the right place and ran on every request, which is why
+  this reads as safe on a quick pass. The flag behind it was global.
+
+  Reach: the server binds `INADDR_ANY`
+  ([`httpd_main.c:287`](https://github.com/espressif/esp-idf)) on port 17001
+  ([`EZLOPI_USER_CONFIG.h:148`](ezlopi-user-config/EZLOPI_USER_CONFIG.h#L148)),
+  plain `ws://`. So while a legitimate client was logged in, any other peer on
+  the LAN could call any API method — device configuration, scenes, factory
+  reset — without presenting the local key.
+
+  **Honest severity.** This is not remotely reachable from outside the LAN, and
+  it is not reachable from cold boot: the flag starts false, and until some
+  legitimate client logs in the only method that passes the gate is
+  `hub.offline.login.ui` itself, which still requires the key. It needs a
+  logged-in client to stand on. On a hub in normal use — a phone app or local
+  UI connected — that condition is the steady state, not an edge case.
+
+- **Any unauthenticated peer could log everyone else out.** A websocket CLOSE
+  frame reached `EZPI_core_offline_logout_perform()` (pre-fix `:436` and
+  `:465`) with no login check, and that cleared the single global flag. Opening
+  a socket and closing it immediately deauthorised every real client. A third
+  site (pre-fix `:637`) did the same from the send-failure path, so one
+  client's bad connection logged out the others.
+
+- **Only one client could ever receive broadcasts.** The client list keyed and
+  deduplicated on `http_handle`, which callers fed from `req->handle` — a field
+  ESP-IDF documents as `/*!< Handle to server instance */`
+  ([`esp_http_server.h:330`](https://github.com/espressif/esp-idf)). It is one
+  value for the entire server, identical for every connection, so every client
+  after the first looked like a duplicate and `clients_add()` short-circuited
+  forever. A second client connected cleanly and then silently received
+  nothing.
+
+  The struct field was commented "HTTP connection handle", which is how this
+  survived: the comment described what the code needed rather than what the
+  field held. That comment is now corrected in place, since it was load-bearing.
+
+- **A plain browser GET was treated as a completed handshake.** ESP-IDF skips
+  its handshake block when there is no `Upgrade` header
+  ([`httpd_uri.c:314`](https://github.com/espressif/esp-idf), gated on
+  `aux->ws_handshake_detect`) but invokes the URI handler regardless at `:329`.
+  The handler logged "Handshake done" and registered the socket anyway, so
+  `curl http://hub:17001/` planted a non-websocket descriptor as the broadcast
+  target. Now the handler asks `httpd_ws_get_fd_info()` instead of assuming,
+  and a non-websocket GET gets a one-line plain-text explanation of the port.
+
+**The fix is per-connection authorisation.** A new dependency-free component,
+`ezlopi-util-wssession`, holds a fixed table of `{fd, authorised}` keyed on the
+socket descriptor. ESP-IDF's `open_fn`/`close_fn` hooks create and destroy the
+entry, so a session cannot outlive its connection — and `close_fn` is the right
+hook rather than the CLOSE frame, because ESP-IDF documents it as running "for
+all terminated sessions, including sessions where the socket was closed by the
+network stack", which is the case a CLOSE frame misses. `open_fn` always sets
+`authorised = false`, so a reused descriptor number never inherits the previous
+owner's authority.
+
+Two details worth recording because getting either wrong would have been worse
+than the bug:
+
+- **Overriding `close_fn` transfers responsibility for closing the socket.**
+  [`httpd_sess.c:365`](https://github.com/espressif/esp-idf) is
+  `if (hd->config.close_fn) close_fn(hd, fd); else close(fd);` — so the hook
+  must call `close()` itself or leak a descriptor per connection. This was
+  verified in the IDF source rather than assumed, because the two failure modes
+  are a descriptor leak and a double close.
+
+- **The request-to-connection association had to survive two tasks.**
+  `EZPI_core_api_consume` is called from the cloud task
+  ([`ezlopi_service_webprov.c:355`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L355))
+  as well as the local one, so an ambient "current connection" global would be
+  readable from the wrong task. The claim records the owning task handle and is
+  honoured only when `xTaskGetCurrentTaskHandle()` matches, so a cross-task
+  read fails closed and returns "no connection" rather than someone else's. No
+  lock is needed because only the claiming task writes. The same hazard is
+  already documented in this tree at
+  [`ezlopi_core_ota.c:164`](ezlopi-core/ezlopi-core-ota/ezlopi_core_ota.c#L164).
+
+**A use-after-free was fixed on the way through.**
+`ezpi_ws_server_broadcast()` dereferenced `curr_client->next` after calling
+`ezpi_ws_server_send()`, which can free that node via the fail-count eviction
+above. Pre-existing, but it was close to unreachable while the list could only
+hold one entry, and becomes reachable as soon as multiple clients work. The
+loop now reads `next` before sending.
+
+**One deliberate behaviour change, flagged because it is visible to the Ezlo
+app.** `hub.offline.login.ui` dispatched over the *cloud* connection now
+returns an error (`-32500`, `user.login.nolocalsession`) instead of succeeding.
+This method authorises the connection it arrives on, and only the local
+websocket server has one; dispatched from the cloud there is nothing to
+authorise. It previously "succeeded" by setting the global flag — which is
+precisely the bug above, so preserving that success is not an option. Logging
+in over the local connection, which is what the app actually does, is
+unchanged. Two simultaneous logged-in clients now work, where the old code
+refused the second while admitting unauthenticated ones.
+
+`EZPI_core_offline_logout_perform()` is left in place and is now correct if
+called, but **nothing calls it** — all three former call sites were connection
+teardown, which now goes through the close hook. Its documentation says so, to
+keep it from being re-wired to the old pattern.
+
+Costs +1136 bytes on both esp32 and esp32c3 (measured, identical on each).
+
+**Untested on hardware.** No board has had two clients connected at once, and
+the cloud-path error above has not been exercised against the real Ezlo app.
+The session logic itself is covered by 185 host checks described under Testing.
+What is unverified is the wiring: that ESP-IDF's hooks fire as documented on a
+real board.
+
+**What this does not fix.** The transport is still plain `ws://`, so anything
+able to intercept or spoof TCP on the LAN is unaffected by any of this — a
+session keyed on a descriptor authorises whoever holds that socket. Only TLS
+would change that, and it is listed under Known gaps rather than claimed here.
+
 ### Device configuration — [bug]
 
 - **A device configuration that will not parse no longer bricks the hub.**
@@ -1731,8 +1865,8 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 3796 assertions across
-  fourteen binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 3981 assertions across
+  fifteen binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
@@ -1874,6 +2008,50 @@ enumerators — so the live half of this component was never affected.
   superseded behaviour alongside the new one and fail if the old rule *stops*
   misbehaving. That shape has now earned its place twice: it turns "I believe
   this was broken" into something a reader can run.
+
+- **`ezlopi-util-wssession` joined the suite** —
+  [`tests/host/test_wssession.c`](tests/host/test_wssession.c), 185 checks,
+  covering the per-connection authorisation described under **Local API
+  sessions — [sec]** above. This is the clearest case so far for why the
+  extract-to-a-dependency-free-component rule is worth the trouble: the defects
+  it covers are *invisible to a single-client test*. They need two connections
+  driven independently, which is awkward on a board and trivial on a host.
+
+  The property under test is not an example, it is a quantifier: **no
+  connection inherits another's authority.** So the test enumerates every
+  ordered pair from `{0, 1, 3, 4, 7, 11, 12, 29}` and asserts that authorising
+  one never authorises the other, rather than picking a pair and reasoning
+  about the rest. Descriptor `0` is in that set deliberately — a table relying
+  on static zero-initialisation would claim fd 0 as an authorised session, and
+  only a test that tries fd 0 finds that.
+
+  Descriptor *reuse* is covered the same way, in both orderings — orderly close
+  then reopen, and reopen with no close at all. That case cannot be tested on
+  hardware with any confidence, because it depends on the OS handing back a
+  number it just took away.
+
+  It is the third file here, after `test_localkey.c` and `test_devcfg.c`, to
+  keep the superseded behaviour alongside the new one and fail if the old rule
+  stops misbehaving. Here that shape pays for itself more directly than in
+  either earlier case: the old model was a single global `bool`, which is ten
+  lines to reimplement, and the *same* two scenario functions run against both
+  models through a function-pointer struct. So the claim "a stranger was
+  admitted" is not an assertion in prose — it is a test that passes against the
+  old code and fails against the new, in the same file, on every run.
+
+  Mutation-tested 4 of 4 caught, against an unmutated control that reports 0:
+
+  | mutation | failures |
+  |---|---|
+  | `is_authorised()` returns true if *any* session is authorised — the original defect, reintroduced | 69 |
+  | `open()` does not clear `authorised` when it reuses an entry | 1 |
+  | `authorise()` marks every live session instead of the one named | 56 |
+  | a full table returns success instead of failing closed | 1 |
+
+  The two mutations caught by a single check each are the interesting ones. A
+  count of 1 is not a weak result here — both are narrow behaviours that
+  exactly one property can distinguish, and the point of recording the number
+  is that it is not 0.
 
 - **`ezlopi-core-actions` joined the suite** — `tests/host/test_actions.c`, 144
   checks, and the last file the zero-stub sweep had to offer. It found the
@@ -2246,7 +2424,7 @@ enumerators — so the live half of this component was never affected.
   would still succeed against the test's own fakes, and every check would pass
   while testing an empty file. Second, that stub lives in its own
   `tests/host/stubs-mqtt-api/` rather than the shared `stubs/`, because five of
-  the fourteen binaries put `stubs/` on their include path — `test_cjext`,
+  the fifteen binaries put `stubs/` on their include path — `test_cjext`,
   `test_ze08`, `test_pms5003`, `test_gps6mv2` and this one — and a shared
   `sdkconfig.h` would quietly decide the configuration of four tests that have
   nothing to do with MQTT, three of them drivers full of `#ifdef`s.
@@ -2567,6 +2745,22 @@ Listed because a changelog that only mentions what was finished is misleading.
   currently builds.
 - **The PSK is still sent to the cloud as `key`** in `hub.network.get`. Only
   the local trace is masked. See the README privacy note.
+- **The local API is plain `ws://`, and the per-connection session fix does not
+  change that.** The server listens on `INADDR_ANY:17001` with no TLS, so the
+  local key crosses the LAN in cleartext on every login and anything able to
+  intercept or spoof TCP on that network can take over an authorised socket.
+  Sessions are keyed on the socket descriptor, which authorises whoever holds
+  the socket — correct against *other* connections, and no defence at all
+  against someone on the wire of the same one.
+
+  This is recorded as a gap rather than fixed because the fix is `wss://` with
+  a certificate, and a hub with no routable name and no CA has nowhere to get
+  one that a client would accept; self-signed means teaching every client to
+  skip verification, which is not obviously an improvement. It is called out
+  because the session work above could easily be read as having closed the
+  local-network hole in general, and it has not: it closed cross-connection
+  authority, which was the part that let a passive peer in without touching
+  the network.
 - **The install page has never been used to flash a board.** It is assembled
   and checked on every CI run, and the images it serves are verified
   byte-for-byte against the build outputs, but no one has opened it in a

@@ -22,6 +22,7 @@ UUID_DIR     := ../../ezlopi-util/ezlopi-util-uuid
 ACTIONS_DIR  := ../../ezlopi-core/ezlopi-core-actions
 LOCALKEY_DIR := ../../ezlopi-util/ezlopi-util-localkey
 DEVCFG_DIR   := ../../ezlopi-util/ezlopi-util-devcfg
+WSSESSION_DIR := ../../ezlopi-util/ezlopi-util-wssession
 MQTTCFG_DIR  := ../../ezlopi-util/ezlopi-util-mqttcfg
 MQTTAPI_DIR  := ../../ezlopi-cloud/ezlopi-cloud-mqtt-config
 MQTTCORE_DIR := ../../ezlopi-core/ezlopi-core-mqtt-config
@@ -59,7 +60,7 @@ LDFLAGS += $(SANITIZERS)
 BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
-           test_mqttcfg test_mqtt_api test_devcfg
+           test_mqttcfg test_mqtt_api test_devcfg test_wssession
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -307,7 +308,10 @@ $(BUILD)/test_mqttcfg: test_mqttcfg.c $(MQTTCFG_DIR)/ezlopi_util_mqttcfg.c | $(B
 # file preprocesses away to nothing and the suite would link and pass while
 # testing an empty object file -- test_the_subject_exists() exists to catch
 # precisely that. It is deliberately NOT in the shared stubs/ directory, which
-# ten other binaries include; see the comment in the file. The ordinary stubs/
+# four other binaries include -- test_cjext, test_ze08, test_pms5003 and
+# test_gps6mv2, which is what -I$(STUBS_DIR) above greps to; the comment used to
+# say "ten", which was never true of any revision of this file. See the comment
+# in stubs-mqtt-api/sdkconfig.h for why that matters. The ordinary stubs/
 # comes second, for cjext's ezlopi_util_trace.h and EZLOPI_USER_CONFIG.h.
 #
 # cjext.c is compiled with its own relaxed flags for the same reason as in the
@@ -346,6 +350,26 @@ $(BUILD)/test_devcfg: DEVCFG_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
                                        $(SANITIZERS)
 $(BUILD)/test_devcfg: test_devcfg.c $(DEVCFG_DIR)/ezlopi_util_devcfg.c | $(BUILD)
 	$(CC) $(DEVCFG_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# ezlopi-util-wssession: who is allowed to call the local API.
+#
+# The behaviour this replaces was one file-static bool in
+# ezlopi_core_offline_login.c, shared by every connection to port 17001 -- a
+# port bound on all interfaces. So while one client was logged in, any other
+# peer on the network passed the gate without presenting the local key, and any
+# peer could end the legitimate session by sending a websocket CLOSE frame,
+# which reached the logout path with no check of who sent it.
+#
+# Both defects are invisible to a single-client test: they need two connections
+# driven independently, which is awkward on a board and trivial here. The
+# descriptor-reuse case is the one that cannot be tested on hardware at all
+# with any confidence, because it depends on the kernel handing out a number
+# again at a moment of its choosing.
+$(BUILD)/test_wssession: WSSESSION_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                             -I$(WSSESSION_DIR) \
+                                             $(SANITIZERS)
+$(BUILD)/test_wssession: test_wssession.c $(WSSESSION_DIR)/ezlopi_util_wssession.c | $(BUILD)
+	$(CC) $(WSSESSION_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

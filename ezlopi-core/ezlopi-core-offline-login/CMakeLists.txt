@@ -32,6 +32,7 @@ set(EZLOPI_SENSOR_DEVICE_COMPONENTS
 # Define ezlopi-utils components
 set(EZLOPI_UTIL_COMPONENTS
         ezlopi-util-localkey
+        ezlopi-util-wssession
 )
 
 # Register the components

@@ -106,6 +106,22 @@ void EZPI_CLOUD_offline_login(cJSON *cj_request, cJSON *cj_response)
             {
                 ezlopi_cloud_prepare_error(cj_response, -32500, "Bad password", "user.login.badpassword");
             }
+            else if (EZPI_NOT_AVAILABLE == error)
+            {
+                /* The credentials were right, but there is no local connection
+                ** to grant a session to. This method authorises the connection
+                ** it arrives on, and only the local websocket server has one:
+                ** dispatched over the cloud there is nothing to authorise.
+                **
+                ** It used to "succeed" here, because it set a single flag
+                ** shared by the whole hub -- which opened the local API to
+                ** every peer on the network rather than to the caller. That is
+                ** the behaviour being removed, so this is a deliberate change
+                ** in what the cloud path returns, not an oversight. */
+                ezlopi_cloud_prepare_error(cj_response, -32500,
+                                           "No local connection to authorise",
+                                           "user.login.nolocalsession");
+            }
         }
         else
         {

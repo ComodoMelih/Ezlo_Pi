@@ -3,6 +3,11 @@ file(GLOB_RECURSE src_files "*.c*")
 
 set(EZLOPI_UTIL_COMPONENTS
         ezlopi-util-trace
+        # Per-connection authorisation. Named explicitly rather than inherited
+        # through ezlopi-core-offline-login, because this file calls
+        # EZPI_util_wssession_open/close/reset directly from the accept and
+        # close hooks.
+        ezlopi-util-wssession
 )
 
 set(SDK_COMPONENTS
