@@ -64,10 +64,16 @@ make -C tests/host
 ```
 
 This needs only a C compiler. It compiles the real firmware sources — no copies
-— for eight areas that handle untrusted input: the helpers in
+— into seventeen binaries, every one of them covering something that parses or
+validates input it did not produce: the helpers in
 [`ezlopi-util/ezlopi-util-sanitize`](ezlopi-util/ezlopi-util-sanitize/), the
 vendored cJSON extensions, the Improv state machine, the Home Assistant
-discovery builder, and the ZE08-CH2O, PMS5003, MB1013 and GY-GPS6MV2 parsers. Everything is built under
+discovery builder, the ZE08-CH2O, PMS5003, MB1013 and GY-GPS6MV2 parsers, the
+UUID generator, the action-name table, the local-key, MQTT-config and
+websocket-session helpers, the device-configuration recovery counter and
+validator, and the `hub.mqtt.config.*` and `hub.ezlopi.config.*` API handlers.
+This sentence used to say "eight areas" and was last accurate at eight
+binaries. Everything is built under
 AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
 -Werror` except where [`tests/host/Makefile`](tests/host/Makefile) documents a
 scoped exemption for vendored or third-party code. Then it runs the assertions
@@ -234,20 +240,25 @@ a number nobody can correct. It states its own file set, including the two
 directories it deliberately leaves out, because the earlier totals could not be
 compared against anything without knowing that.
 
-It currently reports 36 of 253 first-party `.c` files compiling with nothing
+It currently reports 36 of 255 first-party `.c` files compiling with nothing
 but their own directory on the include path. Ten of the 36 now have host
 tests — `ezlopi-core-actions`, `mb1013_parse`, and the `ezlopi-util` components
 `-devcfg`, `-ha`, `-improv`, `-localkey`, `-mqttcfg`, `-sanitize`, `-uuid`,
 `-wssession`. The remaining 26 are the same kinds of thing the table above
 describes: fourteen of them are `ezlopi-cloud-constants` string tables.
 
-Being in the 36 is not the same as being testable, in either direction.
-`ezlopi-util-devcfgval` is not in it — it reads a `cJSON` tree, so it needs
-`cjext.h` — and it has one of the larger test files here. The 36 is a measure
-of how little a file includes, which is why the rest of this section is about
-how badly that correlates with anything.
+Being in the 36 is not the same as being testable, in either direction. Two
+components with substantial test files are not in it: `ezlopi-util-devcfgval`
+and `ezlopi-cloud-devcfg`, both because they read a `cJSON` tree and so need
+`cjext.h`, which is the fifth most common blocker at 14 files. The second of
+the two is the clearer case — it is host-tested by moving the six calls that
+need `<esp_partition.h>` and the HAL into a separate port file and faking them,
+so the component as a whole is tested while one of its two `.c` files remains
+unreachable by this measure and is counted as such. The 36 is a measure of how
+little a file includes, which is why the rest of this section is about how
+badly that correlates with anything.
 
-| include path | of the 217 failures, now compile | …of those, define no symbols | net gain |
+| include path | of the 219 failures, now compile | …of those, define no symbols | net gain |
 |---|---|---|---|
 | plus an empty `sdkconfig.h` | 52 | **52** | **0** |
 | plus a real generated `sdkconfig.h` (510 `#define`s) | 9 | **9** | **0** |

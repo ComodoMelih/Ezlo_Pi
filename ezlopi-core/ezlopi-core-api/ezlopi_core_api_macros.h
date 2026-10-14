@@ -211,6 +211,22 @@ extern "C"
     CLOUD_METHOD("hub.setting.value.set", EZPI_setting_value_set, EZPI_setting_value_set_broadcast_updater)
     CLOUD_METHOD("hub.settings.list", EZPI_settings_list, NULL)
 
+    /* Which sensors this hub has been told it has, and replacing that list,
+    ** over the same connection as every other setting. Before these two the
+    ** only ways in were the BLE dynamic-config characteristic and a serial
+    ** cable, so a hub out of Bluetooth range could not be reconfigured at all.
+    **
+    ** Not guarded: there is no Kconfig option for "this build has no device
+    ** configuration".
+    **
+    ** No updater on .set, for the same reason as the MQTT trio above but a
+    ** stronger version of it -- the stored configuration is read exactly once,
+    ** by EZPI_device_prepare() during EZPI_init(), so nothing has changed that
+    ** could be broadcast until the hub restarts. The result carries
+    ** "rebootRequired" and the caller decides when. */
+    CLOUD_METHOD("hub.ezlopi.config.get", EZPI_CLOUD_devcfg_get, NULL)
+    CLOUD_METHOD("hub.ezlopi.config.set", EZPI_CLOUD_devcfg_set, NULL)
+
 #ifdef CONFIG_EZPI_ENABLE_MQTT
     /* Pointing this controller at a broker without rebuilding it. Guarded
     ** because the handlers themselves are inside the same #ifdef -- with MQTT

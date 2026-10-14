@@ -81,7 +81,7 @@ static void ____ezlopi_device_clear_bottom_children(l_ezlopi_device_t *curr_node
 static void __ezlopi_device_free_parent_tree(l_ezlopi_device_t *parent_device, uint32_t parent_dev_id);
 
 static ezlopi_error_t ezlopi_device_parse_json_v3(cJSON *cj_config);
-static const char *__expected_chipset_name(void);
+/* Declared in ezlopi_core_devices.h; no static prototype needed here. */
 #if (1 == ENABLE_TRACE)
 #if 0 // Defined but not used
 static void ezlopi_device_print_controller_cloud_information_v3(void);
@@ -581,8 +581,16 @@ l_ezlopi_item_t *EZPI_core_device_add_item_to_device(l_ezlopi_device_t *device, 
  * NULL means this build is for a chip with no name here, in which case there is
  * nothing to stamp and nothing a restart would fix. ezlopi_device_parse_json_v3()
  * has the matching gap: with no CONFIG_IDF_TARGET_* match its comparison is
- * compiled out entirely. */
-static const char *__expected_chipset_name(void)
+ * compiled out entirely.
+ *
+ * Not static, and that is the whole point of the name change. The config-set
+ * API has to refuse a configuration naming a different chip *before* storing
+ * it, which means it needs to know the same name this file expects. A second
+ * copy of the #if chain over there would be fine on the day it was written and
+ * would be the exact drift this comment already warns about one paragraph up,
+ * only worse: a target added here and forgotten there gives an API that refuses
+ * a configuration the parser would have accepted, or accepts one it will not. */
+const char *EZPI_core_device_expected_chipset_name(void)
 {
 #if defined(CONFIG_IDF_TARGET_ESP32)
     return ezlopi_ESP32_str;
@@ -636,7 +644,7 @@ void EZPI_device_prepare(void)
                  * UART, BLE and the websocket start. Restarting on a cause the
                  * stamp cannot fix therefore loops forever with no interface
                  * left to recover through. See ezlopi-util-devcfg. */
-                const char *expected_chipset = __expected_chipset_name();
+                const char *expected_chipset = EZPI_core_device_expected_chipset_name();
                 const bool chipset_key_present =
                     (NULL != cJSON_GetObjectItem(__FUNCTION__, cj_config, ezlopi_chipset_str));
 

@@ -145,6 +145,23 @@ extern "C"
      */
     void EZPI_device_prepare(void);
     /**
+     * @brief   The chipset name this build expects in a stored device
+     *          configuration.
+     *
+     * The same string the boot parser compares "chipset" against, and the same
+     * one EZPI_device_prepare() stamps when the key is missing. Exposed so that
+     * anything validating a configuration before storing it asks this build
+     * what it accepts, rather than carrying its own copy of the
+     * CONFIG_IDF_TARGET_* chain -- two copies is how an API ends up refusing a
+     * configuration the parser would have taken, or taking one it will not.
+     *
+     * @return  A static string, or NULL on a target with no name here. NULL
+     *          also means the parser's own chipset comparison is compiled out,
+     *          so a caller then has nothing to check against rather than
+     *          something that fails.
+     */
+    const char *EZPI_core_device_expected_chipset_name(void);
+    /**
      * @brief Funtion to return head-node of device-ll
      *
      * @return l_ezlopi_device_t*

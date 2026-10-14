@@ -23,6 +23,7 @@ ACTIONS_DIR  := ../../ezlopi-core/ezlopi-core-actions
 LOCALKEY_DIR := ../../ezlopi-util/ezlopi-util-localkey
 DEVCFG_DIR   := ../../ezlopi-util/ezlopi-util-devcfg
 DEVCFGVAL_DIR := ../../ezlopi-util/ezlopi-util-devcfgval
+DEVCFGAPI_DIR := ../../ezlopi-cloud/ezlopi-cloud-devcfg
 WSSESSION_DIR := ../../ezlopi-util/ezlopi-util-wssession
 MQTTCFG_DIR  := ../../ezlopi-util/ezlopi-util-mqttcfg
 MQTTAPI_DIR  := ../../ezlopi-cloud/ezlopi-cloud-mqtt-config
@@ -61,7 +62,8 @@ LDFLAGS += $(SANITIZERS)
 BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
-           test_mqttcfg test_mqtt_api test_devcfg test_devcfgval test_wssession
+           test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
+           test_devcfg_api test_wssession
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -309,10 +311,11 @@ $(BUILD)/test_mqttcfg: test_mqttcfg.c $(MQTTCFG_DIR)/ezlopi_util_mqttcfg.c | $(B
 # file preprocesses away to nothing and the suite would link and pass while
 # testing an empty object file -- test_the_subject_exists() exists to catch
 # precisely that. It is deliberately NOT in the shared stubs/ directory, which
-# five other binaries include -- test_cjext, test_ze08, test_pms5003,
-# test_gps6mv2 and test_devcfgval, which is what -I$(STUBS_DIR) above greps to;
-# the comment used to say "ten", which was never true of any revision of this
-# file. See the comment
+# six other binaries include -- test_cjext, test_ze08, test_pms5003,
+# test_gps6mv2, test_devcfgval and test_devcfg_api, which is what
+# -I$(STUBS_DIR) above greps to; the comment said "ten" once, which was never
+# true of any revision of this file, and "five" until test_devcfg_api was
+# added. See the comment
 # in stubs-mqtt-api/sdkconfig.h for why that matters. The ordinary stubs/
 # comes second, for cjext's ezlopi_util_trace.h and EZLOPI_USER_CONFIG.h.
 #
@@ -390,6 +393,53 @@ $(BUILD)/test_devcfgval: test_devcfgval.c \
 	$(CC) $(DEVCFGVAL_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/devcfgval_cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_devcfgval_main.o $(BUILD)/devcfgval_subject.o \
 	      $(BUILD)/devcfgval_cjext.o $(LDFLAGS) -lm
+
+# ezlopi-cloud-devcfg: hub.ezlopi.config.get / .set -- the first way to read
+# and replace the device configuration over the network rather than over BLE or
+# a cable.
+#
+# The property worth the rule is the negative one: a request that is refused
+# must leave the stored configuration alone. Writing as you walk is the natural
+# way to write this handler, the error reply looks identical either way, and the
+# damage only shows up on the next boot as devices that are quietly missing. So
+# every refusal case asserts the fake's write count as well as the error, which
+# is the only way that distinction can fail a test rather than fail a user.
+#
+# Two sources, and only one of them is here. ezlopi_cloud_devcfg.c holds the
+# decisions; ezlopi_cloud_devcfg_port.c -- which is NOT compiled by this rule --
+# is the six-function adapter that reaches ezlopi-core-factory-info and the
+# compiled-in device table, neither of which exists on a host. test_devcfg_api.c
+# defines those six itself as recording fakes, the same arrangement as
+# test_mqtt_api above. That is the whole reason the port was separated: it moves
+# the untestable part into a file short enough to read in full, instead of
+# making the handler untestable along with it.
+#
+# ezlopi-util-devcfgval is linked in real, not faked. It is the thing that
+# decides which shapes are acceptable, it is already host-tested on its own, and
+# faking it would let this file assert that the handler forwards reasons that
+# the firmware does not actually produce.
+#
+# No stubs-devcfg-api/ directory: unlike the MQTT methods, both handlers live
+# outside any #ifdef, so there is no configuration in which this subject
+# preprocesses away to nothing. test_the_subject_exists() still checks that
+# something ran, because linking against a stale object file is a different
+# failure and looks the same from here.
+$(BUILD)/test_devcfg_api: DEVCFGAPI_CFLAGS := -std=c99 -O1 -g \
+                                              -I$(DEVCFGAPI_DIR) \
+                                              -I$(DEVCFGVAL_DIR) \
+                                              -I$(CONSTANTS_DIR) \
+                                              -I$(CJEXT_DIR) -I$(STUBS_DIR) \
+                                              $(SANITIZERS)
+$(BUILD)/test_devcfg_api: test_devcfg_api.c \
+                          $(DEVCFGAPI_DIR)/ezlopi_cloud_devcfg.c \
+                          $(DEVCFGVAL_DIR)/ezlopi_util_devcfgval.c \
+                          $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(DEVCFGAPI_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_devcfg_api_main.o test_devcfg_api.c
+	$(CC) $(DEVCFGAPI_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/devcfg_api_subject.o $(DEVCFGAPI_DIR)/ezlopi_cloud_devcfg.c
+	$(CC) $(DEVCFGAPI_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/devcfg_api_val.o $(DEVCFGVAL_DIR)/ezlopi_util_devcfgval.c
+	$(CC) $(DEVCFGAPI_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/devcfg_api_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_devcfg_api_main.o $(BUILD)/devcfg_api_subject.o \
+	      $(BUILD)/devcfg_api_val.o $(BUILD)/devcfg_api_cjext.o $(LDFLAGS) -lm
 
 # ezlopi-util-wssession: who is allowed to call the local API.
 #

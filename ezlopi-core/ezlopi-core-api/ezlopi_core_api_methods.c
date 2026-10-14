@@ -71,6 +71,7 @@
 #include "ezlopi_cloud_hub_data_list.h"
 #include "ezlopi_cloud_protect.h"
 #include "ezlopi_cloud_mqtt_config.h"
+#include "ezlopi_cloud_devcfg.h"
 /*******************************************************************************
  *                          Extern Data Declarations
  *******************************************************************************/

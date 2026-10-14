@@ -1506,22 +1506,188 @@ would change that, and it is listed under Known gaps rather than claimed here.
   `test_the_tree_is_not_modified()` catches twice. A control run with the
   component restored passes.
 
-- **Nothing calls it yet.** The method that will —
-  `hub.ezlopi.config.get`/`.set`, the no-recompile configuration path — is the
-  next piece of work, and it needs one thing this component deliberately does
+- **Nothing called it when it was written.** The method that does now —
+  `hub.ezlopi.config.get`/`.set`, the no-recompile configuration path, in the
+  entry immediately below — needed one thing this component deliberately does
   not do: say whether an `id_item` names a driver *this image was built with*.
   That depends on the device table in `ezlopi_core_devices_list.c`, which
   differs between builds and is not available here.
 
-  Because nothing references it, the linker drops it: the esp32 image is
-  `0x190c70`, **byte-identical in size** to the previous commit, with the
-  component compiled into `libezlopi-util-devcfgval.a` and no `devcfgval`
-  symbol in the ELF. **Untested on hardware** in the only sense that applies —
-  no board has run this code, because no board can reach it yet.
+  As committed, nothing referenced it and the linker dropped it: the esp32
+  image was `0x190c70`, **byte-identical in size** to the commit before, with
+  the component compiled into `libezlopi-util-devcfgval.a` and no `devcfgval`
+  symbol in the ELF. That is no longer true as of the next entry, which is
+  where the size this component actually costs is recorded.
 
 - **Not checked, and listed under Known gaps rather than half-done:** whether
   the GPIOs a configuration names are valid for the target, free, or claimed
   twice. That needs the HAL and is a larger piece of work than this.
+
+- **The device configuration can now be read and replaced over the websocket
+  API.** Two new methods, `hub.ezlopi.config.get` and
+  `hub.ezlopi.config.set`, in new component
+  [`ezlopi-cloud-devcfg`](ezlopi-cloud/ezlopi-cloud-devcfg/), with
+  [`tests/host/test_devcfg_api.c`](tests/host/test_devcfg_api.c) — 261 checks.
+
+  Before this, the only ways to tell the firmware which sensors exist and which
+  GPIOs they sit on were the BLE dynamic-config characteristic and the UART
+  command channel. Both need physical proximity, and neither is reachable from
+  the websocket API that every other hub setting is changed through. A hub on a
+  shelf could be asked its firmware version, its rooms, its scenes and its MQTT
+  broker over the network, but not what devices it had been configured with,
+  and could not be reconfigured at all. This is the piece "no-compile
+  configuration" was missing: the device list becomes a thing you can read and
+  replace over the same connection as everything else, which is what a local
+  configuration UI needs in order to exist.
+
+  **The write path refuses before it writes, and the reason is not the obvious
+  one.** Storing a wrong configuration does not fail loudly — it fails on the
+  next boot, silently, as devices that simply are not there.
+  `ezlopi_device_parse_json_v3()` skips an entry whose `id_item` it does not
+  recognise without logging anything, and treats an absent device list as
+  success. So `.set` applies `EZPI_util_devcfgval_check()` and then the one
+  check that function deliberately leaves to its caller: whether each `id_item`
+  names a driver this image was built with. The order is fixed and is the point
+  of the file — parse the envelope, serialise once and refuse if it does not
+  fit, validate the tree, check every `id_item` against the device table, and
+  only then write.
+
+  Those last two refusals are reported under separate tokens on purpose. A
+  configuration refused by the validator is malformed and every build will
+  refuse it; one refused for an unknown `id_item` is well-formed and would work
+  on a build that included that driver. The remedy is a different firmware
+  image, not a different configuration, and a single "invalid config" would
+  send someone editing JSON that was already correct. Errors also carry
+  `badIndex` — the position in `dev_detail` of the entry at fault — because a
+  thirty-device configuration refused without one leaves the user to find the
+  bad entry by bisection.
+
+  **It does not reboot.** The parser runs once, from `EZPI_device_prepare()`
+  during `EZPI_init()` — one call site, which is why a stored configuration
+  takes effect on the next boot and not before. `.set` answers
+  `"rebootRequired": true` rather than restarting the hub out from under the
+  caller. There is deliberately no `.reset` to match `hub.mqtt.config.reset`:
+  resetting this field means a hub with no devices, which the existing
+  factory-reset paths already reach, and a second unauthenticated route to
+  "forget everything" is not an improvement.
+
+- **The chipset name now has one definition instead of two.**
+  `EZPI_core_device_expected_chipset_name()` is the de-`static`'d
+  `__expected_chipset_name()` from
+  [`ezlopi_core_devices.c`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.c),
+  exposed so `.set` can refuse a configuration naming the wrong chip using the
+  same name the boot parser will compare against. A second `#if
+  CONFIG_IDF_TARGET_*` chain in the cloud layer would have been fine the day it
+  was written and would be exactly the drift the comment above that function
+  already warns about — a target added in one place and forgotten in the other
+  gives an API that refuses configurations the parser would accept, or accepts
+  ones it will not.
+
+- **Everything that cannot be host-tested is in one file.**
+  `ezlopi_cloud_devcfg_port.c` is six forwarding functions, because
+  `ezlopi_core_factory_info.h` includes `<esp_partition.h>` and
+  `ezlopi_core_devices_list.h` pulls in seven HAL headers, so nothing including
+  them compiles on a host. The seam is drawn exactly where the host build stops
+  working: the test compiles the real handler and the real validator and
+  substitutes six recording fakes, and the port has **no host coverage at all,
+  by design**. It is short enough to read in full and has no branch that could
+  be wrong in an interesting way.
+
+  The property the test is built around is not "does it store a config" — that
+  is one call — but the negative one: **a request that is refused must leave
+  the stored configuration alone.** Every refusal case asserts that nothing was
+  written.
+
+  Twelve mutations of the handler were run, eleven caught: collapsing every
+  validator token into one (18 failures), never checking that a driver exists
+  (27), ignoring the validator verdict (71), handing the validator a limit one
+  byte too generous (6), mis-measuring the document a byte short (2), treating a
+  failed write as success (3), inverting the region-size fallback (6), accepting
+  a non-object `params.config` (1), not requiring `params` (2), reporting
+  `badIndex` on errors it does not apply to (7), and leaking the string `.get`
+  reads (caught by LeakSanitizer, not by an assertion). A control run passes.
+  The twelfth — changing the size clamp's `>` to `>=` — survives and is
+  *provably equivalent*: at `serialised_len == limit` both forms yield `limit`,
+  since the false branch casts a value already equal to it. The clamp exists
+  only to stop a length above 4 GiB wrapping to a small number, so it has no
+  behavioural boundary to detect; it is labelled an equivalent mutant in
+  [`tests/host/mut_devcfg.py`](tests/host/mut_devcfg.py) rather than left
+  looking like a gap.
+
+  Two of those mutations changed the code under test rather than the test.
+  Reporting `badIndex` on every error survived at first — the header promised
+  it was *absent*, not `-1`, for refusals that are not about one entry, and
+  nothing checked it, because the test's reader returned `-1` for both. It now
+  asserts on the member's presence. And dropping the validator call produced a
+  `SEGV` in `__every_id_item_has_a_driver` rather than failed assertions: that
+  function documents its precondition correctly, but the cost of trusting it is
+  a null dereference on an unauthenticated method, so it now checks
+  `cJSON_IsNumber()` first and an entry with no usable `id_item` degrades to
+  "no driver claims it". The same mutation now yields 71 clean failures instead
+  of a crash. That guard is unreachable while the validator is correct and is
+  **not covered by a test**, which the comment on it says plainly.
+
+- **A `cjext` lookup defect was found and documented rather than fixed.**
+  `cJSON_GetObjectItem()` passes the *stored* key's `str_key_len` to
+  `case_insensitive_strcmp()` as the number of bytes it may compare
+  ([`cjext.c:2271`](ezlopi-components/cjext/cjext.c#L2271)), and the two places
+  that set that field disagree about whether it includes the NUL: the parser
+  stores the inclusive length ([lines
+  1897](ezlopi-components/cjext/cjext.c#L1897) and
+  [2024](ezlopi-components/cjext/cjext.c#L2024)), while
+  `add_item_to_object()` stores `strlen()` ([line
+  2423](ezlopi-components/cjext/cjext.c#L2423)). Without the NUL in the budget
+  the comparison cannot reject a requested name that is a *longer* extension of
+  a stored key. Measured, on an object holding `config` then `configSize`:
+
+  ```
+  built  tree: cJSON_GetObjectItem(o, "configSize") -> the "config" node
+  parsed tree: cJSON_GetObjectItem(o, "configSize") -> the "configSize" node
+  ```
+
+  `cJSON_GetObjectItemCaseSensitive()` is unaffected; it compares
+  `max(strlen(name), str_key_len)` bytes ([line
+  2263](ezlopi-components/cjext/cjext.c#L2263)).
+
+  **It does not reach this feature's behaviour.** Requests always arrive
+  parsed, so every lookup `.set` and the validator perform on input —
+  `params`, `config`, `dev_detail`, `device_id`, `id_item` — runs under the
+  inclusive convention and is correct; and the serialised response is correct
+  JSON either way, since the ambiguity exists only inside `cjext`'s lookup. It
+  surfaced because a *response* is a built tree, so two checks reading
+  `configSize` out of one were getting the `config` node. The test reads
+  responses with its own exact-match walk and
+  `test_cjext_prefix_lookup_is_still_broken()` pins the behaviour from both
+  sides, so the day `cjext` is fixed this says so instead of quietly changing
+  meaning.
+
+  Not fixed here because `str_key_len` also feeds the key printer ([line
+  2126](ezlopi-components/cjext/cjext.c#L2126)): changing the convention
+  changes how all 122 methods print, which belongs in its own commit with its
+  own evidence rather than riding along with a new API.
+
+- Costs **2,752 bytes** on esp32 (`0x191730` against `0x190c70`) — 1,764 in
+  `.flash.text` and 984 in `.flash.rodata`, the remaining 4 being image
+  padding. This is also where `ezlopi-util-devcfgval` stops being free: the
+  entry above records it as byte-identical because nothing referenced it yet,
+  and these two methods are what pull it in, which the baseline build confirms
+  by containing no `devcfgval` or `CLOUD_devcfg` symbol at all. Both method
+  names appear in the image strings and all eight `EZPI_CLOUD_devcfg_*` symbols
+  are in the ELF, so the methods are genuinely reachable rather than compiled
+  and dropped. No new compiler warnings.
+
+  The `cJSON_IsNumber()` guard described above costs 80 bytes in the subject's
+  object file and does not change the image size at all — it lands inside
+  existing section padding. Checked by compiling the file both ways rather than
+  assumed from the unchanged total, because an unchanged total is exactly what
+  a change that never got compiled also looks like.
+
+  **Untested on hardware.** No board has written a configuration through these
+  methods, read one back, or rebooted into one. The handler's logic is covered
+  on a host; the six port functions that actually touch the partition and the
+  device table are not covered at all, and neither is the one thing that
+  matters most — that a stored configuration is what the boot parser reads back
+  on the next start.
 
 ### Local operation — [feat]
 
@@ -2102,8 +2268,8 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 4218 assertions across
-  sixteen binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 4479 assertions across
+  seventeen binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
@@ -2660,12 +2826,12 @@ enumerators — so the live half of this component was never affected.
   stopped defining it the translation unit would compile to nothing, the link
   would still succeed against the test's own fakes, and every check would pass
   while testing an empty file. Second, that stub lives in its own
-  `tests/host/stubs-mqtt-api/` rather than the shared `stubs/`, because six of
-  the sixteen binaries put `stubs/` on their include path — `test_cjext`,
-  `test_ze08`, `test_pms5003`, `test_gps6mv2`, `test_devcfgval` and this one —
-  and a shared `sdkconfig.h` would quietly decide the configuration of five
-  tests that have nothing to do with MQTT, three of them drivers full of
-  `#ifdef`s.
+  `tests/host/stubs-mqtt-api/` rather than the shared `stubs/`, because seven of
+  the seventeen binaries put `stubs/` on their include path — `test_cjext`,
+  `test_ze08`, `test_pms5003`, `test_gps6mv2`, `test_devcfgval`,
+  `test_devcfg_api` and this one — and a shared `sdkconfig.h` would quietly
+  decide the configuration of six tests that have nothing to do with MQTT,
+  three of them drivers full of `#ifdef`s.
 
   Mutation-tested 6 of 6 caught — storing before validating, truncating instead
   of refusing, returning the password, treating `""` as absent, ignoring a
@@ -2868,6 +3034,39 @@ enumerators — so the live half of this component was never affected.
 ## Known gaps
 
 Listed because a changelog that only mentions what was finished is misleading.
+
+- **`cJSON_GetObjectItem()` can return the wrong member, on trees this firmware
+  builds itself.** Diagnosed in full in the device-configuration entry above.
+  In one line: the key-length field means two different things depending on
+  whether a tree was parsed or built, and the case-insensitive lookup needs the
+  parsed convention to reject a requested name that extends a stored key. On a
+  built tree, looking up `configSize` can return `config`.
+
+  Not fixed, and the reason is the size of the blast radius rather than the
+  size of the fix. The one-line change — make `add_item_to_object()` store the
+  inclusive length — also changes what the key printer at
+  [`cjext.c:2126`](ezlopi-components/cjext/cjext.c#L2126) is handed, and every
+  response from all 122 API methods goes through that printer. It needs its own
+  commit, its own host test for the printer, and a board, none of which belong
+  inside a feature change.
+
+  What is known: requests arrive parsed, so input validation across the
+  firmware is unaffected, and serialised output is correct either way. The
+  exposure is in-firmware code that looks up a longer member name against a
+  built tree holding a shorter prefix of it. **Not audited** — no sweep has
+  been done for other places in the tree where that pattern occurs, and until
+  one is, the only thing established is that the device-configuration methods
+  do not depend on it.
+
+- **The six functions in `ezlopi_cloud_devcfg_port.c` have no automated
+  coverage of any kind.** They are the only part of the device-configuration
+  feature that touches the partition and the compiled-in device table, which is
+  precisely why they cannot be host-tested and why they were isolated into
+  their own file. The handler above them is covered by 261 host assertions and
+  twelve mutations; these six are covered by reading them. The specific
+  untested claim that matters most is that a configuration stored by
+  `hub.ezlopi.config.set` is byte-for-byte what `ezlopi_device_parse_json_v3()`
+  reads on the next boot.
 
 - **The GPIOs a device configuration names are not checked before it is
   stored.** `ezlopi-util-devcfgval` above refuses the shapes that cannot
