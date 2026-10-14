@@ -167,7 +167,10 @@ jobs:
       # this file needs esp_partition and cannot be host-compiled, so neither
       # "the setters call the bounded helper" nor "the backstop inside the
       # writer still exists" is reachable from a host test. That is what this
-      # checks. It fails with ten findings against the pre-fix file.
+      # checks, along with the convention that the length excludes the
+      # terminator the writer appends -- the config setter passed strlen + 1
+      # and so wrote one byte of uninitialised heap into the partition. It
+      # fails with eleven findings against the pre-fix file.
       - name: 4 KB factory-info writes stay inside their field
         run: python3 tests/ci/check_finfo_pem_bound.py
 

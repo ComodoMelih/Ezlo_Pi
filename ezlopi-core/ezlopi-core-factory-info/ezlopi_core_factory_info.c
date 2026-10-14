@@ -946,7 +946,21 @@ int EZPI_core_factory_info_v3_set_ezlopi_config(cJSON *cj_data)
             if (true == cJSON_PrintPreallocated(__FUNCTION__, cj_data, tmp_data, 4 * 1024, false))
             {
                 // TRACE_D("added-chipset: %.*s", tmp_data);
-                ret = __EZPI_core_factory_info_v3_set_4kb(tmp_data, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_EZLOPI_CONFIG_JSON, E_EZLOPI_FACTORY_INFO_CONN_DATA), strlen(tmp_data) + 1);
+
+                /* strlen, not strlen + 1. The writer appends its own
+                ** terminator: it fills a len + 1 buffer with snprintf, which
+                ** puts the NUL at index len, and then writes len + 1 bytes.
+                ** Passing strlen + 1 therefore wrote one byte *past* that
+                ** terminator -- a byte snprintf had not written, so whatever
+                ** the allocator left in the heap went into the partition, and
+                ** that partition reads back over BLE device-info and the UART
+                ** status query without authenticating. It also meant a config
+                ** serialising to exactly 4095 bytes wrote 4096 + 1 into a 4096
+                ** byte field. The other four callers of that function pass the
+                ** length without the terminator; this one was the odd one
+                ** out. Nothing downstream notices the missing byte, because it
+                ** sat after the NUL that every reader scans for. */
+                ret = __EZPI_core_factory_info_v3_set_4kb(tmp_data, EZPI_core_factory_info_v3_get_abs_address(EZLOPI_FINFO_REL_OFFSET_EZLOPI_CONFIG_JSON, E_EZLOPI_FACTORY_INFO_CONN_DATA), strlen(tmp_data));
             }
 
             ezlopi_free(__FUNCTION__, tmp_data);

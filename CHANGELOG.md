@@ -193,10 +193,37 @@ None of these have been exercised on physical hardware; see Known gaps.
   write and whose body writes whatever it is handed, and all four images still
   build clean. So
   [`tests/ci/check_finfo_pem_bound.py`](tests/ci/check_finfo_pem_bound.py)
-  enforces them textually, self-testing its own scanner against eleven samples
-  on every run — including the prose in that file, which names the deleted
-  helper and would otherwise make the check fire on the fixed source. Verified
-  against the pre-fix file, where it reports ten findings and exits 1.
+  enforces them textually, self-testing its own scanner against fifteen
+  samples on every run — including the prose in that file, which names the
+  deleted helper and would otherwise make the check fire on the fixed source.
+  Verified against the pre-fix file, where it reports eleven findings and
+  exits 1.
+
+- **The device config write put one byte of uninitialised heap into flash.**
+  Found while reading this write path end to end, because the local
+  configuration work below adds a network-reachable caller to it.
+  `set_4kb()` appends its own terminator: it fills a `len + 1` buffer with
+  `snprintf`, which places the NUL at index `len`, and then writes `len + 1`
+  bytes. So the count must *exclude* the terminator, and four of the five
+  callers pass it that way. `EZPI_core_factory_info_v3_set_ezlopi_config()`
+  passed `strlen(tmp_data) + 1`, which made the write one byte longer than
+  `snprintf` had filled — so the last byte sent to flash was whatever the
+  allocator happened to leave in that heap slot.
+
+  The factory-info partition reads back over BLE device-info and the UART
+  status query without authenticating, which is what turns a stray byte into a
+  disclosure. It is one byte per config write and it sits after the NUL every
+  reader scans for, so nothing malfunctioned and nothing was corrupted — which
+  is precisely why it survived.
+
+  Demonstrated rather than deduced: the same buffer arithmetic with the heap
+  pre-filled with a sentinel shows the four-caller convention writing ten
+  bytes with zero untouched, and the `+ 1` form writing eleven with one
+  sentinel byte still in it. The same off-by-one also meant a config
+  serialising to exactly 4095 bytes asked for a 4097-byte write into a
+  4096-byte field, so it was the overflow above in miniature. Now passes
+  `strlen(tmp_data)`, matching the other four, and the CI check above refuses
+  a `+ 1` count on any call to that writer.
 
   Noted but deliberately *not* changed: `set_ssl_public_key()` writes to the
   `SSL_SHARED_KEY` offset, the same field `set_ssl_shared_key()` uses. There is

@@ -38,12 +38,25 @@ string -- so a malformed certificate destroyed the stored one.
 EZPI_util_pem_store_len() now answers both questions, returns 0 to mean "do
 not write", and is host-tested at 4094 / 4095 / 4096 bytes.
 
+A third defect in the same place, and the reason this also rejects a "+ 1"
+count: the writer appends its own terminator -- it fills a len + 1 buffer with
+snprintf, which puts the NUL at index len, then writes len + 1 bytes -- so the
+count must exclude the terminator, and four of its five callers pass it that
+way. set_ezlopi_config() passed strlen(tmp_data) + 1, which made the write one
+byte longer than snprintf had filled, so the last byte sent to flash was
+whatever the allocator left in that heap slot. The partition reads back over
+BLE device-info and the UART status query without authenticating. It is one
+byte, it sits after the NUL every reader scans for, and nothing malfunctioned
+-- which is why it survived. The same off-by-one asked for a 4097-byte write
+whenever a config serialised to exactly 4095 bytes.
+
 WHY A CHECK
 
-The length arithmetic is tested on the host, but the two things that make it
+The length arithmetic is tested on the host, but the things that make it
 load-bearing are not reachable from a host test: that the setters actually
-call it, and that the backstop inside set_4kb still exists. This file needs
-esp_partition and so cannot be host-compiled at all.
+call it, that the backstop inside set_4kb still exists, and that no caller
+counts the terminator twice. This file needs esp_partition and so cannot be
+host-compiled at all.
 
 Both are easy to undo by accident and silent when undone. Deleting the
 backstop leaves a function whose name promises a 4 KB write and whose body
@@ -85,6 +98,15 @@ RAW_LEN_CALL = re.compile(
     re.escape(WRITER) + r'\s*\('
     r'[^;]*?,'                                        # data, offset
     r'\s*[A-Za-z_][A-Za-z0-9_]*\s*->\s*str_value_len\s*\)'
+)
+
+# A call that adds one for the terminator the writer already appends. The
+# writer fills a len + 1 buffer with snprintf, which puts the NUL at index
+# len, then writes len + 1 bytes -- so the count must exclude the terminator.
+PLUS_ONE_CALL = re.compile(
+    re.escape(WRITER) + r'\s*\('
+    r'[^;]*?,'                                        # data, offset
+    r'\s*strlen\s*\([^()]*\)\s*\+\s*1\s*\)'
 )
 
 # The deleted helper, reintroduced either as a definition or a call.
@@ -146,6 +168,9 @@ def scan(text):
         if RAW_LEN_CALL.search(line):
             found.append((n, 'raw_len',
                           'length comes straight from ->str_value_len'))
+        if PLUS_ONE_CALL.search(line):
+            found.append((n, 'plus_one',
+                          'length counts the terminator the writer appends'))
         for match in DELETED_HELPER_USE.finditer(line):
             del match
             found.append((n, 'deleted_helper',
@@ -263,6 +288,20 @@ SELF_TEST = {
     'other_field': (GOOD_WRITER +
                     '    ret = %s(cj_data->valuestring, addr, '
                     'cj_data->str_value_len);\n' % WRITER, 1),
+    # the config setter's off-by-one: counting the terminator the writer adds
+    'plus_one': (GOOD_WRITER +
+                 '    ret = %s(tmp_data, addr, strlen(tmp_data) + 1);\n'
+                 % WRITER, 1),
+    # the same without spaces around the +
+    'plus_one_tight': (GOOD_WRITER +
+                       '    ret = %s(tmp_data, addr, strlen(tmp_data)+1);\n'
+                       % WRITER, 1),
+    # the corrected form
+    'plus_one_fixed': (GOOD_WRITER +
+                       '    ret = %s(tmp_data, addr, strlen(tmp_data));\n'
+                       % WRITER, 0),
+    # a + 1 inside the writer's own body is how it is supposed to work
+    'writer_internal_plus_one': (GOOD_WRITER + FIXED_SETTER, 0),
 }
 
 
@@ -290,6 +329,17 @@ EXPLAIN = {
         'the length through %s(), which refuses rather than truncates and '
         'returns 0 when the PEM end marker is missing.'
         % (WRITER, FIELD_LEN, BOUNDED_HELPER),
+    'plus_one':
+        '%s appends its own terminator -- it fills a len + 1 buffer with '
+        'snprintf, which puts the NUL at index len, then writes len + 1 '
+        'bytes. A count that already includes the terminator therefore writes '
+        'one byte past it, and that byte is whatever the allocator left in '
+        'the heap, stored into a partition that reads back over BLE '
+        'device-info and the UART status query without authenticating. It '
+        'also pushes a maximal 4095-byte value to 4097 bytes in a 4096-byte '
+        'field. Pass the length without the terminator, as the other callers '
+        'do.' % WRITER,
+
     'deleted_helper':
         '%s() was removed because it returned an unbounded marker offset and '
         '0 for "marker absent", and both answers were written to flash. Use '
