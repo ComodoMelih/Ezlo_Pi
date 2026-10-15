@@ -30,11 +30,11 @@
 */
 /**
  * @file    ezlopi_cloud_devcfg_port.c
- * @brief   The ESP-IDF side of the config API's six dependencies
+ * @brief   The ESP-IDF side of the config API's seven dependencies
  * @version 1.0
  * @date    13th OCT 2025
  *
- * Six forwarding bodies. This file exists so that the file with the decisions
+ * Seven forwarding bodies. This file exists so that the file with the decisions
  * in it does not include ezlopi_core_factory_info.h, which pulls in
  * <esp_partition.h>, or ezlopi_core_devices_list.h, which pulls in
  * ezlopi_core_devices.h and with it the whole HAL. See the header for the
@@ -42,9 +42,11 @@
  *
  * Nothing here is tested on a host, and that is the deal: the untestable part
  * of the feature is confined to this file, where it is short enough to read in
- * full and has no branch that could be wrong in an interesting way. The one
- * loop is the device-table walk, and it is the table's own documented
- * termination condition.
+ * full and has no branch that could be wrong in an interesting way. The two
+ * loops are both the device-table walk, and both use the table's own documented
+ * termination condition -- the first row with no function pointer. That
+ * sentinel row lives inside the array, which is why neither of them indexes
+ * straight to a row a caller named.
  */
 
 /*******************************************************************************
@@ -132,6 +134,52 @@ bool EZPI_CLOUD_devcfg_port_driver_exists(uint32_t id_item)
     }
 
     return found;
+}
+
+bool EZPI_CLOUD_devcfg_port_driver_at(int index, const char **name,
+                                      uint32_t *id_item)
+{
+    s_ezlopi_device_v3_t *list = EZPI_core_devices_list_get_list_v3();
+    bool present = false;
+
+    if ((NULL != list) && (0 <= index))
+    {
+        int idx = 0;
+
+        /* Walked, not indexed. The table's end is a sentinel row *inside* the
+        ** array, so list[index] for an index past that row reads memory the
+        ** table does not own -- and "an index past the end" is precisely what
+        ** a caller enumerating the list asks for on its last call. Stepping
+        ** stops at the sentinel instead.
+        **
+        ** Same termination condition as driver_exists() above and as the boot
+        ** parser: the first row with no function pointer. */
+        while ((idx < index) && (NULL != list[idx].func))
+        {
+            idx++;
+        }
+
+        if ((idx == index) && (NULL != list[idx].func))
+        {
+            present = true;
+
+            if (name)
+            {
+                /* The table's own pointer. Not copied, because the strings are
+                ** string literals with static storage duration and copying
+                ** them here would make the caller responsible for a release
+                ** that nothing needs. The header says so. */
+                *name = list[idx].name;
+            }
+
+            if (id_item)
+            {
+                *id_item = list[idx].id;
+            }
+        }
+    }
+
+    return present;
 }
 
 /*******************************************************************************

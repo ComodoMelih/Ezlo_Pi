@@ -100,12 +100,13 @@ static cJSON *must_parse(const char *json)
  *                          The cloud keyword strings
  *
  * The real definitions live in ezlopi_cloud_keywords.c alongside several
- * hundred others. Defining the ten this subject uses is cheaper than linking
+ * hundred others. Defining the eleven this subject uses is cheaper than linking
  * that file, and the spellings are not invented here -- they are the values at
- * ezlopi_cloud_keywords.c lines 103, 104, 117, 178, 179, 180, 223, 262, 263 and
- * 480.
+ * ezlopi_cloud_keywords.c lines 94, 103, 104, 117, 178, 179, 180, 223, 262, 263
+ * and 480.
  *******************************************************************************/
 const char *ezlopi_result_str = "result";
+const char *ezlopi_name_str = "name";
 const char *ezlopi_params_str = "params";
 const char *ezlopi_error_str = "error";
 const char *ezlopi_code_str = "code";
@@ -152,6 +153,45 @@ static char last_written[8192];
 ** check exists to find. */
 static const uint32_t fake_driver_ids[] = {1u, 2u, 3u, 1001u};
 
+/* The table the enumeration walks.
+**
+** Padded the way the real one is: every name in
+** ezlopi_core_devices_list_modules.h is spaced out to exactly 36 characters so
+** the table lines up in the source, and the handler's job is to not send that
+** padding. A fake with tidy names could not tell whether the trimming works or
+** whether there was simply nothing to trim.
+**
+** The ids match fake_driver_ids above, which is how the real port behaves --
+** both of its functions read the one device table -- and lets
+** test_drivers_list_agrees_with_the_write_path() check that the list a client
+** is shown is the list .set will accept. They are separate variables rather
+** than one, so that the agreement is asserted rather than made true by
+** construction in the fake. */
+struct fake_driver_row
+{
+    const char *name;
+    uint32_t id;
+};
+
+static const struct fake_driver_row default_fake_table[] = {
+    {"digital-out generic                 ", 1u},
+    {"digital-out relay                   ", 2u},
+    {"sensor-DHT11-1-wire-temp-humid      ", 3u},
+    {"sensor-dummy-switch                 ", 1001u},
+};
+
+static const struct fake_driver_row *fake_table = default_fake_table;
+static int fake_table_rows =
+    (int)(sizeof(default_fake_table) / sizeof(default_fake_table[0]));
+
+/* Every index driver_at() was asked for, in order. The handler must walk from
+** 0 upwards and stop one past the end; a handler that indexed straight into the
+** table, or asked twice for a row, or ran off, shows up here rather than in a
+** response that happens to look right. */
+#define MAX_RECORDED_INDICES 256
+static int driver_at_indices[MAX_RECORDED_INDICES];
+static int driver_at_calls = 0;
+
 static void fakes_reset(void)
 {
     fake_region_size = REAL_REGION_SIZE;
@@ -162,6 +202,10 @@ static void fakes_reset(void)
     write_calls = 0;
     fake_write_succeeds = true;
     last_written[0] = '\0';
+    fake_table = default_fake_table;
+    fake_table_rows =
+        (int)(sizeof(default_fake_table) / sizeof(default_fake_table[0]));
+    driver_at_calls = 0;
 }
 
 char *EZPI_CLOUD_devcfg_port_read(void)
@@ -241,6 +285,38 @@ bool EZPI_CLOUD_devcfg_port_driver_exists(uint32_t id_item)
     return false;
 }
 
+bool EZPI_CLOUD_devcfg_port_driver_at(int index, const char **name,
+                                      uint32_t *id_item)
+{
+    if (driver_at_calls < MAX_RECORDED_INDICES)
+    {
+        driver_at_indices[driver_at_calls] = index;
+    }
+
+    driver_at_calls++;
+
+    if ((index < 0) || (index >= fake_table_rows))
+    {
+        /* Nothing written on a miss, which is what the header promises. The
+        ** handler clears its own locals before each call for the same reason,
+        ** so a port that forgot to write them cannot show up as the previous
+        ** row repeated. */
+        return false;
+    }
+
+    if (name)
+    {
+        *name = fake_table[index].name;
+    }
+
+    if (id_item)
+    {
+        *id_item = fake_table[index].id;
+    }
+
+    return true;
+}
+
 /*******************************************************************************
  *                          Shorthands for the shapes
  *******************************************************************************/
@@ -308,7 +384,7 @@ bool EZPI_CLOUD_devcfg_port_driver_exists(uint32_t id_item)
  * inclusive convention and is correct. The serialised response is correct too;
  * the ambiguity exists only inside cjext's lookup, not in the JSON. It is not
  * fixed here: add_item_to_object's length also feeds the key printer at
- * cjext.c:2126, so changing the convention is a change to how all 122 methods
+ * cjext.c:2126, so changing the convention is a change to how all 123 methods
  * print, and belongs in its own commit with its own evidence rather than
  * riding along with a new API.
  *
@@ -451,6 +527,71 @@ static cJSON *run_get(void)
     cJSON_Delete(__FUNCTION__, cj_request);
 
     return cj_response;
+}
+
+static cJSON *run_drivers_list(void)
+{
+    cJSON *cj_request =
+        must_parse("{\"method\":\"hub.ezlopi.config.drivers.list\"}");
+    cJSON *cj_response = cJSON_CreateObject(__FUNCTION__);
+
+    if (NULL == cj_response)
+    {
+        printf("  FATAL: out of memory building a response\n");
+        exit(2);
+    }
+
+    EZPI_CLOUD_devcfg_drivers_list(cj_request, cj_response);
+    cJSON_Delete(__FUNCTION__, cj_request);
+
+    return cj_response;
+}
+
+/* The "drivers" array from a drivers.list response, or NULL. */
+static cJSON *drivers_of(cJSON *cj_response)
+{
+    cJSON *cj_result = result_of(cj_response);
+    cJSON *cj_drivers = NULL;
+
+    if (NULL == cj_result)
+    {
+        return NULL;
+    }
+
+    cj_drivers = member(cj_result, "drivers");
+
+    return cJSON_IsArray(cj_drivers) ? cj_drivers : NULL;
+}
+
+/* The nth entry of that array, or NULL. */
+static cJSON *driver_at(cJSON *cj_response, int index)
+{
+    cJSON *cj_drivers = drivers_of(cj_response);
+    cJSON *cj_entry = NULL;
+    int i = 0;
+
+    for (cj_entry = (NULL != cj_drivers) ? cj_drivers->child : NULL;
+         NULL != cj_entry; cj_entry = cj_entry->next)
+    {
+        if (i == index)
+        {
+            return cj_entry;
+        }
+
+        i++;
+    }
+
+    return NULL;
+}
+
+/* The nth entry's "name" as a string, or NULL if it is absent, null, or not a
+** string. The three are deliberately not distinguished here; the tests that
+** care check the node directly. */
+static const char *driver_name_at(cJSON *cj_response, int index)
+{
+    cJSON *cj_name = member(driver_at(cj_response, index), "name");
+
+    return cJSON_IsString(cj_name) ? cj_name->valuestring : NULL;
 }
 
 /*******************************************************************************
@@ -1473,6 +1614,401 @@ static void test_the_two_methods_stay_in_their_lanes(void)
     ok(0 == read_calls, "set does not read the old configuration");
     ok(0 == free_calls, "and so has nothing to free");
     cJSON_Delete(__FUNCTION__, cj_response);
+
+    fakes_reset();
+    fake_stored = GOOD_CONFIG;
+    cj_response = run_drivers_list();
+    ok(0 == write_calls, "drivers.list does not write");
+    ok(0 == read_calls, "and does not read the stored configuration");
+    cJSON_Delete(__FUNCTION__, cj_response);
+}
+
+/**
+ * @brief drivers.list reports the table, in order, with usable types.
+ */
+static void test_drivers_list_reports_the_table(void)
+{
+    cJSON *cj_response = NULL;
+    cJSON *cj_drivers = NULL;
+    int i = 0;
+
+    printf("test_drivers_list_reports_the_table\n");
+
+    fakes_reset();
+    cj_response = run_drivers_list();
+    cj_drivers = drivers_of(cj_response);
+
+    ok(NULL != result_of(cj_response), "drivers.list answers with a result");
+    ok(NULL == error_of(cj_response),
+       "and reading a compile-time table is not an error condition");
+    ok(NULL != cj_drivers, "\"drivers\" is an array");
+    ok(fake_table_rows == cJSON_GetArraySize(cj_drivers),
+       "with one entry per table row");
+    ok((double)fake_table_rows == number_in_result(cj_response, "count"),
+       "and \"count\" agrees with the array it describes");
+
+    for (i = 0; i < fake_table_rows; i++)
+    {
+        cJSON *cj_entry = driver_at(cj_response, i);
+        cJSON *cj_id = member(cj_entry, "id_item");
+
+        ok(cJSON_IsObject(cj_entry), "every entry is an object");
+        ok(cJSON_IsNumber(cj_id), "carrying a numeric id_item");
+
+        /* Table order, not sorted and not reversed. A client shows this list to
+        ** a person, and an order that drifts between firmware versions for no
+        ** reason is a list that cannot be compared against the source. */
+        ok((NULL != cj_id) &&
+               ((double)fake_table[i].id == cj_id->valuedouble),
+           "in table order");
+
+        ok(NULL != driver_name_at(cj_response, i),
+           "and a name that is a string");
+    }
+
+    /* The member is "id_item", with the underscore, because that is the key a
+    ** dev_detail entry uses. A client that has to rename a key while copying a
+    ** value is a client that will eventually get it wrong. */
+    ok(NULL != member(driver_at(cj_response, 0), "id_item"),
+       "the id is spelled the way a configuration entry spells it");
+    ok(NULL == member(driver_at(cj_response, 0), "idItem"),
+       "and not camel-cased as well");
+
+    cJSON_Delete(__FUNCTION__, cj_response);
+}
+
+/**
+ * @brief The table's source-alignment padding does not reach the client.
+ *
+ * Every name in the real table is padded to 36 characters. Without trimming,
+ * each name arrives with a tail of spaces that any UI showing it verbatim
+ * displays, and the padding alone is most of a kilobyte on the wire.
+ */
+static void test_drivers_list_trims_the_padding(void)
+{
+    cJSON *cj_response = NULL;
+    int i = 0;
+
+    printf("test_drivers_list_trims_the_padding\n");
+
+    fakes_reset();
+    cj_response = run_drivers_list();
+
+    /* Exact values, not "shorter than the padded form". A length check alone
+    ** would pass for a handler that trimmed one byte, or the wrong end. */
+    ok((NULL != driver_name_at(cj_response, 0)) &&
+           (0 == strcmp("digital-out generic",
+                        driver_name_at(cj_response, 0))),
+       "a padded name arrives with the padding removed");
+    ok((NULL != driver_name_at(cj_response, 2)) &&
+           (0 == strcmp("sensor-DHT11-1-wire-temp-humid",
+                        driver_name_at(cj_response, 2))),
+       "and so does one in the middle of the table");
+
+    for (i = 0; i < fake_table_rows; i++)
+    {
+        const char *name = driver_name_at(cj_response, i);
+        const size_t len = (NULL != name) ? strlen(name) : 0u;
+
+        ok((NULL != name) && (len > 0u) && (' ' != name[len - 1u]),
+           "no name ends in a space");
+        ok((NULL != name) && (' ' != name[0]),
+           "and none of them gained a leading one");
+    }
+
+    cJSON_Delete(__FUNCTION__, cj_response);
+}
+
+/**
+ * @brief The three name cases the trimming has to survive.
+ *
+ * None of these occur in the table today. They are here because the handler
+ * runs on an unauthenticated method and "the table would never hold that" is
+ * the kind of claim that is true until somebody adds a driver.
+ */
+static void test_drivers_list_name_edge_cases(void)
+{
+    /* 70 characters once trimmed, which is past DEVCFG_DRIVER_NAME_MAX. */
+    static const char *too_long =
+        "sensor-with-an-unreasonably-long-name-that-does-not-fit-the-bound-here"
+        "   ";
+
+    static const struct fake_driver_row edge_table[] = {
+        {NULL, 11u},
+        {"                                    ", 12u},
+        {"unpadded", 13u},
+        {NULL, 14u}, /* replaced below; a static initialiser cannot hold it */
+    };
+
+    struct fake_driver_row table[4];
+    cJSON *cj_response = NULL;
+    cJSON *cj_name = NULL;
+
+    printf("test_drivers_list_name_edge_cases\n");
+
+    memcpy(table, edge_table, sizeof(table));
+    table[3].name = too_long;
+
+    fakes_reset();
+    fake_table = table;
+    fake_table_rows = 4;
+
+    cj_response = run_drivers_list();
+
+    ok(4.0 == number_in_result(cj_response, "count"),
+       "all four rows are reported");
+
+    /* A missing name is null, not "". The two mean different things to a
+    ** client: one is a driver whose name this image does not know, the other is
+    ** a driver named the empty string. */
+    cj_name = member(driver_at(cj_response, 0), "name");
+    ok(cJSON_IsNull(cj_name), "a row with no name reports null");
+
+    /* All padding and nothing else trims to empty. Not null -- the table does
+    ** hold a name here, it is just made entirely of alignment. */
+    cj_name = member(driver_at(cj_response, 1), "name");
+    ok(cJSON_IsString(cj_name) && (0 == strcmp("", cj_name->valuestring)),
+       "a name that is only padding trims to the empty string");
+
+    ok((NULL != driver_name_at(cj_response, 2)) &&
+           (0 == strcmp("unpadded", driver_name_at(cj_response, 2))),
+       "a name with nothing to trim is passed through unchanged");
+
+    /* The case the bound exists for, and the direction it fails in. A truncated
+    ** driver name is one nobody can recognise and no client can match; a padded
+    ** one is merely untidy. */
+    ok((NULL != driver_name_at(cj_response, 3)) &&
+           (0 == strcmp(too_long, driver_name_at(cj_response, 3))),
+       "a name too long to trim is reported whole, padding and all");
+    ok((NULL != driver_name_at(cj_response, 3)) &&
+           (strlen(too_long) == strlen(driver_name_at(cj_response, 3))),
+       "and specifically is not truncated to the bound");
+
+    cJSON_Delete(__FUNCTION__, cj_response);
+}
+
+/**
+ * @brief An image with every driver switched off.
+ *
+ * Reachable: the 63 switches in ezlopi_core_device_macros.h can all be zero,
+ * and such a build is a legitimate thing to make. The answer is an empty list,
+ * not an error and not a crash.
+ */
+static void test_drivers_list_on_an_empty_table(void)
+{
+    cJSON *cj_response = NULL;
+
+    printf("test_drivers_list_on_an_empty_table\n");
+
+    fakes_reset();
+    fake_table_rows = 0;
+
+    cj_response = run_drivers_list();
+
+    ok(NULL != drivers_of(cj_response), "\"drivers\" is still an array");
+    ok(0 == cJSON_GetArraySize(drivers_of(cj_response)), "and it is empty");
+    ok(0.0 == number_in_result(cj_response, "count"), "\"count\" is 0");
+    ok(NULL == error_of(cj_response),
+       "a build with no drivers is not an error");
+
+    /* One call, which returns false. Finding the end of an empty table must not
+    ** take a second look, and must not take none. */
+    ok(1 == driver_at_calls, "the table is probed exactly once");
+
+    cJSON_Delete(__FUNCTION__, cj_response);
+}
+
+/**
+ * @brief The walk starts at 0, steps by one, and stops one past the end.
+ *
+ * The port's contract is that an index past the end answers false, because the
+ * device table's sentinel row lives inside the array and indexing past it reads
+ * memory the table does not own. A handler that skipped a row, asked twice, or
+ * kept going would produce a response that can still look plausible, so the
+ * indices are checked rather than the output.
+ */
+static void test_drivers_list_walks_the_table_once(void)
+{
+    cJSON *cj_response = NULL;
+    int i = 0;
+
+    printf("test_drivers_list_walks_the_table_once\n");
+
+    fakes_reset();
+    cj_response = run_drivers_list();
+
+    ok((fake_table_rows + 1) == driver_at_calls,
+       "one call per row, plus one to discover the end");
+
+    for (i = 0; i < driver_at_calls; i++)
+    {
+        ok(i == driver_at_indices[i], "indices are 0, 1, 2 ... with no gaps");
+    }
+
+    cJSON_Delete(__FUNCTION__, cj_response);
+}
+
+/**
+ * @brief Every driver the list offers is one .set will accept.
+ *
+ * The check with the most teeth in this file, because it is the whole reason
+ * the method exists. A list that disagrees with the write path is worse than no
+ * list: it invites a client to offer the user a driver, send a configuration
+ * naming it, and be refused -- and the user has no way to tell whether they
+ * made a mistake.
+ *
+ * Both directions. Everything enumerated is accepted, and an id_item that is
+ * not enumerated is refused, so a list that simply reported every number would
+ * fail the second half.
+ */
+static void test_drivers_list_agrees_with_the_write_path(void)
+{
+    cJSON *cj_response = NULL;
+    int i = 0;
+
+    printf("test_drivers_list_agrees_with_the_write_path\n");
+
+    fakes_reset();
+    cj_response = run_drivers_list();
+
+    for (i = 0; i < fake_table_rows; i++)
+    {
+        cJSON *cj_id = member(driver_at(cj_response, i), "id_item");
+        char request[256];
+        cJSON *cj_set = NULL;
+
+        if (false == cJSON_IsNumber(cj_id))
+        {
+            ok(false, "an enumerated entry has an id_item to test");
+            continue;
+        }
+
+        snprintf(request, sizeof(request),
+                 "{\"method\":\"hub.ezlopi.config.set\",\"params\":"
+                 "{\"config\":{\"chipset\":\"" THIS_CHIP "\","
+                 "\"dev_detail\":[{\"device_id\":\"d\",\"id_item\":%d}]}}}",
+                 (int)cj_id->valuedouble);
+
+        fakes_reset();
+        cj_set = run_set(request);
+        ok(NULL == error_of(cj_set),
+           "a configuration naming an enumerated driver is accepted");
+        cJSON_Delete(__FUNCTION__, cj_set);
+
+        fakes_reset();
+    }
+
+    cJSON_Delete(__FUNCTION__, cj_response);
+
+    /* The other direction, with an id_item the table does not hold. Without
+    ** this, a handler that enumerated every id from 0 upwards would pass
+    ** everything above. */
+    fakes_reset();
+    cj_response = run_drivers_list();
+    {
+        cJSON *cj_entry = NULL;
+        bool found_7777 = false;
+        int n = 0;
+
+        for (n = 0; NULL != (cj_entry = driver_at(cj_response, n)); n++)
+        {
+            cJSON *cj_id = member(cj_entry, "id_item");
+
+            if (cJSON_IsNumber(cj_id) && (7777.0 == cj_id->valuedouble))
+            {
+                found_7777 = true;
+            }
+        }
+
+        ok(false == found_7777, "an unbuildable id_item is not in the list");
+    }
+    cJSON_Delete(__FUNCTION__, cj_response);
+
+    fakes_reset();
+    cj_response = run_set(REQUEST_WITH(
+        CONFIG_WITH("{\"device_id\":\"d\",\"id_item\":7777}")));
+    ok(NULL != error_of(cj_response),
+       "and a configuration naming it is refused");
+    cJSON_Delete(__FUNCTION__, cj_response);
+}
+
+/**
+ * @brief The whole list fits the buffer the transport will serialise it into.
+ *
+ * ezpi_respond_cjson() prints a response with cJSON_PrintPreallocated() into
+ * the one shared buffer from EZPI_core_buffer_acquire(), which is
+ * CONFIG_EZPI_CORE_STATIC_BUFFER_SIZE bytes -- 10240 by default. That call
+ * returns false if the document does not fit, and the caller sends nothing:
+ * the response is dropped in silence, with the client left waiting.
+ *
+ * So the size of this response is a real constraint, and the failure mode is
+ * invisible. This builds the worst case the real table can produce -- every
+ * driver present, every name the full padded width -- and asserts it fits with
+ * margin. If a future image grows the table past what the buffer holds, this
+ * fails on a host instead of a hub going quiet.
+ */
+static void test_drivers_list_fits_the_transport(void)
+{
+    /* Named here rather than read from sdkconfig, which a host build has no
+    ** access to. The Kconfig default is 10240; this is checked against the
+    ** smaller figure so a build that lowered it is still covered by some
+    ** margin. */
+#define TRANSPORT_BUFFER 10240u
+
+    /* 36 characters, the exact padded width every name in the real table uses,
+    ** with no spaces so nothing is trimmed away -- the worst case for size. */
+    static const char *widest = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+    struct fake_driver_row big[200];
+    cJSON *cj_response = NULL;
+    char *serialised = NULL;
+    size_t len = 0u;
+    int i = 0;
+
+    printf("test_drivers_list_fits_the_transport\n");
+
+    /* 63 rows is the real table with every switch on. */
+    for (i = 0; i < 63; i++)
+    {
+        big[i].name = widest;
+        big[i].id = (uint32_t)(i + 1);
+    }
+
+    fakes_reset();
+    fake_table = big;
+    fake_table_rows = 63;
+
+    cj_response = run_drivers_list();
+
+    ok(63.0 == number_in_result(cj_response, "count"),
+       "a full table is reported in full");
+
+    serialised = cJSON_PrintUnformatted(__FUNCTION__, cj_response);
+
+    if (NULL == serialised)
+    {
+        printf("  FATAL: could not serialise the response\n");
+        exit(2);
+    }
+
+    len = strlen(serialised);
+    printf("  (a 63-driver list serialises to %u bytes; the transport buffer "
+           "is %u)\n",
+           (unsigned)len, (unsigned)TRANSPORT_BUFFER);
+
+    ok(len < TRANSPORT_BUFFER,
+       "the full driver list fits the shared response buffer");
+
+    /* Half the buffer, so this is a warning shot rather than a cliff edge: the
+    ** list has room to roughly double before anything breaks, and this check
+    ** says so while there is still room to do something about it. */
+    ok(len < (TRANSPORT_BUFFER / 2u),
+       "and does so with room for the table to grow");
+
+    free(serialised);
+    cJSON_Delete(__FUNCTION__, cj_response);
+
+#undef TRANSPORT_BUFFER
 }
 
 /**
@@ -1561,6 +2097,14 @@ int main(void)
     test_every_error_reply_is_complete();
     test_a_long_device_list();
     test_the_two_methods_stay_in_their_lanes();
+
+    test_drivers_list_reports_the_table();
+    test_drivers_list_trims_the_padding();
+    test_drivers_list_name_edge_cases();
+    test_drivers_list_on_an_empty_table();
+    test_drivers_list_walks_the_table_once();
+    test_drivers_list_agrees_with_the_write_path();
+    test_drivers_list_fits_the_transport();
 
     printf("%d checks, %d failures\n", checks, failures);
 

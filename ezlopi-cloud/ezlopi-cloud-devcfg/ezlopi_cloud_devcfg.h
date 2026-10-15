@@ -155,6 +155,56 @@ extern "C"
      */
     void EZPI_CLOUD_devcfg_set(cJSON *cj_request, cJSON *cj_response);
 
+    /**
+     * @brief   hub.ezlopi.config.drivers.list -- what this image can be
+     *          configured with.
+     *
+     * The third method, and the one that makes the other two usable without a
+     * build tree to hand. hub.ezlopi.config.set refuses an id_item no driver
+     * claims, which is correct and completely unhelpful if the caller has no
+     * way to learn which id_items this particular image was compiled with. The
+     * device table is assembled from 63 compile-time switches in
+     * ezlopi_core_device_macros.h -- not Kconfig options, so they do not even
+     * appear in menuconfig -- and no two builds need agree. A UI with a
+     * hardcoded list would offer drivers that are not in the image and be
+     * refused one at a time.
+     *
+     * The list is read from the table itself, by the same walk and the same
+     * termination condition driver_exists() uses, so what this method reports
+     * is by construction what set() will accept.
+     *
+     * Adds to the response, under "result":
+     *
+     *   "drivers"  an array, in table order, of { "id_item", "name" }. The
+     *              member is spelled "id_item" rather than "idItem" because
+     *              that is the spelling a dev_detail entry uses, so a client
+     *              can copy the value across without transliterating a key.
+     *   "count"    how many entries "drivers" actually holds.
+     *
+     * "count" is the length of the array that was sent, not the length of the
+     * table. The two differ only if the response could not be built in full,
+     * and that case is reported as an error as well -- a short list must not be
+     * mistakable for an image with fewer drivers.
+     *
+     * Names are reported with trailing whitespace removed. The table pads every
+     * name to exactly 36 characters for source alignment, which is a column of
+     * trailing spaces in any UI that shows them verbatim and 739 bytes of
+     * nothing on the wire -- the 63 names total 2,268 bytes padded and 1,529
+     * trimmed.
+     *
+     * Needs no params and reads none. There is no filtering and no paging. The
+     * reason that is safe is a size, and it was measured rather than assumed:
+     * the whole response is 3,869 bytes serialised in the worst case a 63-row
+     * table can produce, against the 10,240-byte buffer every response is
+     * printed into, and test_drivers_list_fits_the_transport() asserts it stays
+     * under half of that. A bound a host test enforces is worth more here than
+     * a paging scheme no client has asked for.
+     *
+     * @param   cj_request  the request; params are ignored.
+     * @param   cj_response the response to add to.
+     */
+    void EZPI_CLOUD_devcfg_drivers_list(cJSON *cj_request, cJSON *cj_response);
+
 #ifdef __cplusplus
 }
 #endif

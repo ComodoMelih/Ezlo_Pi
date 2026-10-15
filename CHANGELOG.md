@@ -1527,7 +1527,8 @@ would change that, and it is listed under Known gaps rather than claimed here.
   API.** Two new methods, `hub.ezlopi.config.get` and
   `hub.ezlopi.config.set`, in new component
   [`ezlopi-cloud-devcfg`](ezlopi-cloud/ezlopi-cloud-devcfg/), with
-  [`tests/host/test_devcfg_api.c`](tests/host/test_devcfg_api.c) — 261 checks.
+  [`tests/host/test_devcfg_api.c`](tests/host/test_devcfg_api.c) — 322 checks,
+  counting the third method's in the entry below.
 
   Before this, the only ways to tell the firmware which sensors exist and which
   GPIOs they sit on were the BLE dynamic-config characteristic and the UART
@@ -1584,12 +1585,12 @@ would change that, and it is listed under Known gaps rather than claimed here.
   ones it will not.
 
 - **Everything that cannot be host-tested is in one file.**
-  `ezlopi_cloud_devcfg_port.c` is six forwarding functions, because
+  `ezlopi_cloud_devcfg_port.c` is seven forwarding functions, because
   `ezlopi_core_factory_info.h` includes `<esp_partition.h>` and
   `ezlopi_core_devices_list.h` pulls in seven HAL headers, so nothing including
   them compiles on a host. The seam is drawn exactly where the host build stops
   working: the test compiles the real handler and the real validator and
-  substitutes six recording fakes, and the port has **no host coverage at all,
+  substitutes seven recording fakes, and the port has **no host coverage at all,
   by design**. It is short enough to read in full and has no branch that could
   be wrong in an interesting way.
 
@@ -1598,9 +1599,9 @@ would change that, and it is listed under Known gaps rather than claimed here.
   the stored configuration alone.** Every refusal case asserts that nothing was
   written.
 
-  Twelve mutations of the handler were run, eleven caught: collapsing every
+  Twelve mutations of the write path were run, eleven caught: collapsing every
   validator token into one (18 failures), never checking that a driver exists
-  (27), ignoring the validator verdict (71), handing the validator a limit one
+  (28), ignoring the validator verdict (71), handing the validator a limit one
   byte too generous (6), mis-measuring the document a byte short (2), treating a
   failed write as success (3), inverting the region-size fallback (6), accepting
   a non-object `params.config` (1), not requiring `params` (2), reporting
@@ -1663,7 +1664,7 @@ would change that, and it is listed under Known gaps rather than claimed here.
 
   Not fixed here because `str_key_len` also feeds the key printer ([line
   2126](ezlopi-components/cjext/cjext.c#L2126)): changing the convention
-  changes how all 122 methods print, which belongs in its own commit with its
+  changes how all 123 methods print, which belongs in its own commit with its
   own evidence rather than riding along with a new API.
 
 - Costs **2,752 bytes** on esp32 (`0x191730` against `0x190c70`) — 1,764 in
@@ -1672,9 +1673,10 @@ would change that, and it is listed under Known gaps rather than claimed here.
   entry above records it as byte-identical because nothing referenced it yet,
   and these two methods are what pull it in, which the baseline build confirms
   by containing no `devcfgval` or `CLOUD_devcfg` symbol at all. Both method
-  names appear in the image strings and all eight `EZPI_CLOUD_devcfg_*` symbols
-  are in the ELF, so the methods are genuinely reachable rather than compiled
-  and dropped. No new compiler warnings.
+  names appear in the image strings and every `EZPI_CLOUD_devcfg_*` symbol is in
+  the ELF — eight when this was written, ten once the entry below added a third
+  method and its port function — so the methods are genuinely reachable rather
+  than compiled and dropped. No new compiler warnings.
 
   The `cJSON_IsNumber()` guard described above costs 80 bytes in the subject's
   object file and does not change the image size at all — it lands inside
@@ -1684,18 +1686,141 @@ would change that, and it is listed under Known gaps rather than claimed here.
 
   **Untested on hardware.** No board has written a configuration through these
   methods, read one back, or rebooted into one. The handler's logic is covered
-  on a host; the six port functions that actually touch the partition and the
+  on a host; the seven port functions that actually touch the partition and the
   device table are not covered at all, and neither is the one thing that
   matters most — that a stored configuration is what the boot parser reads back
   on the next start.
+
+- **A client can now ask what this image can be configured with.** A third
+  method, `hub.ezlopi.config.drivers.list`, in the same component — and the one
+  that makes the other two usable without a build tree to hand.
+
+  `.set` refuses an `id_item` no driver claims, which is correct and completely
+  unhelpful on its own: nothing told the caller which `id_items` *this* image
+  was compiled with. The device table is assembled from 63 compile-time
+  switches in
+  [`ezlopi_core_device_macros.h`](ezlopi-core/ezlopi-core-devices/ezlopi_core_device_macros.h)
+  — plain `#define`s, not Kconfig options, so they do not appear in
+  `menuconfig` — and no two builds need agree. A UI with a hardcoded list would
+  offer drivers that are not in the image and get refused one at a time.
+
+  **What it reports is what `.set` accepts, by construction.** The list is read
+  from the table itself, by the same walk and the same termination condition
+  `driver_exists()` uses, rather than from a second list that could drift.
+  `test_drivers_list_agrees_with_the_write_path()` checks both directions: every
+  enumerated `id_item` is then fed to `.set` and must be accepted, and an
+  `id_item` the table does not hold must be absent from the list *and* refused
+  by `.set` — without that second half, a handler that just counted upwards from
+  zero would pass the first.
+
+  `count` is the length of the array that was actually sent, counted as entries
+  are added rather than read from the table beforehand, so it cannot disagree
+  with the array it describes. A list cut short by an allocation failure is
+  reported as an error too, because a short list is indistinguishable from an
+  image with fewer drivers and would make a client hide drivers the hub has.
+
+  **Names lose the table's padding.** All 63 are padded to exactly 36
+  characters for source alignment; the longest real name is 35. That padding is
+  a property of the source file, not of the driver, so sending it would put a
+  column of trailing spaces into any UI that displays names verbatim — 2,268
+  bytes padded against 1,529 trimmed, so 739 bytes of nothing. A name too long
+  to trim into the buffer is sent *unmodified* rather than truncated: a padded
+  name looks untidy, a truncated one is unrecognisable and matches nothing.
+
+  **No paging, and the reason is a measured size rather than an assumption.**
+  The worst case a 63-row table can produce — every name the full 36 characters
+  with nothing to trim — serialises to **3,869 bytes** against the 10,240-byte
+  buffer every response shares, and
+  `test_drivers_list_fits_the_transport()` asserts it stays under *half* of
+  that, so the table has room to roughly double before this becomes a problem
+  and the test says so while there is still room to act.
+
+  The port function is **walked, not indexed**, which is the one thing in it
+  that could have been wrong: the table's end is a sentinel row *inside* the
+  array, so `list[index]` for an index past that row reads memory the table does
+  not own — and "one past the end" is exactly what an enumerating caller asks
+  for on its last call.
+
+  61 new checks (the binary goes from 261 to 322) and nine further mutations,
+  eight caught: sending the padding (7 failures), leaving one space (1),
+  trimming one character too many (3), calling an unnamed driver `""` instead of
+  null (1), truncating an over-long name (2), starting the walk at row one (26),
+  reporting a `count` that is not the array's length (4), and spelling the key
+  `idItem` so it cannot be copied straight into a `dev_detail` entry (14). The
+  ninth — staying silent when the list was cut short — **survives, and is a gap
+  rather than an equivalent mutant.** Every way into that branch is a `cjext`
+  allocation failure, and `cjext` allocates through `ezlopi_malloc()`, which
+  `tests/host/stubs/EZLOPI_USER_CONFIG.h` defines as plain `malloc()` for this
+  binary and six others; making it fail on demand would change what those six
+  are built against. The row is in
+  [`mut_devcfg.py`](tests/host/mut_devcfg.py) labelled as untested rather than
+  omitted, so the table does not look complete when it is not.
+
+  Costs **624 bytes** on esp32 (`0x1919a0` against `0x191730`) — 456 in
+  `.flash.text` and 168 in `.flash.rodata`, which account for the total exactly
+  with nothing left over for padding. `EZPI_CLOUD_devcfg_drivers_list` and
+  `EZPI_CLOUD_devcfg_port_driver_at` are in the ELF and absent from the baseline
+  one, and the method name appears in the image strings of all four targets, so
+  it is reachable rather than compiled and dropped. All four targets CI builds —
+  esp32, esp32s2, esp32s3, esp32c3 — build with no warning in any touched file.
+
+  **Untested on hardware,** on the same terms as the two methods above: no board
+  has been asked for its driver list. The figure that would change on real
+  hardware is the response size, and only if a build enabled a different set of
+  switches than the 63 counted here.
+
+- **Three of the 63 device switches did nothing, and a fourth turned off four
+  drivers.** — [bug] In
+  [`ezlopi_core_devices_list_modules.h`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices_list_modules.h)
+  the rows for `digital-out relay`, `digital-out plug` and `digital-in generic`
+  were each guarded by `DEVICE_0001_DIGITALOUT_GENERIC` — the switch belonging
+  to the row above them — instead of their own
+  `DEVICE_0002_DIGITALOUT_RELAY`, `DEVICE_0003_DIGITALOUT_PLUG` and
+  `DEVICE_0004_DIGITALIN_GENERIC`.
+
+  Neither consequence announced itself. Setting any of those three to `0` did
+  nothing at all, and setting `DEVICE_0001_DIGITALOUT_GENERIC` to `0` removed
+  four drivers instead of one. That is the same failure the method above exists
+  to prevent — a build that quietly does not contain the drivers its author
+  thinks it does — reached from the other end, which is why it turned up while
+  that method was being written.
+
+  Found by checking all 63, not just the suspicious ones: those three were
+  **the only** switches in the table read nowhere outside their own definition
+  file, and are now read. The defining `#define`s were already present and
+  correct, so this is a wrong guard rather than a missing option — which is
+  also why the compiler could not have warned: an undefined name in `#if`
+  quietly evaluates to `0`, so a typo here removes a driver instead of failing
+  the build.
+
+  **No effect on any default image.** All 63 switches default to `1`, so this
+  changes only what a build with one of those four set to `0` contains.
+  Confirmed rather than argued: the baseline and worktree esp32 images differ by
+  exactly the 624 bytes the new method costs, and the baseline reproduced the
+  `0x191730` recorded in the entry above.
 
 ### Local operation — [feat]
 
 - **A self-flashed device can now log in to its own local API.** This was the
   single thing standing between "local control exists in the architecture" and
   "local control works". Everything else was already there: the local websocket
-  server exposes the same 117 methods as the cloud path from the same table,
-  scenes run locally, and nothing in the request path requires the cloud.
+  server exposes the same methods as the cloud path from the same table, scenes
+  run locally, and nothing in the request path requires the cloud. That is 117
+  methods in a default esp32 build — 123 in
+  [`ezlopi_core_api_macros.h`](ezlopi-core/ezlopi-core-api/ezlopi_core_api_macros.h)
+  less the six a default config compiles out: the three `hub.mqtt.config.*`
+  (`CONFIG_EZPI_ENABLE_MQTT` unset), `cloud.firmware.info.get` and
+  `hub.firmware.update.start` (`CONFIG_EZPI_ENABLE_OTA` unset), and
+  `hub.protect.signal.list`. The derivation is spelled out because the bare
+  number was wrong in two different ways before anyone checked it. When this
+  entry was written the table held 117 entries, but a default build exposed
+  **114** — `cloud.firmware.info.get`, `hub.firmware.update.start` and
+  `hub.protect.signal.list` were already compiled out, so "exposes 117" counted
+  rows in the table rather than methods a hub answers. Six methods have been
+  added since (three `hub.mqtt.config.*`, three `hub.ezlopi.config.*`), which
+  took the table to 123 and the exposed count to 116, and the third config
+  method in the entry above takes it to 117 — the same number as the original
+  claim, arrived at differently and by coincidence.
 
   But the API has exactly one credential. An unauthenticated client is allowed
   `hub.offline.login.ui` and nothing else — a real gate, at
@@ -2268,7 +2393,7 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 4479 assertions across
+- **New host test suite, [`tests/host/`](tests/host/)**: 4540 assertions across
   seventeen binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under

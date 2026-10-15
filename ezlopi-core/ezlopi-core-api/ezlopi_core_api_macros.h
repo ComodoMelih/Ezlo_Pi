@@ -211,10 +211,11 @@ extern "C"
     CLOUD_METHOD("hub.setting.value.set", EZPI_setting_value_set, EZPI_setting_value_set_broadcast_updater)
     CLOUD_METHOD("hub.settings.list", EZPI_settings_list, NULL)
 
-    /* Which sensors this hub has been told it has, and replacing that list,
-    ** over the same connection as every other setting. Before these two the
-    ** only ways in were the BLE dynamic-config characteristic and a serial
-    ** cable, so a hub out of Bluetooth range could not be reconfigured at all.
+    /* Which sensors this hub has been told it has, replacing that list, and
+    ** which drivers this image could build one from -- over the same connection
+    ** as every other setting. Before these the only ways in were the BLE
+    ** dynamic-config characteristic and a serial cable, so a hub out of
+    ** Bluetooth range could not be reconfigured at all.
     **
     ** Not guarded: there is no Kconfig option for "this build has no device
     ** configuration".
@@ -223,9 +224,13 @@ extern "C"
     ** stronger version of it -- the stored configuration is read exactly once,
     ** by EZPI_device_prepare() during EZPI_init(), so nothing has changed that
     ** could be broadcast until the hub restarts. The result carries
-    ** "rebootRequired" and the caller decides when. */
+    ** "rebootRequired" and the caller decides when.
+    **
+    ** .drivers.list is a read of a compile-time table, so it has no updater
+    ** either: the answer cannot change while the image is running. */
     CLOUD_METHOD("hub.ezlopi.config.get", EZPI_CLOUD_devcfg_get, NULL)
     CLOUD_METHOD("hub.ezlopi.config.set", EZPI_CLOUD_devcfg_set, NULL)
+    CLOUD_METHOD("hub.ezlopi.config.drivers.list", EZPI_CLOUD_devcfg_drivers_list, NULL)
 
 #ifdef CONFIG_EZPI_ENABLE_MQTT
     /* Pointing this controller at a broker without rebuilding it. Guarded

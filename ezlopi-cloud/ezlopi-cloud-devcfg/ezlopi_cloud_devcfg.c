@@ -30,12 +30,12 @@
 */
 /**
  * @file    ezlopi_cloud_devcfg.c
- * @brief   hub.ezlopi.config.get and hub.ezlopi.config.set
+ * @brief   hub.ezlopi.config.get, .set and .drivers.list
  * @version 1.0
  * @date    13th OCT 2025
  *
- * The reasoning for the whole method pair is in ezlopi_cloud_devcfg.h. What is
- * here is the ordering, and the ordering is the part that matters:
+ * The reasoning for all three methods is in ezlopi_cloud_devcfg.h. What is here
+ * is the ordering of the write path, and the ordering is the part that matters:
  *
  *   1. params, then params.config, then that it is an object
  *   2. serialise it once, and refuse if it does not fit
@@ -94,6 +94,8 @@
 #define DEVCFG_DEVICE_COUNT_STR "deviceCount"
 #define DEVCFG_EXPECTED_CHIPSET_STR "expectedChipset"
 #define DEVCFG_REBOOT_REQUIRED_STR "rebootRequired"
+#define DEVCFG_DRIVERS_STR "drivers"
+#define DEVCFG_COUNT_STR "count"
 
 /* Lives in the error object, not the result, so it is next to the token it
 ** qualifies and is absent on success rather than being a meaningless 0 there. */
@@ -112,6 +114,14 @@
 ** allocate. */
 #define DEVCFG_FALLBACK_LIMIT (64u * 1024u)
 
+/* Room for one driver name with its padding removed, plus the terminator.
+** Every name in the table today is padded to exactly 36 characters and the
+** longest without padding is 35, so this is not a tight fit -- it is a bound
+** that exists so the copy below has one, rather than a guess at what names
+** will be. A name that does not fit is reported unmodified rather than
+** truncated; see __add_driver_name(). */
+#define DEVCFG_DRIVER_NAME_MAX 64u
+
 /*******************************************************************************
  *                          Static Function Prototypes
  *******************************************************************************/
@@ -120,6 +130,7 @@ static void __prepare_error(cJSON *cj_response, int error_code,
                             int bad_index);
 static int __device_count(const cJSON *root);
 static bool __every_id_item_has_a_driver(const cJSON *root, int *bad_index);
+static void __add_driver_name(cJSON *cj_driver, const char *name);
 
 /*******************************************************************************
  *                          Extern Function Definitions
@@ -350,6 +361,89 @@ void EZPI_CLOUD_devcfg_set(cJSON *cj_request, cJSON *cj_response)
     }
 }
 
+void EZPI_CLOUD_devcfg_drivers_list(cJSON *cj_request, cJSON *cj_response)
+{
+    (void)cj_request;
+
+    cJSON *cj_result =
+        cJSON_AddObjectToObject(__FUNCTION__, cj_response, ezlopi_result_str);
+
+    if (cj_result)
+    {
+        cJSON *cj_drivers =
+            cJSON_AddArrayToObject(__FUNCTION__, cj_result, DEVCFG_DRIVERS_STR);
+
+        /* Counted as entries are added, not read from the table beforehand, so
+        ** the number cannot disagree with the array it describes. */
+        int count = 0;
+        bool complete = (NULL != cj_drivers);
+
+        if (cj_drivers)
+        {
+            const char *name = NULL;
+            uint32_t id_item = 0u;
+
+            while (EZPI_CLOUD_devcfg_port_driver_at(count, &name, &id_item))
+            {
+                cJSON *cj_driver = cJSON_CreateObject(__FUNCTION__);
+
+                if (NULL == cj_driver)
+                {
+                    complete = false;
+                    break;
+                }
+
+                cJSON_AddNumberToObject(__FUNCTION__, cj_driver,
+                                        ezlopi_id_item_str, (double)id_item);
+                __add_driver_name(cj_driver, name);
+
+                if (false == cJSON_AddItemToArray(cj_drivers, cj_driver))
+                {
+                    cJSON_Delete(__FUNCTION__, cj_driver);
+                    complete = false;
+                    break;
+                }
+
+                count++;
+
+                /* Cleared so that a port which returns true without writing
+                ** them -- which this one cannot, but a fake or a later
+                ** implementation could -- repeats the previous row visibly
+                ** instead of being hidden by a stale value. */
+                name = NULL;
+                id_item = 0u;
+            }
+        }
+
+        cJSON_AddNumberToObject(__FUNCTION__, cj_result, DEVCFG_COUNT_STR,
+                                (double)count);
+
+        if (false == complete)
+        {
+            /* The list is short and the caller is told so. Silence here would
+            ** be the worst outcome of the three available: a client cannot
+            ** tell a truncated list from an image built with fewer drivers,
+            ** and would go on to hide drivers the hub actually has -- or, if
+            ** the truncation happened to cut the array at zero, present the
+            ** hub as supporting nothing at all.
+            **
+            ** NOT TESTED, and not for want of trying. Every way into this
+            ** branch is a cjext allocation failure, and cjext allocates
+            ** through ezlopi_malloc(), which the host build defines as plain
+            ** malloc() in tests/host/stubs/EZLOPI_USER_CONFIG.h -- a header
+            ** six other test binaries share. Making it fail on demand to
+            ** cover three lines here would change what those six are built
+            ** against, which is a worse trade than saying this plainly. The
+            ** mutation sweep cannot reach it either, so a mutation that
+            ** deletes this branch survives; mut_devcfg.py says so rather than
+            ** omitting the row and leaving the table looking complete. */
+            __prepare_error(cj_response, -32500, "Internal error",
+                            "devcfg.drivers.incomplete", -1);
+            TRACE_E("devcfg: driver list truncated after %d entries", count);
+        }
+    }
+}
+
 /*******************************************************************************
  *                         Static Function Definitions
  *******************************************************************************/
@@ -438,6 +532,68 @@ static bool __every_id_item_has_a_driver(const cJSON *root, int *bad_index)
     }
 
     return true;
+}
+
+/**
+ * @brief Add a driver's name to its entry, without the table's padding.
+ *
+ * Every name in ezlopi_core_devices_list_modules.h is padded with spaces to a
+ * fixed width so the table lines up in the source. That padding is a property
+ * of the source file, not of the driver, and sending it would put a column of
+ * trailing spaces into every client that displays the name verbatim -- as well
+ * as 63 names' worth of bytes into a response that shares one 10 KB buffer with
+ * everything else the hub sends.
+ *
+ * Trailing only. A leading space would be a typo in the table rather than
+ * alignment, and silently repairing it here would hide it; the name goes out as
+ * the table holds it so the table is what gets fixed.
+ *
+ * Three cases, and the third is the one worth stating:
+ *
+ *   - no name at all: the member is null, not an empty string. The table should
+ *     never hold a NULL name before its sentinel row, but this runs on an
+ *     unauthenticated method and the cost of assuming otherwise is a crash.
+ *   - trimmed name fits DEVCFG_DRIVER_NAME_MAX: the trimmed copy is sent.
+ *   - it does not fit: the name is sent *unmodified*, padding and all. Not
+ *     truncated. A truncated name is one a human cannot recognise and a client
+ *     cannot match against anything; a padded one merely looks untidy. Failing
+ *     towards untidy is the correct direction, and it means this bound can
+ *     never silently corrupt a future long name.
+ *
+ * @param   cj_driver   The entry to add "name" to.
+ * @param   name        The table's name pointer, which may be NULL.
+ */
+static void __add_driver_name(cJSON *cj_driver, const char *name)
+{
+    size_t len = 0;
+
+    if (NULL == name)
+    {
+        cJSON_AddNullToObject(__FUNCTION__, cj_driver, ezlopi_name_str);
+        return;
+    }
+
+    len = strlen(name);
+
+    while ((len > 0u) && (' ' == name[len - 1u]))
+    {
+        len--;
+    }
+
+    if (len < DEVCFG_DRIVER_NAME_MAX)
+    {
+        char trimmed[DEVCFG_DRIVER_NAME_MAX];
+
+        memcpy(trimmed, name, len);
+        trimmed[len] = '\0';
+
+        cJSON_AddStringToObject(__FUNCTION__, cj_driver, ezlopi_name_str,
+                                trimmed);
+    }
+    else
+    {
+        cJSON_AddStringToObject(__FUNCTION__, cj_driver, ezlopi_name_str, name);
+    }
 }
 
 /**

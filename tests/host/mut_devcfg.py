@@ -23,7 +23,9 @@ Reading the output:
   - a crash (sanitizer or SEGV) counts as caught, but an assertion is better:
     it says what broke rather than just that something did.
 
-One row is expected to survive and is labelled. See its comment.
+Two rows are expected to survive and both are labelled. One is a provably
+equivalent mutant; the other marks a branch the host build genuinely cannot
+reach, which is a gap and is called one. See their comments.
 """
 
 import subprocess, shutil
@@ -79,6 +81,42 @@ MUTS = [
     ("leak the string that get reads",
      "EZPI_CLOUD_devcfg_port_free(stored);",
      "(void)0;"),
+    # --- hub.ezlopi.config.drivers.list ---
+    ("send the table's alignment padding to the client",
+     "while ((len > 0u) && (' ' == name[len - 1u]))",
+     "while (false && (len > 0u) && (' ' == name[len - 1u]))"),
+    ("leave one space on the end of every name",
+     "while ((len > 0u) && (' ' == name[len - 1u]))",
+     "while ((len > 1u) && (' ' == name[len - 1u]))"),
+    ("trim one character too many",
+     "    while ((len > 0u) && (' ' == name[len - 1u]))\n    {\n        len--;\n    }",
+     "    while ((len > 0u) && (' ' == name[len - 1u]))\n    {\n        len--;\n    }\n\n    if (len > 0u)\n    {\n        len--;\n    }"),
+    ("call an unnamed driver \"\" instead of null",
+     'cJSON_AddNullToObject(__FUNCTION__, cj_driver, ezlopi_name_str);',
+     'cJSON_AddStringToObject(__FUNCTION__, cj_driver, ezlopi_name_str, "");'),
+    # The bound's failure direction. Truncating a name nobody can match is the
+    # thing the else branch exists to not do.
+    ("truncate a name too long to trim, instead of passing it through",
+     "    else\n    {\n        cJSON_AddStringToObject(__FUNCTION__, cj_driver, ezlopi_name_str, name);\n    }",
+     "    else\n    {\n        char cut[DEVCFG_DRIVER_NAME_MAX];\n\n        memcpy(cut, name, DEVCFG_DRIVER_NAME_MAX - 1u);\n        cut[DEVCFG_DRIVER_NAME_MAX - 1u] = '\\0';\n        cJSON_AddStringToObject(__FUNCTION__, cj_driver, ezlopi_name_str, cut);\n    }"),
+    ("start the table walk at row one",
+     "while (EZPI_CLOUD_devcfg_port_driver_at(count, &name, &id_item))",
+     "while (EZPI_CLOUD_devcfg_port_driver_at(count + 1, &name, &id_item))"),
+    ("report a count that is not the length of the array sent",
+     "cJSON_AddNumberToObject(__FUNCTION__, cj_result, DEVCFG_COUNT_STR,\n                                (double)count);",
+     "cJSON_AddNumberToObject(__FUNCTION__, cj_result, DEVCFG_COUNT_STR,\n                                (double)count + 1.0);"),
+    ("spell the id camel-cased, so it cannot be copied into a config entry",
+     "cJSON_AddNumberToObject(__FUNCTION__, cj_driver,\n                                        ezlopi_id_item_str, (double)id_item);",
+     'cJSON_AddNumberToObject(__FUNCTION__, cj_driver,\n                                        "idItem", (double)id_item);'),
+    # EXPECTED TO SURVIVE, and it is a gap rather than an equivalence -- see
+    # the comment on the branch itself in the subject. The only way into it is
+    # a cjext allocation failure, and cjext allocates through ezlopi_malloc(),
+    # which tests/host/stubs/EZLOPI_USER_CONFIG.h defines as malloc() for this
+    # binary and six others. The row is here so the gap is visible in the
+    # table instead of being invisible by omission. Expect 0 failures.
+    ("stay silent when the driver list had to be cut short [UNTESTED branch]",
+     "if (false == complete)",
+     "if (false && (false == complete))"),
 ]
 
 HOST = "cd /mnt/c/Users/admin/ezlopi_audit/Ezlo_Pi/tests/host && "

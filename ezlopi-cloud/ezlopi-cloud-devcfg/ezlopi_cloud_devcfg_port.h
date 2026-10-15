@@ -30,7 +30,7 @@
 */
 /**
  * @file    ezlopi_cloud_devcfg_port.h
- * @brief   The five things the config API needs from the rest of the firmware
+ * @brief   The things the config API needs from the rest of the firmware
  * @version 1.0
  * @date    13th OCT 2025
  *
@@ -44,10 +44,10 @@
  * flash partition, and ezlopi-core-devices, whose header pulls in the whole
  * HAL. Neither compiles on a host, so neither does anything that includes them.
  *
- * So the handler does not include them. It calls the six functions below, and
+ * So the handler does not include them. It calls the seven functions below, and
  * ezlopi_cloud_devcfg_port.c -- which is the only file here that does include
- * those headers -- forwards each one. The port is six forwarding bodies with no
- * branching worth the name; the host test replaces them with recording fakes
+ * those headers -- forwards each one. The port is seven forwarding bodies with
+ * no branching worth the name; the host test replaces them with recording fakes
  * and exercises everything above.
  *
  * This is not a layer added for its own sake. It is drawn exactly where the
@@ -59,10 +59,11 @@
  *   - what chipset name this build accepts
  *   - how large the field is
  *   - whether an id_item names a driver this image was actually built with
+ *   - which drivers this image was built with at all
  *
- * The last one is the one EZPI_util_devcfgval_check() deliberately does not
- * answer, because it depends on the device table in
- * ezlopi_core_devices_list.c, which differs between builds. It belongs here.
+ * The last two are what EZPI_util_devcfgval_check() deliberately does not
+ * answer, because they depend on the device table in
+ * ezlopi_core_devices_list.c, which differs between builds. They belong here.
  */
 
 #ifndef _EZLOPI_CLOUD_DEVCFG_PORT_H_
@@ -158,6 +159,35 @@ extern "C"
      * @return  true if some row of the device table claims that id.
      */
     bool EZPI_CLOUD_devcfg_port_driver_exists(uint32_t id_item);
+
+    /**
+     * @brief   Read one row of this image's device table.
+     *
+     * The companion to driver_exists(). That one answers "may I use this
+     * id_item", which is the question the write path has; this one answers
+     * "which id_items are there at all", which is the question a configuration
+     * UI has before the user has typed anything. Without it, the only way to
+     * discover what an image supports is to send a configuration and be
+     * refused, one driver at a time.
+     *
+     * Enumerated by index rather than returned as a block, so the handler
+     * needs no knowledge of how the table is laid out and the host test can
+     * substitute a table of any length, including an empty one.
+     *
+     * @param   index       Row to read, from 0. An index at or past the end of
+     *                      the table is not an error; it is how a caller finds
+     *                      the end.
+     * @param   name        out, may be NULL: the row's name, a pointer into
+     *                      static storage which the caller must neither free
+     *                      nor modify. Can itself be NULL if the table holds
+     *                      no name for that row. Untouched when false is
+     *                      returned.
+     * @param   id_item     out, may be NULL: the row's id_item. Untouched when
+     *                      false is returned.
+     * @return  true if @p index names a real row.
+     */
+    bool EZPI_CLOUD_devcfg_port_driver_at(int index, const char **name,
+                                          uint32_t *id_item);
 
 #ifdef __cplusplus
 }

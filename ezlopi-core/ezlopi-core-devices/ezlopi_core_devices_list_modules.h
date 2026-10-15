@@ -56,17 +56,32 @@ extern "C"
     EZLOPI_DEVICE_LIST("digital-out generic                 ", 1, DEVICE_0001_digitalOut_generic)
 #endif // DEVICE_0001_DIGITALOUT_GENERIC
 
-#if (1 == DEVICE_0001_DIGITALOUT_GENERIC)
+/* Each of the next three used to be guarded by DEVICE_0001_DIGITALOUT_GENERIC
+** -- the switch belonging to the row above -- rather than by its own. The
+** macros DEVICE_0002_DIGITALOUT_RELAY, DEVICE_0003_DIGITALOUT_PLUG and
+** DEVICE_0004_DIGITALIN_GENERIC are defined in ezlopi_core_device_macros.h and
+** were, between them, the only three of the 63 that nothing in the tree read.
+**
+** Two consequences, and neither announced itself: setting one of those three to
+** 0 did nothing at all, and setting DEVICE_0001_DIGITALOUT_GENERIC to 0 removed
+** four drivers instead of one. Both are the same class of failure the device
+** config API exists to stop -- a build that quietly does not contain the driver
+** its author thinks it does.
+**
+** All 63 switches are 1 by default, so this changes nothing about the default
+** image. It changes what a build with any of those four set to 0 contains,
+** which is the point. */
+#if (1 == DEVICE_0002_DIGITALOUT_RELAY)
     EZLOPI_DEVICE_LIST("digital-out relay                   ", 2, DEVICE_0002_digitalOut_relay)
-#endif // DEVICE_0001_DIGITALOUT_GENERIC
+#endif // DEVICE_0002_DIGITALOUT_RELAY
 
-#if (1 == DEVICE_0001_DIGITALOUT_GENERIC)
+#if (1 == DEVICE_0003_DIGITALOUT_PLUG)
     EZLOPI_DEVICE_LIST("digital-out plug                    ", 3, DEVICE_0003_digitalOut_plug)
-#endif // DEVICE_0001_DIGITALOUT_GENERIC
+#endif // DEVICE_0003_DIGITALOUT_PLUG
 
-#if (1 == DEVICE_0001_DIGITALOUT_GENERIC)
+#if (1 == DEVICE_0004_DIGITALIN_GENERIC)
     EZLOPI_DEVICE_LIST("digital-in generic                  ", 4, DEVICE_0004_digitalIn_generic)
-#endif // DEVICE_0001_DIGITALOUT_GENERIC
+#endif // DEVICE_0004_DIGITALIN_GENERIC
 
 #if (1 == SENSOR_0005_I2C_MPU6050)
     EZLOPI_DEVICE_LIST("sensor-MPU6050-I2C                  ", 5, SENSOR_0005_i2c_mpu6050)
