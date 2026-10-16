@@ -40,6 +40,17 @@
 #include "sdkconfig.h"
 #include "EZLOPI_USER_CONFIG.h"
 
+/* For strlen() and memset(), both of which this file already used -- see the
+** strlen at the websocket send around line 496 -- while containing no
+** string.h at all. So those declarations were arriving transitively, down
+** somebody else's include edge, and had been for as long as the file existed.
+**
+** Named explicitly now for the same reason ezlopi_core_api.c names
+** esp_system.h: a declaration that reaches you by accident disappears without
+** a warning when the header that happened to carry it is reshuffled, and what
+** you get then is an implicit declaration rather than a compile error. */
+#include <string.h>
+
 #include <esp_mac.h>
 #include <esp_wifi_types.h>
 #include <esp_idf_version.h>
@@ -279,7 +290,23 @@ static void __fetch_wss_endpoint(void *pv)
 #ifdef CONFIG_EZPI_OPENTELEMETRY_ENABLE_LOGS
                             if (NULL == method_str)
                             {
-                                TRACE_OTEL(ENUM_EZLOPI_TRACE_SEVERITY_ERROR, "web-provisioning [method: null], payload: %s", rx_message->payload);
+                                /* Length, not body. This used to pass
+                                ** rx_message->payload itself, and TRACE_OTEL
+                                ** ships what it is given to an OpenTelemetry
+                                ** collector -- so an unparseable cloud message
+                                ** left the device carrying whatever it
+                                ** happened to contain. The payloads on this
+                                ** socket include credential-bearing methods,
+                                ** and a message that reached here is by
+                                ** definition one whose shape was not
+                                ** understood, so there is no basis for
+                                ** assuming it is safe to forward.
+                                **
+                                ** If this needs to be diagnostic again, the
+                                ** leak-free form is the list of top-level
+                                ** member names: it identifies the shape
+                                ** without exporting any value. */
+                                TRACE_OTEL(ENUM_EZLOPI_TRACE_SEVERITY_ERROR, "web-provisioning [method: null], payload withheld (%u bytes)", (unsigned)strlen(rx_message->payload));
                             }
 #endif // CONFIG_EZPI_OPENTELEMETRY_ENABLE_LOGS
 

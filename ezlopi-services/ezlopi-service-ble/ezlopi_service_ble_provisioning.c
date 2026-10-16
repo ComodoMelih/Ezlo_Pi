@@ -885,7 +885,34 @@ static char *ezpi_provisioning_info_base64(void)
     {
         const size_t prov_len = strlen(str_provisioning_data);
 
-        TRACE_D("str_provisioning_data[len: %u]: %s", (unsigned)prov_len, str_provisioning_data);
+        /* Length only, deliberately. This used to print str_provisioning_data
+        ** itself, and ezpi_provisioning_info_jsonify() puts the device's SSL
+        ** private key, its SSL shared key and the CA certificate into that
+        ** object (see the cJSON_AddStringToObject calls around line 856) -- so
+        ** a read of the provisioning characteristic dumped all three onto the
+        ** serial console, in PEM.
+        **
+        ** TRACE_D would not have saved it. These are EzloPi's own trace macros
+        ** rather than ESP_LOG, so CONFIG_LOG_DEFAULT_LEVEL does not gate them,
+        ** and serial_log_severity defaults to
+        ** ENUM_EZLOPI_TRACE_SEVERITY_MAX (ezlopi_core_log.c:86).
+        **
+        ** What DID save it is worth knowing before reading the paragraph above
+        ** as a shipped vulnerability: this function is inside
+        ** #ifdef EZPI_SERV_BLE_ENABLE_READ_PROV, opened at line 825, and that
+        ** macro is #defined at EZLOPI_USER_CONFIG.h:153 and then #undef'd
+        ** again at EZLOPI_USER_CONFIG.h:210. No default build compiles this
+        ** function at all -- verified by the absence of this format string
+        ** from ezlopi_service_ble_provisioning.c.obj, not inferred. The leak
+        ** is therefore latent: real for anyone who turns the read path on,
+        ** which is evidently meant to be possible, and not present in a
+        ** stock image. Fixing it does not turn it on.
+        **
+        ** The length is what the base64 sizing immediately below is reasoning
+        ** about, so it is the half of the line that was actually load-bearing
+        ** and it stays. */
+        TRACE_D("str_provisioning_data[len: %u] (body withheld: contains SSL keys)",
+                (unsigned)prov_len);
 
         /* Sized from the payload actually built, rather than a fixed 6 KB.
         **

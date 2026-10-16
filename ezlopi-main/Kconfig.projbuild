@@ -462,6 +462,33 @@ menu "EzloPi User Config"
             is not a new exposure - but it is a real one, and this is the
             switch for it.
 
+    config EZPI_WS_LOG_PAYLOADS
+        depends on EZPI_LOCAL_WEBSOCKET_SERVER
+        bool "Print inbound local-API request bodies to the serial console"
+        default n
+        help
+            Logs the full JSON of every request arriving on the local
+            websocket API. Useful when bringing up a client against it; the
+            length of each payload is logged either way, so with this off you
+            still see that traffic arrived.
+
+            Off by default because three of the methods on this socket carry
+            a credential in their parameters:
+
+              hub.offline.login.ui          params.token - the local API key
+              hub.network.wifi.try_connect  params.network.key - the Wi-Fi PSK
+              hub.mqtt.config.set           params.password
+
+            The login is the one that matters most. An unauthenticated client
+            may call that method and no other, so it is the first payload of
+            every session - which means turning this on prints the device's
+            own local API key every time anything connects, including from
+            peers that then fail to log in.
+
+            Note that this is not gated by the log level. EzloPi's trace
+            macros are not ESP_LOG, so CONFIG_LOG_DEFAULT_LEVEL does not
+            apply to them.
+
     config EZPI_OFFLINE_LOGIN_VERIFY_USER_ID
         depends on EZPI_LOCAL_WEBSOCKET_SERVER
         bool "Verify the user id on offline login as well as the key"

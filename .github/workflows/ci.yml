@@ -125,6 +125,23 @@ jobs:
       - name: TRACE_* format strings stay compiler-checked
         run: python3 tests/ci/check_trace_format_attr.py
 
+      # Eight lines across seven files printed a credential: the local API key
+      # twice, the Wi-Fi PSK twice, the cloud provisioning token, the device's
+      # SSL private key, and two whole request-body dumps -- one of which
+      # exported it to an OpenTelemetry collector rather than to a console. The
+      # last four were only found by going looking, which is what makes this a
+      # class rather than a list, and nothing about fixing eight lines stops a
+      # ninth.
+      #
+      # Also pins the default of each switch that is allowed to dump a secret
+      # on purpose, because moving one of those is a security decision and
+      # should not be possible to make by accident. Self-tests against the real
+      # removed lines, including the case where a fix quotes the line it
+      # replaced in a comment -- which is what made the first shell version of
+      # this report every fixed site as still broken.
+      - name: No credentials passed by value to a logging call
+        run: python3 tests/ci/check_no_secret_logging.py
+
       # EZPI_core_factory_info_v3_set_basic() copied each string field out of a
       # caller-supplied pointer using the *destination field's* length as the
       # count. Two of three callers were safe only by coincidence -- their stack

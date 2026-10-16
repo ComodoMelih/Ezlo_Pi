@@ -574,7 +574,56 @@ static esp_err_t ezpi_msg_handler(httpd_req_t *req)
                             }
                             else if (HTTPD_WS_TYPE_TEXT == ws_pkt.type)
                             {
+                                /* The body is withheld unless it is asked for.
+                                ** This line used to be an unconditional
+                                **
+                                **   TRACE_D("payload[len: %d]:\r\n%.*s", ...)
+                                **
+                                ** which printed every inbound request on this
+                                ** socket to the serial console, and three of
+                                ** the methods reachable over it carry a
+                                ** credential in their params:
+                                **
+                                **   hub.offline.login.ui     params.token
+                                **                            -> the local API key
+                                **   hub.network.wifi.try_connect
+                                **                            params.network.key
+                                **                            -> the Wi-Fi PSK
+                                **   hub.mqtt.config.set      params.password
+                                **
+                                ** The first one is the sharp edge. An
+                                ** unauthenticated client may call exactly one
+                                ** method -- see the gate in
+                                ** __message_upcall() -- so the login is the
+                                ** FIRST payload of every session, and the
+                                ** device's own local key was printed on every
+                                ** connection attempt by anyone.
+                                **
+                                ** TRACE_D is not compiled out of a default
+                                ** build: EzloPi's trace macros are not
+                                ** ESP_LOG, so CONFIG_LOG_DEFAULT_LEVEL does
+                                ** not gate them, and serial_log_severity
+                                ** defaults to ENUM_EZLOPI_TRACE_SEVERITY_MAX
+                                ** (ezlopi_core_log.c:86).
+                                **
+                                ** Rather than delete the most useful debugging
+                                ** line in the file, it is put behind a switch
+                                ** that is off by default -- the same answer
+                                ** this repository already gives for printing
+                                ** the local key, CONFIG_EZPI_LOCAL_KEY_ANNOUNCE.
+                                ** Redacting per-field was the alternative and
+                                ** was rejected: it means parsing untrusted
+                                ** input here purely to decide what to log, and
+                                ** it fails silently the moment a new method
+                                ** adds a secret field nobody added to the
+                                ** list. A switch cannot drift. */
+#ifdef CONFIG_EZPI_WS_LOG_PAYLOADS
                                 TRACE_D("payload[len: %d]:\r\n%.*s", ws_pkt.len, ws_pkt.len, (char *)ws_pkt.payload);
+#else
+                                TRACE_D("payload[len: %d] (body withheld; "
+                                        "CONFIG_EZPI_WS_LOG_PAYLOADS is off)",
+                                        ws_pkt.len);
+#endif
                                 __message_upcall(req, (char *)ws_pkt.payload, (uint32_t)ws_pkt.len);
                             }
                             else if (HTTPD_WS_TYPE_CLOSE == ws_pkt.type)

@@ -367,7 +367,27 @@ void ezlopi_wifi_try_connect_task(void *params)
              * rejected here. */
             if (('\0' != ssid[0]) && ('\0' != pass[0]))
             {
-                TRACE_D("Trying to connect to %s with password %s", ssid, pass);
+                /* The password is reported as a length, not a value. This line
+                ** used to be
+                **
+                **     TRACE_D("Trying to connect to %s with password %s", ssid, pass);
+                **
+                ** which printed the Wi-Fi PSK on the serial console every time
+                ** anyone changed networks. It is tempting to assume a TRACE_D
+                ** does not reach a shipped image; it does. These are EzloPi's
+                ** own trace macros rather than ESP_LOG, so
+                ** CONFIG_LOG_DEFAULT_LEVEL does not gate them, and
+                ** serial_log_severity defaults to
+                ** ENUM_EZLOPI_TRACE_SEVERITY_MAX (ezlopi_core_log.c:86), which
+                ** passes severity 4. The default build printed it.
+                **
+                ** The SSID is kept: it is broadcast over the air by the access
+                ** point anyway, and it is the half that makes the line useful.
+                ** Same treatment as ezlopi_core_nvs.c and
+                ** ezlopi_service_improv.c, which already report this password
+                ** as a character count. */
+                TRACE_D("Trying to connect to %s with a %d-char password",
+                        ssid, (int)strlen(pass));
                 esp_err_t error = EZPI_core_wifi_connect(ssid, pass);
                 if (ESP_OK == error)
                 {

@@ -1542,7 +1542,13 @@ three BLE-capable targets the image grew 16, 32 and 32 bytes.
   eFuses burned — as the answer for self-hosters, along with the reason it
   cannot be a default here: a hub built that way refuses Ezlo's images.
 
-### Local API credentials — [sec]
+### Credentials — [sec]
+
+Titled for the credential rather than for the surface, because the sweep in the
+middle of this section took it past the local API: the leaks below are on the
+serial console, the BLE provisioning characteristic, and an OpenTelemetry
+export, and the last two bullets are about comparing a credential rather than
+printing one.
 
 - **The local API key was printed to the serial console on every login
   attempt.** `ezlopi_core_offline_login.c` contained
@@ -1554,12 +1560,29 @@ three BLE-capable targets the image grew 16, 32 and 32 bytes.
   to how it reads. These are EzloPi's own trace macros, not `ESP_LOG`, so
   `CONFIG_LOG_DEFAULT_LEVEL` does not apply to them. The severity was chased to
   the actual `printf`: `TRACE_D` is `trace_log_sev_debug`
-  ([`ezlopi_util_trace.h:192`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L192)),
-  which is severity 4; `serial_log_severity` defaults to
-  `ENUM_EZLOPI_TRACE_SEVERITY_MAX`
+  ([`ezlopi_util_trace.h:213`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L213)),
+  which passes severity 4
+  ([`:175`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L175));
+  `serial_log_severity` defaults to `ENUM_EZLOPI_TRACE_SEVERITY_MAX`
   ([`ezlopi_core_log.c:86`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L86));
   the upcall is registered at `:255` and ends in `printf` at `:309`. The
   default build printed it.
+
+  There *is* a switch that compiles these macros away, and it is worth naming
+  precisely because finding it is the obvious way to talk yourself out of this
+  whole section. `ezlopi_util_trace.h:224-233` defines `TRACE_D(X, ...)` as
+  nothing — but that is the `#else` of
+  `#if defined(CONFIG_EZPI_UTIL_TRACE_EN) || defined(CONFIG_EZPI_LOG_CLOUD_EN)`
+  ([`:74`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L74)), and
+  `EZPI_UTIL_TRACE_EN` is
+  [**`default y`**](ezlopi-main/Kconfig.projbuild#L16). Confirmed as
+  `CONFIG_EZPI_UTIL_TRACE_EN=y` in the `sdkconfig` a default `idf.py
+  set-target esp32` actually generates, not just read off the Kconfig. So the
+  empty definitions exist and no default build uses them.
+
+  That argument is now also *measured* rather than reasoned, by looking for the
+  format strings in the linked image — see the testing note at the end of this
+  section.
 
 - **The Wi-Fi password was printed every time the stored config was loaded.**
   `ezlopi_core_nvs.c:393` was
@@ -1579,6 +1602,233 @@ three BLE-capable targets the image grew 16, 32 and 32 bytes.
   the local key and the cloud provisioning token in full as they were written
   to flash. Both now report a length. The other five fields written in the same
   block are identifiers and URLs and are still logged in full.
+
+The three above were found one at a time, which is the wrong way to find them —
+the first was read off the screen, the second turned up while verifying the
+first, and after the third it was clear this was a *class* rather than three
+incidents. The four below came from searching for the shape instead of waiting
+for the next one: every `TRACE_*`/`printf` whose format string pairs a `%s`
+with an argument named like a secret, across the whole tree. The fourth of them
+is the reason the sweep was worth doing — it exports off-device, and no amount
+of reading the serial console would have revealed it.
+
+- **The Wi-Fi password was printed on every network change.**
+  `ezlopi_core_wifi.c` had
+  `TRACE_D("Trying to connect to %s with password %s", ssid, pass)` in
+  `ezlopi_wifi_try_connect_task()`. Now
+  [a length](ezlopi-core/ezlopi-core-wifi/ezlopi_core_wifi.c#L389).
+
+  This is a sibling of the `ezlopi_core_nvs.c` bullet above and not the same
+  line: that one printed the PSK when the stored config was *loaded*, this one
+  printed it when a *new* network was joined. Fixing the load path left the join
+  path printing the password of every network the user typed in.
+
+  The SSID is kept. The access point broadcasts it over the air regardless, and
+  it is the half of the line that makes it useful.
+
+- **The provisioning blob — including the device's SSL private key — was
+  printed on every read of the BLE provisioning characteristic, in a build that
+  compiles that path. No shipped build does.** This is the one bullet in this
+  section that is *latent* rather than active, and the distinction was not
+  visible from the source.
+  `ezlopi_service_ble_provisioning.c` had
+  `TRACE_D("str_provisioning_data[len: %u]: %s", prov_len, str_provisioning_data)`.
+  Now [the length only](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c#L914).
+
+  What is in that string is why it is listed at all.
+  [`ezpi_provisioning_info_jsonify()`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c#L826)
+  embeds three PEM fields at
+  [`:856-858`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c#L856)
+  — `ssl_private_key`, `ssl_shared_key` and the CA certificate — so in such a
+  build the device's own private key goes to the console in full, in PEM, every
+  time anything reads the characteristic.
+
+  **It is not compiled in the default build**, and finding that out is the
+  useful part of this bullet. The function sits inside
+  `#ifdef EZPI_SERV_BLE_ENABLE_READ_PROV`, opened 76 lines above the fix at
+  [`:825`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c#L825).
+  That macro is `#define`d at
+  [`EZLOPI_USER_CONFIG.h:153`](ezlopi-user-config/EZLOPI_USER_CONFIG.h#L153)
+  and then **`#undef`d 57 lines later** at
+  [`:210`](ezlopi-user-config/EZLOPI_USER_CONFIG.h#L210), under a
+  `/////// Disable user configs here ///////` banner. So reading either site
+  alone gives the wrong answer, and the `#endif` comments in the provisioning
+  file are mislabelled against the actual nesting, which does not help.
+
+  I did not find this by reading. The CHANGELOG at this point claimed the key
+  "went to the console every time anything read the characteristic", and the
+  measurement below contradicted it: the new format string was **absent** from
+  the linked image. Chasing that down — other strings from the same file were
+  present, the string was absent from
+  `ezlopi_service_ble_provisioning.c.obj` itself, and
+  `ezpi_provisioning_info_base64` was absent from that object's symbol table —
+  put it beyond doubt that the compiler never saw the function, rather than the
+  linker having dropped it. The claim is corrected here rather than shipped.
+
+  Which left the same hazard as the OpenTelemetry bullet below: an edit no
+  build compiles is an edit nobody has syntax-checked. So a sixth build was run
+  with the two `#undef`s commented out, confirming the fix compiles, that
+  `body withheld: contains SSL keys` is then present in the object file and the
+  image, and that the old format string is not. The header was restored
+  afterwards — **this change does not enable the read path**, it only makes the
+  code correct for whoever does.
+
+  One claim was dropped on inspection: the sweep also reported a provisioning
+  *token* in this blob. Reading the function, the only identifier-ish field is
+  `uuid_provisioning`, which is an identifier and not a credential. The comment
+  in the code names the three fields that are actually there and does not
+  mention a token.
+
+- **Every inbound local-API request body was printed, and the first one of
+  every session contains the device's local API key.** The per-message
+  `TRACE_D("payload[len: %d]:\r\n%.*s", ...)` in `ezpi_msg_handler()` is now
+  behind
+  [`CONFIG_EZPI_WS_LOG_PAYLOADS`](ezlopi-main/Kconfig.projbuild#L465),
+  **`default n`**, with the length still logged
+  [either way](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L620)
+  so the "traffic arrived" signal survives.
+
+  Three methods on this socket carry a credential in their params:
+  `hub.offline.login.ui` → `params.token`, the local API key;
+  `hub.network.wifi.try_connect` → `params.network.key`, the Wi-Fi PSK;
+  `hub.mqtt.config.set` → `params.password`. The login is the one that makes
+  this unconditional rather than occasional: an unauthenticated client may call
+  that method and no other — the gate in `__message_upcall()`
+  ([`:336`](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L336))
+  admits nothing else — so it is the *first* payload of every session. The
+  device printed its own key on every connection attempt by anything, including
+  peers that then failed to log in.
+
+  A switch rather than per-field redaction, deliberately. Redaction means
+  parsing untrusted input here purely to decide what to log, and it fails
+  silently the first time a new method adds a secret field that nobody adds to
+  the list — the failure mode being that it keeps printing and nothing
+  complains. A switch cannot drift. It is also the answer this repository
+  already gives for the same question:
+  [`CONFIG_EZPI_LOCAL_KEY_ANNOUNCE`](ezlopi-main/Kconfig.projbuild#L443) gates
+  printing the local key the same way, so the new option was modelled on it
+  rather than invented.
+
+- **An unparseable cloud message was exported to the OpenTelemetry collector
+  with its body attached.** `ezlopi_service_webprov.c` passed
+  `rx_message->payload` to `TRACE_OTEL` on the `method == NULL` path. Now
+  [a byte count](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L305).
+
+  This is the one that is categorically different from the other three. The
+  rest print to a serial console, which needs physical access to read;
+  `TRACE_OTEL` ships what it is given *off the device*, to a collector, over
+  the network. And the messages that reach this branch are by definition the
+  ones whose shape the device did not understand, so there is no basis for
+  assuming the body is safe to forward. If it needs to be diagnostic again, the
+  leak-free form is the list of top-level member names — it identifies the
+  shape without exporting a single value, and the code comment says so.
+
+  The length needs `strlen`, and `#include <string.h>` is now stated. The file
+  was already using `strlen` and `memset` while containing no `string.h` —
+  checked against the committed version, which calls
+  `strlen(str_data)` once, at the websocket send, and `memset` three times — so
+  those declarations were arriving transitively down somebody else's include
+  edge, and had been all along. Named now for the same reason the
+  `esp_system.h` include in `ezlopi_core_api.c` is: a declaration that reaches
+  you by accident disappears without a warning when the header that happened
+  to carry it is reshuffled, and what you get then is an implicit declaration
+  rather than a compile error.
+
+  **Testing.** This line is inside `#ifdef CONFIG_EZPI_OPENTELEMETRY_ENABLE_LOGS`,
+  which is `default n`, so **the four-target CI sweep does not compile it** and
+  a green sweep says nothing whatever about it. Shipping an edit to code the
+  compiler never saw is how a syntax error reaches the one user who enables the
+  option, so a fifth build was run for this line alone: esp32 with
+  `CONFIG_EZPI_ENABLE_OPENTELEMETRY=y`, `..._ENABLE_LOGS=y` and
+  `..._ENABLE_TRACES=y`, verified by `grep` for `ezlopi_service_webprov.c.obj`
+  in the build log rather than inferred from the config. It built.
+
+  That fifth build also surfaced a **pre-existing** break, left alone as out of
+  scope: in this same file `method_str` is declared under
+  `#ifdef CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES` but tested under
+  `#ifdef CONFIG_EZPI_OPENTELEMETRY_ENABLE_LOGS`, so LOGS-without-TRACES does
+  not compile at all, with or without this change. The fifth build enables both
+  to get past it.
+
+**Testing, all four.** Six builds. Four targets at default config — all passed,
+images 1 646 704 / 1 337 056 / 1 661 472 / 1 720 000 bytes for
+esp32 / s2 / s3 / c3 — plus two builds that exist only to compile lines the
+default config does not: esp32 with the OpenTelemetry log options on, and esp32
+with the BLE provisioning read path on. Each changed file was confirmed to have
+actually been compiled, by `grep -c '<file>.c.obj'` over the build log, so that
+"build OK" is evidence about these lines rather than about the project.
+
+**The measurement that mattered more than the builds.** A green build says the
+code parses; it says nothing about whether the credential is still in the
+firmware. So the linked `esp32` image was searched for the format strings
+themselves, in both directions — the new length-only string must be *present*,
+the old secret-printing string must be *absent*:
+
+| In `Ezlo_Pi_v4x.bin` (esp32, default config) | want | got |
+| --- | --- | --- |
+| `with a %d-char password` (new) | 1 | 1 |
+| `with password %s` (old, the PSK) | 0 | 0 |
+| `payload[len: %d] (body withheld;` (new) | 1 | 1 |
+| `payload[len: %d]:` (old, the dump) | 0 | 0 |
+| `Trying to connect to %s` (control, kept half of a fixed line) | 1 | 1 |
+
+Both directions are needed. Present-only would not distinguish "compiled in"
+from "linker kept an unreachable copy"; absent-only would not distinguish
+"fixed" from "the whole macro is stripped and the check cannot fail". Together
+they also settle the claim this section opens with — that `TRACE_D` reaches a
+shipped image — by observation rather than by argument from Kconfig: the new
+string is *in the binary*.
+
+That pairing is also what caught the wrong claim about the BLE leak. The new
+BLE string came back **absent**, which under the reasoning above means the
+compiler never saw it; chasing that produced the `#undef` in
+`EZLOPI_USER_CONFIG.h` and the correction recorded in that bullet. A build-only
+test suite would have passed and the overstated claim would have shipped.
+
+**And a CI guard, because this is a class.** Eight lines across seven files,
+four of which were only found by going looking — that is a class, and fixing
+eight lines does nothing to stop a ninth.
+`tests/ci/check_no_secret_logging.py` fails the build if a credential-named
+value is passed to a `TRACE_*`/`printf`/`TRACE_OTEL` call that has an
+`%s`-class conversion, unless it is wrapped in `strlen`/`sizeof` — reporting a
+length being the accepted fix throughout this tree.
+
+It also understands the *other* accepted fix, a dump behind a switch, and does
+something slightly more than tolerate it: `GATED_SWITCHES` records the default
+each such option is expected to carry and the check verifies it against
+`Kconfig.projbuild`. The exemption applies only to the branch where the guard
+holds, so a secret dumped in the `#else` — the path a default build takes — is
+still reported.
+
+That table **pins** the value rather than demanding `n`, and the reason is that
+the first version demanded `n` and was immediately wrong:
+`EZPI_LOCAL_KEY_ANNOUNCE` is `default y` deliberately, because a self-flashed
+device generates its own local key and with the banner off that key is
+unknowable. The repository had already reasoned this through in that option's
+help text. Pinning keeps the value honest without overruling it — changing when
+a credential is printed fails the check until someone edits the table, which is
+the moment to argue about it.
+
+Verified by mutation rather than by passing: each of the four fixes was
+reverted in place, the gate was removed from the websocket dump, and the pinned
+Kconfig default was flipped — **five mutations, five caught**, each naming the
+right file and line, and the tree clean afterwards. The self-test also refuses
+to run the check at all unless a set of known-bad samples still fails, which is
+how the first version's bug was found: it used `\bpassword\b`, which does not
+match `password_saved`, the variable in the actual defect.
+
+Two of the shell script's checks are worth recording too, because on the first
+run both read as **failed fixes and neither was**. `with password %s : 1
+(want 0)` matched `ezlopi_core_wifi.c:373` — inside the new comment, which
+quotes the removed line on purpose so the file records what it used to do. And
+`ws payload switch = 2 (want 3)` was a miscounted expectation: two occurrences
+is correct, the `#ifdef` and the else-branch string. A grep for the removed
+*text* is the wrong instrument when the fix deliberately preserves that text as
+documentation; the checks now match a live call — a `TRACE_*`/`printf` at the
+start of the line content with no `**` comment marker in front of it — and the
+script carries a note saying a naive grep had read as a failure. The corrected
+check was then confirmed **able to fail**, by appending a function containing
+the original line and watching the count go 0 → 1 → 0.
 
 - **The local key comparison was a prefix match.**
   `strncmp(password_saved, cj_token->valuestring, strlen(password_saved))`
