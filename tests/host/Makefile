@@ -32,6 +32,7 @@ MQTTCORE_DIR := ../../ezlopi-core/ezlopi-core-mqtt-config
 ERRORS_DIR   := ../../ezlopi-core/ezlopi-core-errors
 CONSTANTS_DIR := ../../ezlopi-cloud/ezlopi-cloud-constants
 BLEBUF_DIR   := ../../ezlopi-core/ezlopi-core-ble
+I2C_HAL_DIR  := ../../ezlopi-hal/ezlopi-hal-i2c
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -65,7 +66,8 @@ BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
-           test_devcfg_api test_wssession test_scenefields test_ble_buffer
+           test_devcfg_api test_wssession test_scenefields test_ble_buffer \
+           test_i2c_shared_bus
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -538,6 +540,30 @@ $(BUILD)/test_ble_buffer: test_ble_buffer.c $(BLEBUF_DIR)/ezlopi_core_ble_buffer
 	@nm $(BUILD)/ble_buffer_subject.o | grep -q ' T EZPI_core_ble_buffer_total_len' \
 	  || { echo "ezlopi_core_ble_buffer.c compiled to an empty object -- CONFIG_EZPI_BLE_ENABLE is not reaching it"; exit 1; }
 	$(CC) -o $@ $(BUILD)/test_ble_buffer_main.o $(BUILD)/ble_buffer_subject.o $(LDFLAGS)
+
+# ezlopi-hal-i2c is the first *HAL* compiled here, and it is only possible
+# because the component's ESP-IDF surface is five functions and a struct. They
+# are declared in stubs/driver/i2c.h and defined in the test as recording fakes,
+# which is what lets the shared-bus test assert how many times the driver was
+# installed -- the question the fix turns on. The semaphore is emulated in
+# stubs/freertos/semphr.h; see the honesty note at the top of that file about
+# what that does not prove.
+#
+# The nm check is the same guard used for test_ble_buffer and test_scenefields.
+# It is less load-bearing here (no #ifdef wraps this file) but costs nothing and
+# would catch the subject being compiled to an empty object for any other
+# reason.
+$(BUILD)/test_i2c_shared_bus: I2C_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                            -I$(I2C_HAL_DIR) \
+                                            -I$(ERRORS_DIR) \
+                                            -I$(STUBS_DIR) \
+                                            $(SANITIZERS)
+$(BUILD)/test_i2c_shared_bus: test_i2c_shared_bus.c $(I2C_HAL_DIR)/ezlopi_hal_i2c_master.c | $(BUILD)
+	$(CC) $(I2C_CFLAGS) -c -o $(BUILD)/test_i2c_shared_bus_main.o test_i2c_shared_bus.c
+	$(CC) $(I2C_CFLAGS) -c -o $(BUILD)/i2c_master_subject.o $(I2C_HAL_DIR)/ezlopi_hal_i2c_master.c
+	@nm $(BUILD)/i2c_master_subject.o | grep -q ' T EZPI_hal_i2c_master_init' \
+	  || { echo "ezlopi_hal_i2c_master.c compiled to an empty object"; exit 1; }
+	$(CC) -o $@ $(BUILD)/test_i2c_shared_bus_main.o $(BUILD)/i2c_master_subject.o $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

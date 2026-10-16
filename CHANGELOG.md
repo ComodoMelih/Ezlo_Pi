@@ -922,6 +922,74 @@ None of these have been exercised on physical hardware; see Known gaps.
   the whole-build warning count is unchanged at 144, and the image is the same
   size as before.
 
+### I²C sensor bus — [bug]
+
+- **The second I²C sensor in a configuration never initialised.**
+  [`EZPI_hal_i2c_master_init()`](ezlopi-hal/ezlopi-hal-i2c/ezlopi_hal_i2c_master.c#L84)
+  installs the IDF driver only the first time a channel is used, which is
+  correct: I²C is a bus, every sensor on it shares SDA and SCL, and the device
+  is chosen by address at transfer time. But `ret = EZPI_SUCCESS` was assigned
+  *inside* that guard, so a device arriving on an already-running channel fell
+  out of the function with the initial `EZPI_ERR_HAL_INIT_FAILED`:
+
+  ```c
+  if (NULL == i2c_master_conf_ptr[i2c_master_conf->channel])
+  {
+      ...
+      i2c_master_conf_ptr[i2c_master_conf->channel] = i2c_master_conf;
+      ret = EZPI_SUCCESS;
+  }
+  /* no else: a device sharing the bus returned failure */
+  ```
+
+  Eight of the nine callers are shaped
+  `if (EZPI_SUCCESS == EZPI_hal_i2c_master_init(...))` and abandon the sensor on
+  anything else, logging *"I2C init failed"* to a serial console nobody is
+  watching. And this is not a narrow case: **every I²C driver in the tree
+  hardcodes `I2C_NUM_0`** rather than reading a channel from the configuration,
+  so "a second device on the channel" means any second I²C sensor at all,
+  whatever pins it names.
+
+  Concretely, the configuration the project itself documents at
+  [`ezlopi_core_factory_info.h:225`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.h#L225)
+  — a BME280 and a TSL2561 on GPIO 21/22, addresses 118 and 57 — could only
+  ever have produced one working sensor. Two sensors on one bus is the ordinary
+  way to use I²C.
+
+  The fix adds the missing `else`: if the channel is already up, agree that it
+  is the bus this device asked for and report success. The agreement is a
+  comparison of SDA and SCL, not an unconditional yes, because the two are
+  different bugs. One channel cannot drive two pin pairs, so a device naming
+  different pins is refused with a log naming both pairs — previously it would
+  have been handed the first device's pins and sat in the device list never
+  responding. Clock speed is not compared: every driver hardcodes 100 kHz, so it
+  cannot currently disagree, and refusing on it would add a failure mode without
+  removing one.
+
+  Evidenced by [`tests/host/test_i2c_shared_bus.c`](tests/host/test_i2c_shared_bus.c)
+  — 30 checks, and the first HAL compiled in the host suite. It asserts on the
+  `i2c_driver_install()` **call count** as well as the return value, because
+  returning success while installing twice would be a different defect with an
+  equally green test: the real `i2c_driver_install()` fails on an installed
+  port and `ESP_ERROR_CHECK` turns that into a crash.
+
+  The test was run against a copy of the HAL with the `else` branch deleted —
+  the pre-fix source — and fails there with 4 of 30 checks down, all of them
+  the sharing cases, while the first-device and NULL/disabled cases still pass.
+  That asymmetry is the point: it shows the test is sensitive to this change
+  specifically rather than globally. Worth recording that the *refusal*
+  assertions pass vacuously against the pre-fix code, which refused everything —
+  they only carry weight alongside the sharing assertions, and the test says so
+  at the case that contains them.
+
+  Four-target build green with no warning in the file. `esp32c3` is a real check
+  rather than a fourth repetition here: it has `SOC_I2C_NUM 1`, so the channel
+  table is a single element there, against the host stub's two.
+
+  Not fixed, and recorded under Known gaps instead:
+  `EZPI_hal_i2c_master_deinit()` is declared in the header and called from
+  nowhere in the tree.
+
 ### BLE provisioning — [bug]
 
 The BLE provisioning flow worked only if everything succeeded on the first
@@ -2799,8 +2867,8 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 4540 assertions across
-  seventeen binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 4630 assertions across
+  twenty binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
@@ -2816,6 +2884,12 @@ enumerators — so the live half of this component was never affected.
   the suite fail, by assertion or by ASan. A green suite that would also pass
   against the original buggy code is worse than no suite, because it is
   evidence of nothing.
+
+  That has stayed the practice for tests added since, and the entries say so
+  where it applies — `test_i2c_shared_bus.c` was run against a copy of the HAL
+  with the fix removed and fails there on 4 of 30 checks, with the untouched
+  paths still passing. Where a counterfactual was *not* run, the entry says that
+  instead.
 
 - **New CI check for the BLE chunk-reassembly bug class,
   [`tests/ci/check_ble_chunk_clamp.py`](tests/ci/check_ble_chunk_clamp.py).**
@@ -3568,6 +3642,33 @@ enumerators — so the live half of this component was never affected.
 
 Listed because a changelog that only mentions what was finished is misleading.
 
+- **`EZPI_hal_i2c_master_deinit()` is dead code with two defects in it, and was
+  left alone deliberately.** It is declared in
+  [`ezlopi_hal_i2c_master.h`](ezlopi-hal/ezlopi-hal-i2c/ezlopi_hal_i2c_master.h#L100)
+  and called from nowhere in the tree — found while fixing the shared-bus init
+  bug above, which is in the same function's counterpart. Two things are wrong
+  with it:
+
+  ```c
+  if (1 == i2c_master_conf_ptr[i2c_master_conf->channel]->channel)
+  ```
+
+  That compares a channel *number* against 1, so on channel 0 — the only
+  channel any driver uses — it is `1 == 0` and the driver is never deleted. And
+  it dereferences the table entry without a NULL check, so calling it for a
+  channel that was never brought up is a null dereference. Separately, the
+  semaphore is deleted outside the `if (NULL != i2c_master_conf)` block, so one
+  device's teardown would destroy the lock every other I²C device is using.
+
+  Not fixed because the correct version is a design decision, not a
+  correction: tearing down a *shared* bus safely needs reference counting of
+  the devices on each channel, and there is no caller to tell us what the
+  intended lifecycle is. Writing a host test for it, as the shared-bus fix got,
+  would freeze a guessed lifecycle into place and make the guess look decided.
+  The honest state is that this function does not work and nothing calls it; the
+  moment something needs to call it, it needs designing. Recorded here so that
+  the next person to reach for it knows it has never run.
+
 - **`cJSON_GetObjectItem()` can return the wrong member, on trees this firmware
   builds itself.** Diagnosed in full in the device-configuration entry above.
   In one line: the key-length field means two different things depending on
@@ -3760,9 +3861,10 @@ Listed because a changelog that only mentions what was finished is misleading.
     multi-sensor setup there is while reporting that it was protecting the user.
     What is left of the original concern is narrower and needs per-bus
     knowledge, not a uniqueness test: two devices claiming the same pin *in
-    incompatible modes*, or on the same I²C channel with *different* SDA/SCL
-    pins, which that guard would silently resolve in favour of whichever device
-    initialised first.
+    incompatible modes*. The related I²C case — two devices on one channel with
+    *different* SDA/SCL — is no longer part of this gap; it is caught in the HAL
+    now, and investigating it turned up the reason the second sensor on a bus
+    never worked at all (see *I²C sensor bus* above).
 
   Two things a future attempt needs, both of which cost more than they look:
 

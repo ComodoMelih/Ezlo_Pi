@@ -73,7 +73,13 @@
 /*******************************************************************************
  *                          Extern Data Definitions
  *******************************************************************************/
-static s_ezlopi_i2c_master_t *i2c_master_conf_ptr[I2C_NUM_MAX] = {NULL, NULL};
+/* One initialiser, not two. I2C_NUM_MAX follows SOC_I2C_NUM, which is 2 on
+** esp32/esp32s2/esp32s3 but 1 on esp32c3 -- so the previous `{NULL, NULL}`
+** produced "excess elements in array initializer" on every c3 build. The
+** remaining elements of a static array are zero-initialised anyway, so this is
+** correct for any channel count and stops asserting a 2-channel layout that is
+** not universal. */
+static s_ezlopi_i2c_master_t *i2c_master_conf_ptr[I2C_NUM_MAX] = {NULL};
 
 static SemaphoreHandle_t i2c_semaphore = NULL;
 
@@ -107,6 +113,45 @@ ezlopi_error_t EZPI_hal_i2c_master_init(s_ezlopi_i2c_master_t *i2c_master_conf)
                 ESP_ERROR_CHECK(i2c_driver_install(i2c_master_conf->channel, I2C_MODE_MASTER, 0, 0, 0));
                 i2c_master_conf_ptr[i2c_master_conf->channel] = i2c_master_conf;
                 ret = EZPI_SUCCESS;
+            }
+            else
+            {
+                /* The channel is already installed because another device
+                ** brought it up. For I2C that is the ordinary case and not an
+                ** error: every sensor on a bus shares SDA and SCL and is
+                ** selected by address at transfer time, which is why the guard
+                ** above deliberately installs only once.
+                **
+                ** This branch did not exist, so ret kept its initial
+                ** EZPI_ERR_HAL_INIT_FAILED. Eight of the nine callers test
+                ** `EZPI_SUCCESS ==` and abandon the sensor on anything else,
+                ** and every I2C driver hardcodes channel I2C_NUM_0 rather than
+                ** reading it from the configuration -- so the *second* I2C
+                ** sensor in any configuration was always reported as failed
+                ** init, no matter which pins it named. Two sensors on one bus
+                ** is how I2C is normally used and it did not work.
+                **
+                ** All this branch has to establish is that the bus already
+                ** running is the one this device asked for. */
+                const s_ezlopi_i2c_master_t *installed =
+                    i2c_master_conf_ptr[i2c_master_conf->channel];
+
+                if ((installed->sda == i2c_master_conf->sda) &&
+                    (installed->scl == i2c_master_conf->scl))
+                {
+                    ret = EZPI_SUCCESS;
+                }
+                else
+                {
+                    /* One channel cannot drive two different pin pairs. Handing
+                    ** this device the pins the first one installed would put a
+                    ** sensor in the device list that can never respond, so name
+                    ** the clash instead of continuing quietly. */
+                    TRACE_E("I2C channel %u already on SDA %d/SCL %d, this device asks for SDA %d/SCL %d - refusing",
+                            (unsigned)i2c_master_conf->channel,
+                            installed->sda, installed->scl,
+                            i2c_master_conf->sda, i2c_master_conf->scl);
+                }
             }
         }
 
