@@ -264,8 +264,11 @@ int EZPI_scenes_operators_value_number_operations(l_fields_v2_t *item_exp_field,
     {
         ret = __evaluate_compareNumbers_or_compareStrings_with_group(devgrp_field, itemgrp_field, value_field, comparator_field);
     }
-    else
+    else if (comparator_field)
     {
+        /* The first branch tests comparator_field, so a NULL one reaches here
+        ** and used to be dereferenced unconditionally. The callee guards all
+        ** three of its own arguments, so only this deref needed a guard. */
         ret = __evaluate_compareNumber_or_compareStrings(item_exp_field, value_field, comparator_field->field_value.u_value.value_string);
     }
     return ret;
@@ -333,8 +336,10 @@ int EZPI_scenes_operators_value_strings_operations(l_fields_v2_t *devgrp_field, 
     {
         ret = __evaluate_compareNumbers_or_compareStrings_with_group(devgrp_field, itemgrp_field, value_field, comparator_field);
     }
-    else
+    else if (comparator_field)
     {
+        /* Same as the numeric variant above: comparator_field is tested in the
+        ** first branch, so it can be NULL here. */
         ret = __evaluate_compareNumber_or_compareStrings(item_exp_field, value_field, comparator_field->field_value.u_value.value_string);
     }
 

@@ -1209,12 +1209,12 @@ ezlopi_error_t EZPI_core_modes_store_to_nvs(void)
     {
         EZPI_core_modes_cjson_get_modes(cj_modes);
         char *modes_str = cJSON_PrintBuffered(__func__, cj_modes, 4096, false);
-        TRACE_D("length of 'modes_str': %d", strlen(modes_str));
 
         cJSON_Delete(__func__, cj_modes);
 
         if (modes_str)
         {
+            TRACE_D("length of 'modes_str': %d", strlen(modes_str));
             ret = EZPI_core_nvs_write_modes(modes_str);
             ezlopi_free(__func__, modes_str);
         }

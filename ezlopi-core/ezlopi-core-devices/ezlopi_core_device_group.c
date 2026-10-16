@@ -937,10 +937,10 @@ static ezlopi_error_t __edit_group_and_store_updated_to_nvs(uint32_t _id, cJSON 
         }
 
         char *update_grp_str = cJSON_PrintBuffered(__FUNCTION__, cj_grp_new, 1024, false);
-        TRACE_D("length of 'update_grp_str': %d", strlen(update_grp_str));
 
         if (update_grp_str)
         {
+            TRACE_D("length of 'update_grp_str': %d", strlen(update_grp_str));
             EZPI_core_nvs_delete_stored_data_by_name(grp_id_str);                              // delete --> '0x0..grp ' : '{}'
             ret = EZPI_core_nvs_write_str(update_grp_str, strlen(update_grp_str), grp_id_str); // write --> '0x0..grp ' : '{}'
 
@@ -1308,10 +1308,10 @@ static void ____remove_id_from_group_list(uint32_t _id, bool choice_of_trigger)
 
             // Now to rewrite the group list into NVS
             char *updated_grp_id_list_str = cJSON_PrintBuffered(__FUNCTION__, cj_grp_id_list, 1024, false);
-            TRACE_D("length of 'updated_grp_id_list_str': %d", strlen(updated_grp_id_list_str));
 
             if (updated_grp_id_list_str)
             {
+                TRACE_D("length of 'updated_grp_id_list_str': %d", strlen(updated_grp_id_list_str));
                 (choice_of_trigger) ? EZPI_core_nvs_write_item_groups(updated_grp_id_list_str) : EZPI_core_nvs_write_device_groups(updated_grp_id_list_str);
                 ezlopi_free(__FUNCTION__, updated_grp_id_list_str);
             }
@@ -1387,10 +1387,10 @@ static uint32_t __store_new_grp_in_nvs(cJSON *cj_new_grp, bool choice_of_trigger
         cJSON_AddStringToObject(__FUNCTION__, cj_new_grp, ezlopi__id_str, grp_id_str); // "_id" in nvs
 
         char *new_grp_str = cJSON_PrintBuffered(__FUNCTION__, cj_new_grp, 1024, false);
-        TRACE_D("length of 'new_grp_str': %d", strlen(new_grp_str));
 
         if (new_grp_str)
         {
+            TRACE_D("length of 'new_grp_str': %d", strlen(new_grp_str));
             if (EZPI_SUCCESS == EZPI_core_nvs_write_str(new_grp_str, strlen(new_grp_str) + 1, grp_id_str)) // writes to nvs as --> '0xC002e....'
             {
                 bool free_Grp_id_list_str = 1;
@@ -1417,10 +1417,10 @@ static uint32_t __store_new_grp_in_nvs(cJSON *cj_new_grp, bool choice_of_trigger
                         else
                         {
                             char *updated_grp_id_list_str = cJSON_PrintBuffered(__FUNCTION__, cj_grp_id_list, 1024, false);
-                            TRACE_D("length of 'updated_grp_id_list_str': %d", strlen(updated_grp_id_list_str));
 
                             if (updated_grp_id_list_str)
                             {
+                                TRACE_D("length of 'updated_grp_id_list_str': %d", strlen(updated_grp_id_list_str));
                                 TRACE_D("updated_grp_id_list_str: %s", updated_grp_id_list_str);
                                 if ((choice_of_trigger) ? EZPI_core_nvs_write_item_groups(updated_grp_id_list_str) : EZPI_core_nvs_write_device_groups(updated_grp_id_list_str))
                                 {

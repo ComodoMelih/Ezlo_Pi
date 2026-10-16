@@ -114,17 +114,23 @@ e_scene_value_type_v2_t EZPI_core_scenes_value_get_type(cJSON *cj_root, const ch
     char *value_type_str = NULL;
     e_scene_value_type_v2_t ret = EZLOPI_VALUE_TYPE_NONE;
 
-    if (cj_root && (NULL == cj_root->valuestring))
+    /* The NULL test used to sit inside the first condition, which meant a NULL
+    ** cj_root fell through to the else and was dereferenced there. Hoisting it
+    ** makes it dominate both branches. */
+    if (cj_root)
     {
-        cJSON *cj_value_type = cJSON_GetObjectItem(__FUNCTION__, cj_root, type_key_str);
-        if (cj_value_type && cj_value_type->valuestring)
+        if (NULL == cj_root->valuestring)
         {
-            value_type_str = cj_value_type->valuestring;
+            cJSON *cj_value_type = cJSON_GetObjectItem(__FUNCTION__, cj_root, type_key_str);
+            if (cj_value_type && cj_value_type->valuestring)
+            {
+                value_type_str = cj_value_type->valuestring;
+            }
         }
-    }
-    else if ((cj_root->type == cJSON_String) && (cj_root->valuestring))
-    {
-        value_type_str = cj_root->valuestring;
+        else if (cj_root->type == cJSON_String)
+        {
+            value_type_str = cj_root->valuestring;
+        }
     }
 
     ret = EZPI_core_scene_get_scene_value_type_enum(value_type_str);

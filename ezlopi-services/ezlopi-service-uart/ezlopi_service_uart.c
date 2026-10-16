@@ -1505,10 +1505,9 @@ static void ezpi_service_uart_get_config(void)
         char *my_json_string = cJSON_Print(__FUNCTION__, cj_root);
         cJSON_Delete(__FUNCTION__, cj_root); // free Json string
 
-        TRACE_D("length of 'my_json_string': %d", strlen(my_json_string));
-
         if (my_json_string)
         {
+            TRACE_D("length of 'my_json_string': %d", strlen(my_json_string));
             cJSON_Minify(my_json_string);
             const int len = strlen(my_json_string);
             EZPI_SERV_uart_tx_data(len, (uint8_t *)my_json_string); // Send the data over uart

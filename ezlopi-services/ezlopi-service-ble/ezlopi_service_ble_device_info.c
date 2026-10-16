@@ -893,12 +893,12 @@ static char *ezpi_device_info_jsonify(void)
         cJSON_AddNumberToObject(__FUNCTION__, root, ezlopi_internet_status_str, flag_internet_status);
 
         device_info = cJSON_PrintBuffered(__FUNCTION__, root, 4096, false);
-        TRACE_D("length of 'device_info': %d", strlen(device_info));
 
         cJSON_Delete(__FUNCTION__, root);
 
         if (device_info)
         {
+            TRACE_D("length of 'device_info': %d", strlen(device_info));
             TRACE_S("Created device info: %s", device_info);
         }
     }

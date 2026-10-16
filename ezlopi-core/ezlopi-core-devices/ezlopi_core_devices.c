@@ -1088,10 +1088,10 @@ static int ____store_bool_in_nvs_dev_mod_info(uint32_t nvs_device_id, const char
 
             // Now update the 'nvs_dev_id'
             char *updated_target_dev_mod_str = cJSON_PrintBuffered(__FUNCTION__, cj_target_dev_mod, 1024, false);
-            TRACE_D("length of 'updated_target_dev_mod_str': %d", strlen(updated_target_dev_mod_str));
 
             if (updated_target_dev_mod_str)
             {
+                TRACE_D("length of 'updated_target_dev_mod_str': %d", strlen(updated_target_dev_mod_str));
                 if (EZPI_SUCCESS == EZPI_core_nvs_write_str(updated_target_dev_mod_str, strlen(updated_target_dev_mod_str), (const char *)__device_id_str))
                 {
                     TRACE_S("Device_modification info updated.");
@@ -1123,10 +1123,10 @@ static int ____store_bool_in_nvs_dev_mod_info(uint32_t nvs_device_id, const char
 #endif
 
             char *new_dev_mod_str = cJSON_PrintBuffered(__FUNCTION__, cj_new_dev_mod, 1024, false);
-            TRACE_D("length of 'new_dev_mod_str': %d", strlen(new_dev_mod_str));
 
             if (new_dev_mod_str)
             {
+                TRACE_D("length of 'new_dev_mod_str': %d", strlen(new_dev_mod_str));
                 if (EZPI_SUCCESS == EZPI_core_nvs_write_str(new_dev_mod_str, strlen(new_dev_mod_str), (const char *)__device_id_str))
                 {
                     TRACE_S("New Device_modification info stored.");
@@ -1175,10 +1175,10 @@ static int ____store_string_in_nvs_dev_mod_info(uint32_t nvs_device_id, const ch
 
             // Now update the 'nvs_dev_id'
             char *updated_target_dev_mod_str = cJSON_PrintBuffered(__FUNCTION__, cj_target_dev_mod, 1024, false);
-            TRACE_D("length of 'updated_target_dev_mod_str': %d", strlen(updated_target_dev_mod_str));
 
             if (updated_target_dev_mod_str)
             {
+                TRACE_D("length of 'updated_target_dev_mod_str': %d", strlen(updated_target_dev_mod_str));
                 if (EZPI_SUCCESS == EZPI_core_nvs_write_str(updated_target_dev_mod_str, strlen(updated_target_dev_mod_str), (const char *)__device_id_str))
                 {
                     TRACE_S("Device_modification info updated.");
@@ -1210,10 +1210,10 @@ static int ____store_string_in_nvs_dev_mod_info(uint32_t nvs_device_id, const ch
 #endif
 
             char *new_dev_mod_str = cJSON_PrintBuffered(__FUNCTION__, cj_new_dev_mod, 1024, false);
-            TRACE_D("length of 'new_dev_mod_str': %d", strlen(new_dev_mod_str));
 
             if (new_dev_mod_str)
             {
+                TRACE_D("length of 'new_dev_mod_str': %d", strlen(new_dev_mod_str));
                 if (EZPI_SUCCESS == EZPI_core_nvs_write_str(new_dev_mod_str, strlen(new_dev_mod_str), (const char *)__device_id_str))
                 {
                     TRACE_S("New Device_modification info stored.");

@@ -192,6 +192,34 @@ jobs:
       - name: No pinned sdkconfig.h includes
         run: python3 tests/ci/check_sdkconfig_includes.py
 
+      # The only check here that is not a grep over a known shape, because the
+      # defect it covers is not a shape -- it is an ordering relation between a
+      # dereference and the NULL test written to guard it. There were 34 of
+      # them, the dominant one being a length trace sitting one line above its
+      # own `if (ptr)`:
+      #
+      #   char *s = cJSON_PrintBuffered(__FUNCTION__, cj, 4096, false);
+      #   TRACE_D("length of 's': %d", strlen(s));   /* deref */
+      #   if (s)                                     /* guard, too late */
+      #
+      # cJSON_PrintBuffered returns NULL on allocation failure, and TRACE_D is
+      # compiled into every shipped image (CONFIG_EZPI_UTIL_TRACE_EN=y in all
+      # four defaults), so these were live crashes, reachable from the cloud
+      # API, BLE and UART.
+      #
+      # The check was measured before being trusted, and its limits are
+      # recorded in the script: it fails with exactly 34 findings against the
+      # commit before the fix and passes after, but its recall on the two
+      # check-after-use defects fixed earlier in this branch is 1 of 2, and it
+      # missed a 30th instance of the idiom that a grep then found. A green run
+      # means these cannot come back silently -- not that the class is absent.
+      # The scan takes 12 seconds locally, plus the cppcheck install.
+      - name: No null-pointer dereferences in first-party sources
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cppcheck
+          python3 tests/ci/check_null_deref.py
+
   firmware:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest

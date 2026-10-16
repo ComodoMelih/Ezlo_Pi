@@ -161,10 +161,10 @@ ezlopi_error_t EZPI_scenes_expressions_update_nvs(char *nvs_exp_id_key, cJSON *c
     if (cj_updated_exp)
     {
         char *update_exp_str = cJSON_PrintBuffered(__FUNCTION__, cj_updated_exp, 1024, false);
-        TRACE_D("length of 'update_exp_str': %d", strlen(update_exp_str));
 
         if (update_exp_str)
         {
+            TRACE_D("length of 'update_exp_str': %d", strlen(update_exp_str));
             EZPI_core_nvs_delete_stored_data_by_name(nvs_exp_id_key);
             ret = EZPI_core_nvs_write_str(update_exp_str, strlen(update_exp_str), nvs_exp_id_key);
             if (EZPI_SUCCESS == ret)
@@ -1334,10 +1334,10 @@ static uint32_t __expression_store_to_nvs(uint32_t exp_id, cJSON *cj_expression)
     if (0 == exp_id)
     {
         char *exp_string = cJSON_PrintBuffered(__FUNCTION__, cj_expression, 1024, false);
-        TRACE_D("length of 'exp_string': %d", strlen(exp_string));
 
         if (exp_string)
         {
+            TRACE_D("length of 'exp_string': %d", strlen(exp_string));
             exp_id = EZPI_core_cloud_generate_expression_id();
             if (exp_id)
             {
@@ -1378,10 +1378,10 @@ static uint32_t __expression_store_to_nvs(uint32_t exp_id, cJSON *cj_expression)
                             if (cJSON_AddItemToArray(cj_exp_id_list, cj_exp_id))
                             {
                                 exp_id_list_str = cJSON_PrintBuffered(__FUNCTION__, cj_exp_id_list, 1024, false);
-                                TRACE_D("length of 'exp_id_list_str': %d", strlen(exp_id_list_str));
 
                                 if (exp_id_list_str)
                                 {
+                                    TRACE_D("length of 'exp_id_list_str': %d", strlen(exp_id_list_str));
                                     EZPI_core_nvs_write_scenes_expressions(exp_id_list_str);
                                     ezlopi_free(__FUNCTION__, exp_id_list_str);
                                 }

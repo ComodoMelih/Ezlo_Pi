@@ -202,7 +202,11 @@ uint32_t EZPI_scenes_scripts_add_to_head(uint32_t script_id, cJSON *cj_script)
         }
 
         curr_script->next = __scripts_create_node(script_id, cj_script);
-        if (curr_script)
+        /* The check was on curr_script, which the loop above already proved
+        ** non-NULL, so it was always taken and ->next->id was dereferenced even
+        ** when __scripts_create_node returned NULL. The node that needs testing
+        ** is the new one -- which is exactly what the else branch below does. */
+        if (curr_script->next)
         {
             new_script_id = curr_script->next->id;
         }
@@ -279,10 +283,10 @@ void EZPI_scenes_scripts_update(cJSON *cj_script)
                     }
 
                     char *script_to_update = cJSON_PrintBuffered(__FUNCTION__, cj_script, 4096, false);
-                    TRACE_D("length of 'script_to_update': %d", strlen(script_to_update));
 
                     if (script_to_update)
                     {
+                        TRACE_D("length of 'script_to_update': %d", strlen(script_to_update));
                         EZPI_core_nvs_write_str(script_to_update, strlen(script_to_update), cj_script_id->valuestring);
                         ezlopi_free(__FUNCTION__, script_to_update);
                     }
@@ -396,10 +400,10 @@ static void __scripts_add_script_id(uint32_t script_id)
             if (cJSON_AddItemToArray(cj_script_ids, cj_script_id))
             {
                 char *script_ids_str_updated = cJSON_PrintBuffered(__FUNCTION__, cj_script_ids, 1024, false);
-                TRACE_D("length of 'script_ids_str_updated': %d", strlen(script_ids_str_updated));
 
                 if (script_ids_str_updated)
                 {
+                    TRACE_D("length of 'script_ids_str_updated': %d", strlen(script_ids_str_updated));
                     EZPI_core_nvs_write_scenes_scripts(script_ids_str_updated);
                     ezlopi_free(__FUNCTION__, script_ids_str_updated);
                 }
@@ -439,10 +443,10 @@ static void __scripts_remove_id_and_update_list(uint32_t script_id)
                         cJSON_DeleteItemFromArray(__FUNCTION__, cj_scripts_ids, i);
 
                         char *scripts_ids_str_updated = cJSON_PrintBuffered(__FUNCTION__, cj_scripts_ids, 1024, false);
-                        TRACE_D("length of 'scripts_ids_str_updated': %d", strlen(scripts_ids_str_updated));
 
                         if (scripts_ids_str_updated)
                         {
+                            TRACE_D("length of 'scripts_ids_str_updated': %d", strlen(scripts_ids_str_updated));
                             EZPI_core_nvs_write_scenes_scripts(scripts_ids_str_updated);
 
                             ezlopi_free(__FUNCTION__, scripts_ids_str_updated);

@@ -188,10 +188,10 @@ uint32_t EZPI_core_scenes_store_new_scene_v2(cJSON *cj_new_scene)
         }
 
         char *new_scene_str = cJSON_PrintBuffered(__FUNCTION__, cj_new_scene, 4096, false);
-        TRACE_D("length of 'new_scene_str': %d", strlen(new_scene_str));
 
         if (new_scene_str)
         {
+            TRACE_D("length of 'new_scene_str': %d", strlen(new_scene_str));
             if (EZPI_SUCCESS == EZPI_core_nvs_write_str(new_scene_str, strlen(new_scene_str) + 1, new_scene_id_str))
             {
                 bool free_scene_list_str = 1;
@@ -217,10 +217,10 @@ uint32_t EZPI_core_scenes_store_new_scene_v2(cJSON *cj_new_scene)
                         else
                         {
                             char *updated_scenes_list = cJSON_PrintBuffered(__FUNCTION__, cj_scenes_list, 1024, false);
-                            TRACE_D("length of 'updated_scenes_list': %d", strlen(updated_scenes_list));
 
                             if (updated_scenes_list)
                             {
+                                TRACE_D("length of 'updated_scenes_list': %d", strlen(updated_scenes_list));
                                 TRACE_D("updated_scenes_list: %s", updated_scenes_list);
                                 if (EZPI_SUCCESS == EZPI_core_nvs_scene_set_v2(updated_scenes_list))
                                 {
@@ -395,10 +395,10 @@ ezlopi_error_t EZPI_core_scenes_enable_disable_scene_by_id_v2(uint32_t _id, bool
 
                     /*  DONOT use : 'EZPI_core_scenes_edit_store_updated_to_nvs' .. Here */
                     char *update_scene_str = cJSON_PrintBuffered(__FUNCTION__, cj_scene, 4096, false);
-                    TRACE_D("length of 'update_scene_str': %d", strlen(update_scene_str));
 
                     if (update_scene_str)
                     {
+                        TRACE_D("length of 'update_scene_str': %d", strlen(update_scene_str));
                         cJSON *cj_scene_id = cJSON_GetObjectItem(__FUNCTION__, cj_scene, ezlopi__id_str);
                         if (cj_scene_id && cj_scene_id->valuestring)
                         {
@@ -450,10 +450,10 @@ void EZPI_core_scenes_remove_id_from_list_v2(uint32_t _id)
                         cJSON_DeleteItemFromArray(__FUNCTION__, cj_scene_id_list, idx);
 
                         char *updated_id_list_str = cJSON_PrintBuffered(__FUNCTION__, cj_scene_id_list, 1024, false);
-                        TRACE_D("length of 'updated_id_list_str': %d", strlen(updated_id_list_str));
 
                         if (updated_id_list_str)
                         {
+                            TRACE_D("length of 'updated_id_list_str': %d", strlen(updated_id_list_str));
                             EZPI_core_nvs_scene_set_v2(updated_id_list_str);
                             ezlopi_free(__FUNCTION__, updated_id_list_str);
                         }
@@ -632,10 +632,10 @@ ezlopi_error_t EZPI_core_scenes_block_enable_set_reset(const char *sceneId_str, 
                         /*  DONOT use : 'EZPI_core_scenes_edit_store_updated_to_nvs' .. Here */
                         {
                             char *update_scene_str = cJSON_PrintBuffered(__FUNCTION__, cj_scene, 4096, false);
-                            TRACE_D("length of 'update_scene_str': %d", strlen(update_scene_str));
 
                             if (update_scene_str)
                             {
+                                TRACE_D("length of 'update_scene_str': %d", strlen(update_scene_str));
                                 cJSON *cj_scene_id = cJSON_GetObjectItem(__FUNCTION__, cj_scene, ezlopi__id_str);
                                 if (cj_scene_id && cj_scene_id->valuestring)
                                 {
@@ -705,10 +705,10 @@ ezlopi_error_t EZPI_core_scenes_set_meta_by_id(const char *sceneId_str, const ch
                     {
                         /*  DONOT use : 'EZPI_core_scenes_edit_store_updated_to_nvs' .. Here */
                         char *update_scene_str = cJSON_PrintBuffered(__FUNCTION__, cj_scene, 4096, false);
-                        TRACE_D("length of 'update_scene_str': %d", strlen(update_scene_str));
 
                         if (update_scene_str)
                         {
+                            TRACE_D("length of 'update_scene_str': %d", strlen(update_scene_str));
                             cJSON *cj_scene_id = cJSON_GetObjectItem(__FUNCTION__, cj_scene, ezlopi__id_str);
                             if (cj_scene_id && cj_scene_id->valuestring)
                             {
@@ -2088,10 +2088,10 @@ int EZPI_core_scenes_set_reset_latch_enable(const char *sceneId_str, const char 
                     {
                         /*  DONOT use : 'EZPI_core_scenes_edit_store_updated_to_nvs' .. Here */
                         char *update_scene_str = cJSON_PrintBuffered(__FUNCTION__, cj_scene, 4096, false);
-                        TRACE_D("length of 'update_scene_str': %d", strlen(update_scene_str));
 
                         if (update_scene_str)
                         {
+                            TRACE_D("length of 'update_scene_str': %d", strlen(update_scene_str));
                             cJSON *cj_scene_id = cJSON_GetObjectItem(__FUNCTION__, cj_scene, ezlopi__id_str);
                             if (cj_scene_id && cj_scene_id->valuestring)
                             {

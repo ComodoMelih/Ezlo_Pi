@@ -2795,6 +2795,114 @@ enumerators — so the live half of this component was never affected.
   files. Recorded in [`CONTRIBUTING.md`](CONTRIBUTING.md) so the sweep is not
   repeated from scratch.
 
+### Null dereferences — [sec]
+
+- **34 pointers were dereferenced above the `NULL` test written to guard
+  them**, across thirteen files in `ezlopi-core` and `ezlopi-services`. Thirty
+  were the same copy-pasted line:
+
+  ```c
+  char *updated_rooms = cJSON_PrintBuffered(__FUNCTION__, cj_rooms, 4096, false);
+  TRACE_D("length of 'updated_rooms': %d", strlen(updated_rooms));
+  if (updated_rooms)                       /* the guard, one line too late */
+  {
+      EZPI_core_nvs_write_rooms(updated_rooms);
+  ```
+
+  Both halves of that matter, and both were checked rather than assumed.
+  `cJSON_PrintBuffered()`
+  ([`cjext.c:1383`](ezlopi-components/cjext/cjext.c#L1383)) returns `NULL` on
+  three paths — a negative prebuffer
+  ([1389](ezlopi-components/cjext/cjext.c#L1389)), an `ezlopi_malloc()` failure
+  ([1395](ezlopi-components/cjext/cjext.c#L1395)), and a `print_value()`
+  failure ([1406](ezlopi-components/cjext/cjext.c#L1406)) — which is exactly
+  why every one of these sites already had an `if (ptr)` written for it. And
+  the trace is not compiled out: `CONFIG_EZPI_UTIL_TRACE_EN` is `default y` in
+  [`Kconfig.projbuild`](ezlopi-main/Kconfig.projbuild#L18) and `=y` in all four
+  committed `sdkconfig.defaults.*`, so `strlen(NULL)` ran in every shipped
+  image. The paths reaching them are the ordinary ones: renaming a room, adding
+  a device group, saving a scene, editing an expression, the BLE device-info
+  characteristic, and the UART config query.
+
+  The fix is a relocation, not a rewrite — each trace moved inside the guard
+  that was already there. It was applied by a script that refuses any site not
+  matching the template exactly and reports it instead, so the two sites where
+  the trace was already correctly placed were skipped and named rather than
+  silently touched.
+
+  The other four were the same error in different shapes:
+
+  - [`ezlopi_core_scenes_scripts.c:204`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_scripts.c#L204)
+    — `curr_script->next = __scripts_create_node(...); if (curr_script)`. The
+    test names the pointer the loop above has already proved non-`NULL`, so it
+    was always taken and `curr_script->next->id` was read regardless.
+    `__scripts_create_node()` returns `NULL` for any script object missing a
+    string `name` or `code`, which arrives over the cloud API. The `else`
+    branch three lines below tests `script_head`, the pointer it actually
+    assigned — so the correct form was already in the same function.
+  - [`ezlopi_core_scenes_operators.c:272`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_operators.c#L272)
+    and [`:343`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_operators.c#L343)
+    — `if (devgrp && itemgrp && value && comparator)` with the
+    `else` dereferencing `comparator` unconditionally. The first branch tests
+    it, so `NULL` is a value that reaches the second. The callee
+    ([`:1235`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_operators.c#L1235))
+    already guards all three of its own arguments at
+    [`:1239`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_operators.c#L1239),
+    so only the caller's deref needed a guard.
+  - [`ezlopi_core_scenes_value.c:120`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_value.c#L120)
+    — `if (cj_root && (NULL == cj_root->valuestring))` with the `else` reading
+    `cj_root->type`. That condition is false when `cj_root` is `NULL`, so the
+    `NULL` case fell into the branch that dereferences it. The test is now
+    hoisted so it dominates both branches.
+
+  Found by wiring up a static analyser, which the previous release recorded as
+  the honest way to close this gap and left undone. `cppcheck` reported 34
+  findings covering 33 of these 34 defects — two of the findings are the one
+  `scripts.c` defect, and the thirtieth trace site — `ezlopi_core_scenes_v2.c`
+  line 2091 as the tree stood before this change, now
+  [`:2094`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_v2.c#L2094) —
+  it did not report at all. That one was found by grepping for the trace text
+  once the shape was known, and it is fixed with the rest.
+
+  Before being trusted the analyser was run against known-bad input the way a
+  test harness should be. Of the two check-after-use defects fixed earlier in
+  this branch it finds one (the `isprint(ret[0])` in `factory_info`) and misses
+  the other (the `strlen()`s in `ezpi_provisioning_info_read_func()`), even at
+  `--enable=all --check-level=exhaustive`. Recall is therefore 1 of 2 on the
+  known cases and 29 of 30 on the idiom. That is recorded in the check itself,
+  because a green run means these 34 cannot come back silently — not that the
+  class is gone.
+
+  It is now [`tests/ci/check_null_deref.py`](tests/ci/check_null_deref.py) in
+  the hygiene job, scoped to the null class over the seven first-party
+  component directories, where the baseline is zero. It fails with exactly 34
+  findings against the preceding commit and passes after, and it self-tests on
+  three fixtures first — broken ordering must be flagged, correct ordering must
+  not be, and the misdirected-guard shape must be — so a missing or renamed
+  checker fails loudly instead of passing vacuously. The scan takes 12 seconds,
+  plus the `cppcheck` install.
+
+  `--enable=warning` alone is enough: `style` and `performance` add about 460
+  further findings in this tree, none in this class, and a check whose baseline
+  moves with style churn is a check that gets switched off. `ezlopi-components`
+  is out of scope on measured grounds — it reports 70 findings and every one is
+  in vendored code (31 in `cjext/`, 39 in the upstream Lua interpreter), with
+  nothing flagged in this project's own drivers there.
+
+  Verified by building all four targets and comparing against the preceding
+  commit by set difference rather than by count: **zero warnings added and zero
+  removed** on esp32, esp32s2, esp32s3 and esp32c3. The images grow by 112–160
+  bytes, which is the right direction — the four new guards are real tests, and
+  a trace that had been *deleted* rather than moved would have made the image
+  shrink. Confirmed directly: the esp32c3 image contains 25 `length of ` format
+  strings both before and after.
+
+  Counting was deliberately not used as the evidence here. The first attempt
+  counted warnings in files the change touched and reported 10–14 per target;
+  every one was a pre-existing `#warning` pragma or a `-Wdiscarded-qualifiers`
+  at a line the fix never went near — `ezlopi_service_uart.c:443` against an
+  edit at `:1508`. A count over a file is the wrong unit.
+
 ### Dead null checks — [bug]
 
 - **31 checks that compared an array's own address against NULL.** Across seven
@@ -3735,37 +3843,38 @@ enumerators — so the live half of this component was never affected.
 
 Listed because a changelog that only mentions what was finished is misleading.
 
-- **"Check the pointer after using it" has now turned up twice in unrelated
-  files, and nothing systematically looks for it.** Both instances had the same
-  shape — a pointer assigned from a call that can return `NULL`, read on the
-  next line, and tested one line below that:
+- **The check-after-use analyser is in CI now, but its recall is 1 of 2 on the
+  cases we can measure against.** `cppcheck` found 33 instances of the class
+  and they are fixed (see *Null dereferences* above), so this gap is much
+  smaller than it was — but it is not closed, and the size of the remainder is
+  unknown rather than small.
+
+  What is known: of the two check-after-use defects fixed earlier in this
+  branch, the analyser finds
   [`ezlopi_core_factory_info.c:564`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L564)
-  (`isprint(ret[0])` before `if (ret)`) and
+  (`isprint(ret[0])` before `if (ret)`) and does not find
   `ezpi_provisioning_info_read_func()` (two `strlen()`s before
-  `if (NULL != g_provisioning_info_base64)`). The second was found only because
-  its sibling `ezpi_dynamic_config_read_func()` guards the identical block, so
-  the divergence was visible by comparison; that is luck, not method.
+  `if (NULL != g_provisioning_info_base64)`), even at `--enable=all
+  --check-level=exhaustive`. It also missed one of the thirty trace sites,
+  `ezlopi_core_scenes_v2.c:2091`, which a grep caught once the shape was known.
+  Two out of three is a useful check and a poor guarantee.
 
-  What makes this a gap rather than a to-do is that the obvious mechanisations
-  do not work. The compiler cannot see it: the pointer is genuinely maybe-NULL
-  and the deref is genuinely before the test, but `-Wnull-dereference` needs the
-  NULL to be provable on a path, and here it depends on whether a malloc
-  failed. A grep cannot see it either, because the idiom has no stable textual
-  form — the use may be `p[0]`, `strlen(p)`, `p->field`, or a call taking `p`,
-  and the test below may be `if (p)`, `if (NULL != p)` or an early return.
+  The main reason is structural: no include paths are passed, because resolving
+  the IDF header graph per translation unit needs a `compile_commands.json`
+  from a configured build, which would tie the check to a full build and to
+  whichever target was configured last. Without headers the analyser cannot
+  expand IDF macros and loses paths. Running it *with* a real compilation
+  database is the obvious next step and would be the way to find out how much
+  is left.
 
-  The honest option is a static analyser that handles this class properly —
-  `clang --analyze` or `cppcheck --enable=nullPointer` over the component
-  sources, neither of which is wired into CI. The alternative, reading every
-  call site, is larger than it looks: the `EZPI_core_factory_info_v3_get_*`
-  family alone is called from 116 places, and most of those getters return a
-  freshly allocated string that is `NULL` on four separate paths. That count is
-  a reason to automate rather than audit, and it is only one family of
-  `NULL`-returning getters.
-
-  Noting it rather than doing it, because inventing a grep that catches the two
-  cases already known and calling that a check is exactly the cry-wolf pattern
-  this file argues against elsewhere.
+  The alternatives remain worse. The compiler cannot see this class:
+  `-Wnull-dereference` needs the `NULL` to be provable on a path, and here it
+  depends on whether a malloc failed. A grep cannot either — the use may be
+  `p[0]`, `strlen(p)`, `p->field` or a call taking `p`, and the test below may
+  be `if (p)`, `if (NULL != p)` or an early return. And reading every site by
+  hand is larger than it looks: the `EZPI_core_factory_info_v3_get_*` family
+  alone is called from 116 places, and most of those getters return a freshly
+  allocated string that is `NULL` on four separate paths.
 
 - **`EZPI_hal_i2c_master_deinit()` is dead code with two defects in it, and was
   left alone deliberately.** It is declared in

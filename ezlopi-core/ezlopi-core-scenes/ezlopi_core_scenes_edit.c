@@ -99,10 +99,10 @@ ezlopi_error_t EZPI_core_scenes_edit_store_updated_to_nvs(cJSON *cj_updated_scen
         }
 
         char *update_scene_str = cJSON_PrintBuffered(__FUNCTION__, cj_updated_scene, 4096, false);
-        TRACE_D("length of 'update_scene_str': %d", strlen(update_scene_str));
 
         if (update_scene_str)
         {
+            TRACE_D("length of 'update_scene_str': %d", strlen(update_scene_str));
             cJSON *cj_scene_id = cJSON_GetObjectItem(__FUNCTION__, cj_updated_scene, ezlopi__id_str);
             if (cj_scene_id && cj_scene_id->valuestring)
             {

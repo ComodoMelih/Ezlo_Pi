@@ -179,10 +179,10 @@ int EZPI_core_room_name_set(cJSON *cj_room)
                         if (ret)
                         {
                             char *updated_rooms = cJSON_PrintBuffered(__FUNCTION__, cj_rooms, 4096, false);
-                            TRACE_D("length of 'updated_rooms': %d", strlen(updated_rooms));
 
                             if (updated_rooms)
                             {
+                                TRACE_D("length of 'updated_rooms': %d", strlen(updated_rooms));
                                 EZPI_core_nvs_write_rooms(updated_rooms);
                                 ezlopi_free(__FUNCTION__, updated_rooms);
                             }
@@ -281,10 +281,10 @@ int EZPI_core_room_add_to_nvs(cJSON *cj_room)
 #endif
 
                 char *updated_rooms_str = cJSON_PrintBuffered(__FUNCTION__, cj_rooms, 4096, false);
-                TRACE_D("length of 'updated_rooms_str': %d", strlen(updated_rooms_str));
 
                 if (updated_rooms_str)
                 {
+                    TRACE_D("length of 'updated_rooms_str': %d", strlen(updated_rooms_str));
                     if (EZPI_core_nvs_write_rooms(updated_rooms_str))
                     {
                         TRACE_I("room saved");
@@ -369,10 +369,10 @@ int EZPI_core_room_reorder(cJSON *cj_rooms_ids)
                 if (cJSON_GetArraySize(cj_reordered_rooms))
                 {
                     char *reordered_rooms_str = cJSON_PrintBuffered(__FUNCTION__, cj_reordered_rooms, 4096, false);
-                    TRACE_D("length of 'reordered_rooms_str': %d", strlen(reordered_rooms_str));
 
                     if (reordered_rooms_str)
                     {
+                        TRACE_D("length of 'reordered_rooms_str': %d", strlen(reordered_rooms_str));
                         EZPI_core_nvs_write_rooms(reordered_rooms_str);
                         ezlopi_free(__FUNCTION__, reordered_rooms_str);
                     }
@@ -665,10 +665,10 @@ static int __remove_room_from_nvs_by_id(uint32_t a_room_id)
                 CJSON_TRACE("cj_rooms", cj_rooms);
 #endif
                 char *updated_rooms = cJSON_PrintBuffered(__FUNCTION__, cj_rooms, 4096, false);
-                TRACE_D("length of 'updated_rooms': %d", strlen(updated_rooms));
 
                 if (updated_rooms)
                 {
+                    TRACE_D("length of 'updated_rooms': %d", strlen(updated_rooms));
                     ret = 1;
                     EZPI_core_nvs_write_rooms(updated_rooms);
                     ezlopi_free(__FUNCTION__, updated_rooms);
