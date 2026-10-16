@@ -47,6 +47,8 @@
 
 #include "ezlopi_core_scenes_v2.h"
 #include "ezlopi_core_scenes_delete.h"
+/* For s_item_exp_data_t, which FIELD_USER_ARG_ITEM_EXP has to look inside. */
+#include "ezlopi_core_scenes_when_methods_helper_functions.h"
 
 /*******************************************************************************
  *                          Extern Data Declarations
@@ -206,6 +208,28 @@ void EZPI_core_scenes_delete_field_user_arg(l_fields_v2_t *field)
         if (field->user_arg)
         {
             cJSON_Delete(__FUNCTION__, (cJSON *)field->user_arg);
+        }
+        break;
+    }
+    case FIELD_USER_ARG_ITEM_EXP:
+    {
+        /* The one block here that is not flat: isItemStateChanged remembers the
+         * last value it saw, and when that value is a string the struct owns a
+         * copy of it. Releasing only the outer block would leak the copy.
+         *
+         * Reading sample_data.e_type to decide is only sound because
+         * s_item_expn_data_t is a struct. While it was a union, e_type shared
+         * storage with the value and was destroyed by whoever stored one, so
+         * this arm would have been deciding on the low bytes of a double. */
+        if (field->user_arg)
+        {
+            s_item_exp_data_t *item_exp = (s_item_exp_data_t *)field->user_arg;
+            if ((VALUE_TYPE_STRING == item_exp->sample_data.e_type) &&
+                item_exp->sample_data.u_value.value_string)
+            {
+                ezlopi_free(__FUNCTION__, item_exp->sample_data.u_value.value_string);
+            }
+            ezlopi_free(__FUNCTION__, item_exp);
         }
         break;
     }

@@ -157,6 +157,7 @@ extern "C"
         FIELD_USER_ARG_NONE = 0, /* unset, or an integer held in the pointer */
         FIELD_USER_ARG_HEAP,     /* a flat block from ezlopi_malloc          */
         FIELD_USER_ARG_CJSON,    /* a cJSON tree this field owns             */
+        FIELD_USER_ARG_ITEM_EXP, /* an s_item_exp_data_t, which owns a string */
     } e_field_user_arg_type_t;
 
     typedef struct l_fields_v2

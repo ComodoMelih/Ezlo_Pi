@@ -24,6 +24,16 @@
  * is visible to a plain assert, so a version of this file that only asserted
  * would pass against the broken code.
  *
+ * Tests 9 to 11 are about the one thing the slot can hold that is not flat.
+ * `isItemStateChanged` remembers the last value it saw in an
+ * `s_item_exp_data_t`, and when that value is a string the struct owns a copy
+ * of it -- two allocations behind one pointer, which is why it has a tag of
+ * its own rather than sharing FIELD_USER_ARG_HEAP. Deciding which of the two
+ * to release means reading the struct's own type tag, and that tag only became
+ * readable when `s_item_expn_data_t` stopped being a `union` of the tag and
+ * the value it describes; test 9 is what pins that down, and it is the one
+ * test here an assert is the right adjudicator for, being a layout claim.
+ *
  * Run: make -C tests/host run-scenefields
  */
 
@@ -40,6 +50,8 @@
 #include "cjext.h"
 #include "ezlopi_core_scenes_v2.h"
 #include "ezlopi_core_scenes_delete.h"
+/* For s_item_exp_data_t -- the one thing the slot can hold that is not flat. */
+#include "ezlopi_core_scenes_when_methods_helper_functions.h"
 
 static int checks = 0;
 #define CHECK(cond, what)                                      \
@@ -239,6 +251,100 @@ static void test_when_block_path(void)
     checks++;
 }
 
+/* 9. The tag inside s_item_expn_data_t survives the value it describes.
+ *
+ * This is a layout check rather than a behaviour check, and it is the one test
+ * here that an assert is the right adjudicator for. s_item_expn_data_t used to
+ * be a `union` of `e_type` and `u_value`, so the nine writers that set the tag
+ * and then stored the value overwrote the tag with the value's bytes. Measured
+ * against the union: a stored string left e_type holding pointer bytes, a
+ * stored `true` left it reading as VALUE_TYPE_NUMBER, and 23.0 left it reading
+ * as VALUE_TYPE_UNDEFINED.
+ *
+ * It matters here, and not only in the when-method, because the ITEM_EXP arm of
+ * the destructor reads this tag to decide whether the struct owns a string. */
+static void test_item_exp_tag_survives_its_value(void)
+{
+    s_item_exp_data_t d;
+    char buf[] = "a string";
+
+    memset(&d, 0, sizeof(d));
+    d.sample_data.e_type = VALUE_TYPE_STRING;
+    d.sample_data.u_value.value_string = buf;
+    CHECK(VALUE_TYPE_STRING == d.sample_data.e_type, "string tag survives the pointer");
+
+    memset(&d, 0, sizeof(d));
+    d.sample_data.e_type = VALUE_TYPE_BOOL;
+    d.sample_data.u_value.value_bool = true;
+    CHECK(VALUE_TYPE_BOOL == d.sample_data.e_type, "bool tag survives a true");
+
+    memset(&d, 0, sizeof(d));
+    d.sample_data.e_type = VALUE_TYPE_NUMBER;
+    d.sample_data.u_value.value_double = 23.0;
+    CHECK(VALUE_TYPE_NUMBER == d.sample_data.e_type, "number tag survives 23.0");
+
+    /* 0.1 rather than another integer: its low mantissa bits are non-zero, so
+     * under the union this one corrupted the tag into a value that is not any
+     * valid enumerator at all, rather than into a different valid one. */
+    memset(&d, 0, sizeof(d));
+    d.sample_data.e_type = VALUE_TYPE_NUMBER;
+    d.sample_data.u_value.value_double = 0.1;
+    CHECK(VALUE_TYPE_NUMBER == d.sample_data.e_type, "number tag survives 0.1");
+}
+
+/* 10. A remembered item state that owns a string: both allocations go.
+ *
+ * isItemStateChanged keeps the last value it saw in an s_item_exp_data_t, and
+ * when that value is a string the struct holds its own copy. So the slot holds
+ * two allocations behind one pointer, which is why it needs a tag of its own
+ * rather than HEAP -- LSan reports the inner one if only the outer is freed. */
+static void test_item_exp_user_arg_releases_inner_string(void)
+{
+    l_fields_v2_t *f = new_field("itemState");
+
+    s_item_exp_data_t *d = malloc(sizeof(s_item_exp_data_t));
+    assert(d);
+    memset(d, 0, sizeof(*d));
+    d->sample_data.e_type = VALUE_TYPE_STRING;
+    d->sample_data.u_value.value_string = malloc(64);
+    assert(d->sample_data.u_value.value_string);
+    snprintf(d->sample_data.u_value.value_string, 64, "a value long enough to be its own allocation");
+
+    f->user_arg = d;
+    f->user_arg_type = FIELD_USER_ARG_ITEM_EXP;
+
+    EZPI_core_scenes_delete_field_user_arg(f);
+    CHECK(NULL == f->user_arg, "item-exp slot cleared");
+    CHECK(FIELD_USER_ARG_NONE == f->user_arg_type, "item-exp tag reset");
+
+    EZPI_scenes_delete_fields(f);
+}
+
+/* 11. The same struct holding a number, which must NOT have its value treated
+ * as a pointer.
+ *
+ * The obvious wrong implementation of the arm above is to free value_string
+ * unconditionally. For a remembered number that is a free() of the low half of
+ * a double -- the same class of defect as the tick count in test 1 -- so ASan
+ * adjudicates this one. 20000.0 is chosen so the bytes would form a plausible
+ * small address rather than an obviously invalid one. */
+static void test_item_exp_number_is_not_freed_as_a_pointer(void)
+{
+    l_fields_v2_t *f = new_field("itemState");
+
+    s_item_exp_data_t *d = malloc(sizeof(s_item_exp_data_t));
+    assert(d);
+    memset(d, 0, sizeof(*d));
+    d->sample_data.e_type = VALUE_TYPE_NUMBER;
+    d->sample_data.u_value.value_double = 20000.0;
+
+    f->user_arg = d;
+    f->user_arg_type = FIELD_USER_ARG_ITEM_EXP;
+
+    EZPI_scenes_delete_fields(f);
+    checks++;
+}
+
 int main(void)
 {
     test_scalar_user_arg_is_not_freed();
@@ -249,6 +355,9 @@ int main(void)
     test_mixed_list();
     test_null_is_a_noop();
     test_when_block_path();
+    test_item_exp_tag_survives_its_value();
+    test_item_exp_user_arg_releases_inner_string();
+    test_item_exp_number_is_not_freed_as_a_pointer();
 
     printf("test_scenefields: %d checks passed\n", checks);
     return 0;

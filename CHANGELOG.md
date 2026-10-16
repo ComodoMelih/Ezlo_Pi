@@ -539,6 +539,89 @@ None of these have been exercised on physical hardware; see Known gaps.
   All four targets build clean, with the fixed destructor present in each ELF.
   Not exercised on physical hardware; see Known gaps.
 
+### Scene triggers — [bug]
+
+- **A type tag stored in a `union` with the value it describes, so storing the
+  value destroyed the tag.**
+  `s_item_expn_data_t` in
+  [`ezlopi_core_scenes_when_methods_helper_functions.h`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.h)
+  was declared `typedef union` over exactly two members: `e_value_type_t
+  e_type`, commented "the data's nature", and `u_field_value_v2_t u_value`,
+  commented "reutilizing the field structure to store extracted data". The
+  field structure it meant to reuse is `s_field_value_t`, which holds those
+  same two members as a **struct**. One keyword apart, and the two shapes are
+  not equivalent in any way: in the struct the tag and the value have separate
+  storage, in the union they are the same bytes.
+
+  So every one of the nine writers did `sample_data.e_type = VALUE_TYPE_x;` and
+  then immediately stored `sample_data.u_value.<member>` over the top of the
+  tag it had just set. Measured rather than argued about, by compiling the real
+  headers and reproducing that two-line sequence:
+
+  | written as | read back as, while it was a union |
+  |---|---|
+  | `VALUE_TYPE_STRING` | not a valid tag (the pointer's low bytes) |
+  | `VALUE_TYPE_BOOL`, value `true` | `VALUE_TYPE_NUMBER` |
+  | `VALUE_TYPE_BOOL`, value `false` | `VALUE_TYPE_UNDEFINED` |
+  | `VALUE_TYPE_NUMBER`, value `23.0` | `VALUE_TYPE_UNDEFINED` |
+  | `VALUE_TYPE_NUMBER`, value `0.1` | not a valid tag |
+
+  The tag never survived. `sizeof` confirms the cause: the union was 8 bytes
+  where the struct is 16, because it put `u_value` at offset 0 on top of
+  `e_type` instead of after it.
+
+  Three places read that tag — `ezlopi_core_scenes_when_methods.c:471` and the
+  two `switch` statements in `__replace_old_with_new_data_val()` and
+  `____old_vs_new_extract_data()` — and none of them could take the arm it was
+  written for. The `true` and `0.1` rows are the sharper half: those did not
+  merely fall through to `default`, they selected the *wrong* arm, so a stored
+  `bool` was read back out of `u_value.value_double`.
+
+  What that cost: `__replace_old_with_new_data_val()` never copied the new
+  value over the remembered one, and `____old_vs_new_extract_data()` — which
+  returns 1 for "the value is unchanged" — always fell to `default` and
+  returned 0. `isItemStateChanged` therefore answered "changed" on every single
+  evaluation, regardless of the value. Now a `struct`.
+
+- **The remembered item value's string was leaked, and the fix above is what
+  made it possible to release it.**
+  When the value `isItemStateChanged` remembers is a string, the
+  `s_item_exp_data_t` it keeps owns a copy of it — two allocations behind the
+  one `user_arg` pointer. `FIELD_USER_ARG_HEAP` releases a flat block, so it
+  released the struct and left the string.
+
+  Fixing that needs the destructor to ask the struct which of the two it is
+  holding, which is exactly the tag the union was destroying: an
+  earlier attempt at this arm was written and then deleted *because* reading
+  `sample_data.e_type` was unsound while the type was a union — it would have
+  decided whether to call `free()` on a pointer by inspecting the low bytes of
+  a `double`, which is the same defect as the tick count in the entry above,
+  one level down. With the tag intact the arm is sound, so there is now a
+  `FIELD_USER_ARG_ITEM_EXP` that releases the inner string when the tag says
+  `VALUE_TYPE_STRING` and the outer block always.
+
+  **Evidence.** Three tests were added to
+  [`tests/host/test_scenefields.c`](tests/host/test_scenefields.c), and each
+  was checked against the specific wrong version it guards rather than against
+  "the old code" generally — one targeted mutation at a time, since a mutation
+  no test notices means the test is decoration:
+
+  | mutation | caught by | adjudicated by |
+  |---|---|---|
+  | the type back to a `union` | tag-survives-its-value | `assert` |
+  | the arm frees only the outer block | releases-inner-string | LeakSanitizer |
+  | the arm frees `value_string` regardless of the tag | number-not-freed-as-a-pointer | ASan |
+
+  The first of those is the one test in that file an `assert` is the right
+  adjudicator for, because it is a claim about layout rather than about
+  behaviour. The third exists because "free the string unconditionally" is the
+  obvious wrong way to write this arm, and for a remembered number it is a
+  `free()` of half a `double`.
+
+  All four targets build clean. What is *not* evidenced is the end of the
+  chain: which scenes behave differently now. See Known gaps, including why the
+  risk is asymmetric.
+
 ### UART sensor dispatch — [sec]
 
 - **The UART receive task invoked its callback with a NULL buffer on every
@@ -3401,57 +3484,23 @@ Listed because a changelog that only mentions what was finished is misleading.
   and so every key is exactly 8 characters, and no fixed-width set can contain
   a strict prefix pair.
 
-- **A type tag stored in a union with the value it describes, so storing the
-  value destroys the tag.** `s_item_expn_data_t` in
-  [`ezlopi_core_scenes_when_methods_helper_functions.h:111`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.h#L111)
-  is declared `typedef union` over exactly two members: `e_value_type_t e_type`
-  — commented "the data's nature" — and `u_field_value_v2_t u_value`,
-  commented "reutilizing the field structure to store extracted data". The
-  field structure it means to reuse is `s_field_value_t`, which holds the same
-  two members as a **struct**. One keyword apart, and the two shapes are not
-  remotely equivalent: in the struct the tag and the value have separate
-  storage, in the union they are the same bytes.
+- **Nobody knows which `isItemStateChanged` scenes change behaviour now that
+  the type tag survives.** The `union`→`struct` fix in the scene-triggers entry
+  above switched on three `switch` statements that had never once taken the arm
+  they were written for, so a when-method that has been reporting "changed" on
+  every evaluation since it was written should now report it only on an actual
+  change. That is the intended behaviour and the tests pin the layout it
+  depends on, but the end of the chain — which scenes fire, and how often —
+  runs through the meshbot task and the item cache and was not traced. It needs
+  a board with a scene using `isItemStateChanged` and an observable `then`
+  block.
 
-  Every one of the nine writers does `sample_data.e_type = VALUE_TYPE_x;` and
-  then immediately stores `sample_data.u_value.<member>` — which, being a
-  union, overwrites the tag it just set. Measured rather than reasoned about,
-  by compiling the real headers and reproducing that two-line sequence:
-
-  | written as | reads back as |
-  |---|---|
-  | `VALUE_TYPE_STRING` | not a valid tag (the pointer's low bytes) |
-  | `VALUE_TYPE_BOOL`, value `true` | `VALUE_TYPE_NUMBER` |
-  | `VALUE_TYPE_BOOL`, value `false` | `VALUE_TYPE_UNDEFINED` |
-  | `VALUE_TYPE_NUMBER`, value `23.0` | `VALUE_TYPE_UNDEFINED` |
-  | `VALUE_TYPE_NUMBER`, value `0.1` | not a valid tag |
-
-  The tag never survives. `sizeof` confirms the cause: `s_item_expn_data_t` is
-  8 bytes where the equivalent struct is 16, and `s_field_value_t` puts
-  `u_value` at offset 8 while the union puts it at 0, on top of `e_type`.
-
-  There are three reads of that tag — `ezlopi_core_scenes_when_methods.c:471`
-  and the two `switch` statements at `…helper_functions.c:1976` and `:2020` —
-  and none of them can take the arm it was written for. The `0.1` and `true`
-  rows are the sharper half: those do not merely fall through to `default`,
-  they select the *wrong* arm, so a stored `bool` is read back out of
-  `u_value.value_double`. The practical effect inside
-  `__replace_old_with_new_data_val()` is that the new value is never copied
-  over the remembered one, which makes the comparison beneath it meaningless.
-
-  Not fixed in this commit, and not because the change is hard — it is the word
-  `union` — but because it is a different defect from the `user_arg` work it
-  was found during, and because flipping it switches on three `switch`
-  statements' worth of code that has demonstrably never executed. That wants
-  its own commit and its own test. The measurement above is reproducible from
-  the header alone, so the diagnosis does not depend on a board; what does need
-  a board is which scenes start behaving differently afterwards, and that has
-  not been traced.
-
-  A consequence left in place meanwhile: the `VALUE_TYPE_STRING` arm at
-  `…helper_functions.c:1996`, the only code that frees the previously
-  remembered string, is unreachable for the same reason, so each new string is
-  allocated and never released. That leak is real today and is not fixed here;
-  fixing the union fixes it.
+  The direction of the risk is worth stating, because it is not symmetric: the
+  old behaviour was to fire *too often*, so the change should make scenes
+  quieter rather than noisier. A scene that looked like it worked because it
+  re-triggered constantly will now trigger properly, and to someone watching,
+  "properly" and "stopped working" look the same for as long as the condition
+  does not change.
 
 - **Eight shadowed declarations found by `-Wshadow` are untriaged.** The sweep
   that found the `cj_device_items_data` defect above found nine; one was shown

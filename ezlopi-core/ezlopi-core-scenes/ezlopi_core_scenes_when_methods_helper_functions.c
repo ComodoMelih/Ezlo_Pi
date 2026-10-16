@@ -1473,7 +1473,10 @@ int IS_itemstate_changed(s_item_exp_data_t *new_extract_data, l_fields_v2_t *sta
                 memset(tmp_struct, 0, sizeof(s_item_exp_data_t));
                 __replace_old_with_new_data_val(new_extract_data, tmp_struct);
                 scene_node->when_block->fields->user_arg = (void *)tmp_struct;
-                scene_node->when_block->fields->user_arg_type = FIELD_USER_ARG_HEAP;
+                /* ITEM_EXP rather than HEAP: when the remembered value is a
+                 * string this struct owns a copy of it, so releasing the outer
+                 * block alone would leak the copy. */
+                scene_node->when_block->fields->user_arg_type = FIELD_USER_ARG_ITEM_EXP;
             }
             else
             {

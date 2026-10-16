@@ -108,7 +108,18 @@ extern "C"
         int (*opr_method)(l_scenes_list_v2_t *scene_node, l_when_block_v2_t *when_block, cJSON *cj_func_opr);
     } s_function_opr_t;
 
-    typedef union s_item_expn_data
+    /* A struct, not a union. It was a union, which gave `e_type` and `u_value`
+     * the same bytes -- so every writer that set the tag and then stored the
+     * value it describes destroyed the tag in the act of using it. A stored
+     * string left `e_type` holding the low bytes of the pointer; a stored
+     * `true` left it reading as VALUE_TYPE_NUMBER, so the value came back out
+     * of `u_value.value_double`. The three `switch (…e_type)` statements over
+     * this type could not reach the arm they were written for.
+     *
+     * "reutilizing the field structure" is what the original comment said it
+     * was doing, and `s_field_value_t` -- the field structure -- holds these
+     * same two members as a struct. */
+    typedef struct s_item_expn_data
     {
         e_value_type_t e_type;      // the data's nature
         u_field_value_v2_t u_value; // reutilizing the field structure to store extracted data
