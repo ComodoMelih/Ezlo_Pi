@@ -1685,7 +1685,7 @@ of reading the serial console would have revealed it.
   behind
   [`CONFIG_EZPI_WS_LOG_PAYLOADS`](ezlopi-main/Kconfig.projbuild#L465),
   **`default n`**, with the length still logged
-  [either way](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L620)
+  [either way](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L662)
   so the "traffic arrived" signal survives.
 
   Three methods on this socket carry a credential in their params:
@@ -1930,8 +1930,10 @@ built on it. It did not hold.
   `aux->ws_handshake_detect`) but invokes the URI handler regardless at `:329`.
   The handler logged "Handshake done" and registered the socket anyway, so
   `curl http://hub:17001/` planted a non-websocket descriptor as the broadcast
-  target. Now the handler asks `httpd_ws_get_fd_info()` instead of assuming,
-  and a non-websocket GET gets a one-line plain-text explanation of the port.
+  target. Now the handler asks `httpd_ws_get_fd_info()` instead of assuming.
+  That check first answered a non-websocket GET with a one-line plain-text
+  explanation of the port; it is now the discriminator that serves the local
+  configuration page instead — see the Local operation section.
 
 **The fix is per-connection authorisation.** A new dependency-free component,
 `ezlopi-util-wssession`, holds a fixed table of `{fd, authorised}` keyed on the
@@ -2775,7 +2777,7 @@ envelope one.
 
   But the API has exactly one credential. An unauthenticated client is allowed
   `hub.offline.login.ui` and nothing else — a real gate, at
-  [`ezlopi_service_ws_server.c:292`](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L292)
+  [`ezlopi_service_ws_server.c:331`](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L331)
   — and that method compares the supplied token against the local key. The key
   had one source: the factory-info partition, written only by Ezlo cloud
   provisioning over BLE. On a board somebody flashed themselves that region has
@@ -2847,6 +2849,224 @@ envelope one.
   compile and link with the new symbols present in the ELF. The absence of the
   credential format strings was checked against the built `.bin` rather than
   the source. That is the limit of what has been established.
+
+- **The device now serves a configuration page to a browser on the port it
+  already had.** Before this, everything the local API can do needed a
+  websocket client and a hand-written JSON envelope, which means the 117
+  methods above were reachable in principle and not in practice. Pointing a
+  browser at `http://<device-ip>:17001/` got back one line of `text/plain`
+  saying the port speaks WebSocket. It now gets
+  [`config_ui.html`](ezlopi-services/ezlopi-service-ws-server/config_ui.html):
+  five tabs, each named after the methods behind it — log in with the local
+  key, read the hub's own identity and reboot it (**Hub**), list devices and
+  items and write a value to a writable one (**Devices**), see the current
+  network and scan for and join another (**Wi-Fi**), read, set and clear the
+  broker (**MQTT**), and send an arbitrary method with arbitrary params for
+  everything the four panels do not cover (**Console**, with a `datalist` of 39
+  method names — hand-written, because there is no method that lists methods,
+  and including the handful a default build compiles out, since the list is a
+  typing aid and not a claim about what this device answers). Every frame in
+  and out is shown in a traffic log beneath. **No compile step, no toolchain,
+  no app.**
+
+  It is one file — inline CSS, inline JS, a `data:` URI favicon — because the
+  server registers exactly one URI, `"/"`. A second request for `/style.css`
+  would reach the same handler and be answered with the page, so a page split
+  across files could not work without adding routes, and routes on this handler
+  would have to be reasoned about against the websocket branch. One file is the
+  shape the existing server already supports.
+
+  It reaches the firmware through
+  [`EMBED_TXTFILES`](ezlopi-services/ezlopi-service-ws-server/CMakeLists.txt#L55),
+  which gives `_binary_config_ui_html_start/_end` and appends a NUL, so the
+  body length is `end - start - 1` and not a 36 KB `strlen` per request over
+  flash. `TXTFILES` rather than `BINARIES` for exactly that NUL. **Gzip was
+  measured and declined**: the page compresses from 36 554 to 12 099 bytes, but
+  claiming that means either committing a `.html.gz` beside the `.html` — two
+  files that drift apart with nothing in CI to catch it — or making `gzip` a
+  host-build dependency, which ESP-IDF itself does not require. 24 KB is not
+  worth either today. The CMake comment records that if headroom ever tightens,
+  the host-gzip option is the better of the two, with `Content-Encoding` set in
+  the handler.
+
+- **Serving the page was moved out of `__send_lock`, and that mattered more
+  than the page did.** The GET branch of `ezpi_msg_handler()` ran inside the
+  send mutex, so the obvious implementation — answer where the old `text/plain`
+  hint was answered — would have held that lock for the whole 36 KB write.
+  `esp_http_server`'s `send_wait_timeout` is 5 s *per write* and
+  `httpd_resp_send` loops until the body is gone, while the broadcast paths
+  take the same lock with a **2000 ms** timeout and give up when they miss it
+  ([`:268`](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L268),
+  [`:444`](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L444)).
+  One browser loading this page on a slow link could therefore have made the
+  device drop item-value broadcasts to the Ezlo app — a page added to make
+  configuration easier, degrading the thing it sits beside.
+
+  So the non-websocket GET now returns
+  [before the lock is taken](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L548),
+  and only the websocket half — registering the client as a broadcast target,
+  which does touch shared state — stays inside it. This is safe rather than
+  merely convenient: `__send_lock` serialises sends to *registered websocket
+  clients*, a connection that never negotiated a websocket is never registered,
+  and the handler runs on the single `esp_http_server` task, so there is no
+  second writer to that descriptor by any route. The discriminator itself is
+  not new — `httpd_ws_get_fd_info()` was already there from the broadcast-target
+  fix in the Security section, which is what made this page cheap to add: the
+  branch that knows a browser from a websocket client existed, it just had
+  nothing useful to say.
+
+  **No cache headers, deliberately.** The page ships inside the image, so a
+  cached copy surviving an OTA would be a stale UI against a newer API, and
+  that failure presents as the device misbehaving rather than as a cache. 36 KB
+  on a LAN does not buy that.
+
+- **This is not first-time onboarding.** The page is served by the local
+  websocket server, which runs only once the device is on a network as a
+  station; there is no SoftAP fallback, so a device that has never joined a
+  network cannot be reached at all. It is the second step — after BLE or Improv
+  gets the device onto Wi-Fi, this is how you drive it without an app. Saying
+  so because "web config page" implies a captive portal to most readers, and
+  this is not one.
+
+- **Four-target sizes, with the real partition figure.** esp32 1 683 216,
+  esp32s2 1 375 552, esp32s3 1 697 984, esp32c3 1 756 496 bytes, against an
+  `ota_0` of `0x1EFC00` = 2 030 592 bytes
+  ([`ezlopi_partitions_v3_1_4_181_4mb.csv`](ezlopi_partitions_v3_1_4_181_4mb.csv)),
+  leaving 339 / 639 / 324 / 267 KiB — the tightest target, esp32c3, is at 86.5%
+  of its app partition. The page costs 36 512 bytes of flash, measured as the
+  esp32 image delta against the same tree without it. Each image was checked
+  with `strings` for the page's own markers, for the redaction helper, and for
+  the *absence* of the old `text/plain` hint, and each ELF for
+  `_binary_config_ui_html_start`, because a green build proves the handler
+  compiles and not that the page landed in the binary it points at.
+
+- **The page was driven against a stand-in device, not hardware.** Roughly 500
+  lines of browser JavaScript that had never executed is not something to ship
+  on the strength of reading it, so the device side was reimplemented as a
+  stdlib-only Python stand-in — HTTP and WebSocket on **one** port, as the real
+  server does, which is what makes a `location.host` mistake visible that a
+  two-port harness would hide. Eleven methods were exercised and each contract
+  checked on the wire: the unauthenticated path admitting `hub.offline.login.ui`
+  and nothing else, a bad key refused and a good one accepted, reconnect with
+  automatic re-login from `sessionStorage`, a method that always fails
+  surfacing its `error` rather than reading as success (the bug fixed above),
+  `hub.reboot` never replying and the 12 s timeout being swallowed instead of
+  shown as a fault, an unsolicited scan broadcast routed by
+  `id === "ui_broadcast" || msg_subclass` rather than mistaken for an RPC
+  reply, `hub.item.value.set` converting by the item's own `valueType` so a
+  numeric item gets `23` and a bool gets `true` rather than the text out of the
+  box, and a blank MQTT password *omitted* from the params rather than sent as
+  `""` — the device never returns a stored password, so an empty box has to
+  mean "leave it alone" and not "clear it". Zero console output across all of
+  it.
+
+  The page builds every element with `textContent` and `setAttribute`
+  ([`el()`](ezlopi-services/ezlopi-service-ws-server/config_ui.html#L313)) and
+  never assigns `innerHTML`, so hostile SSIDs and device names are inert. That
+  was tested with an `<img src=x onerror=...>` SSID and a `<script>` device
+  name — **and the harness was then proved able to fail**, by injecting the
+  identical payload through `innerHTML` and watching it fire. A clean XSS
+  result means nothing until the payload has been shown not to be a dud.
+
+- **The traffic log put the device's Wi-Fi PSK on screen, and it was found by
+  reading, not by the suite.** The log is the feature's own best idea — it shows
+  every frame in and out, which is what makes the page a usable way to learn the
+  local API — and it is also the thing a person screenshots into a bug report.
+  Its first version printed frames verbatim:
+
+  ```js
+  logLine("rx", JSON.stringify(m));
+  ```
+
+  `hub.network.get` answers with the device's **stored Wi-Fi password**, added
+  as `key` beside `ssid`
+  ([`ezlopi_cloud_network.c:174`](ezlopi-cloud/ezlopi-cloud-network/ezlopi_cloud_network.c#L174)).
+  That wire format is deliberately left alone — the Security section above made
+  the same call for the serial-console copy of this same field, because the app
+  and cloud depend on it — which means every fix for this PSK has to land in
+  whatever *displays* a frame. This page added a new display and did not get
+  that treatment. So merely clicking the **Wi-Fi** tab wrote the PSK into the
+  page, in plain text, in the pane most likely to be pasted into a public issue.
+
+  The outbound half leaked too, and less excusably: the log special-cased
+  `hub.offline.login.ui`'s `token` and missed the other two methods that carry a
+  credential in their params — `hub.network.wifi.try_connect` (`network.key`)
+  and `hub.mqtt.config.set` (`password`). A hand-maintained list of one. Two
+  further sinks did the same thing by a different route: the **Hub** tab's
+  deliberate print-every-unknown-field loop, and the **Console** pane's
+  pretty-printed result.
+
+  Four leaks, one class. The fix is a single
+  [`redact()`](ezlopi-services/ezlopi-service-ws-server/config_ui.html#L505)
+  that walks a frame and blanks credential-shaped fields to `"***"`, with
+  [`logFrame()`](ezlopi-services/ezlopi-service-ws-server/config_ui.html#L521)
+  as the only way the log is written, applied in **both** directions and at both
+  display dumps. Three decisions in it are worth recording:
+
+  - **`this.ws.send(JSON.stringify(req))` is left verbatim.** The wire is not a
+    sink. Redacting there would send `"***"` to the device *as the password*, so
+    the page would stop working in exactly the flows that matter. Redaction
+    belongs at the screen, and the distinction had to be taught to the CI check
+    below as well.
+  - **`key` is blanked only beside `ssid`.** `key` is an ordinary word that
+    appears in non-secret frames; it is a credential specifically in the
+    Wi-Fi-shaped object, which is also the only shape the firmware emits it in
+    (both fields are added together, under one guard, at the link above).
+  - **Empty and null values are preserved, not blanked.** "No password set" and
+    "password hidden" have to stay distinguishable, or the log stops answering
+    the question people open it to ask.
+
+- **The page's redaction is a weaker guarantee than the firmware's, and says
+  so.** `check_no_secret_logging.py` argues against exactly this design — see
+  the Security section above: per-field redaction "fails silently the first time
+  a new method adds a secret field that nobody adds to the list", which is why
+  the firmware got a switch that logs nothing instead. That objection applies here
+  and is accepted rather than argued away. It is taken anyway for two reasons:
+  the page is a *client* and cannot enumerate what a future firmware will
+  return, so no exhaustive rule is available to it; and the switch-off answer
+  would delete the traffic log, which is the page's main reason to exist. The
+  page carries that trade-off in its own comment so the next reader does not
+  have to rediscover that it was a choice.
+
+- **The harness that had passed could not have failed.** The page tested clean
+  before any of this — because the stand-in's `hub.network.get` never put a
+  `key` in its reply. The leak was invisible to the only thing exercising the
+  page. The stand-in now sends a canary PSK, and the retest was made conclusive
+  rather than merely green: a **raw WebSocket client bypassing the page
+  entirely** confirmed the canary really was on the wire, while the page showed
+  `"key":"***"` and the canary was absent from the live DOM *and* from the
+  served HTML. The MQTT password was matched the same way, page against server,
+  on a single request id. `redact()`'s own behaviour was pinned with 10 cases
+  covering nesting, arrays, the `ssid`-qualified rule, and the empty/null
+  carve-out.
+
+- **The regression is now guarded, and the guard was proved able to fail.**
+  [`tests/ci/check_ui_frame_redaction.py`](tests/ci/check_ui_frame_redaction.py)
+  fails on three things, each the shape of a leak that actually happened: a
+  frame-shaped identifier stringified without `redact()` on a line that also
+  feeds a sink; `redact()` or `logFrame()` missing, or `logFrame()` no longer
+  routing through `redact()`; and a credential field name dropped from
+  `SECRET_FIELDS` or the `ssid`-qualified `key` rule removed. Five mutations
+  were applied to the page in a scratch mirror — one per failure mode, each
+  asserted to produce its *specific* message rather than just a non-zero exit —
+  and **all five were caught**, with the mirror confirmed clean before and
+  after. It is a text check over one file and not a JavaScript parser: it cannot
+  see a leak built by string concatenation or one that renames the frame
+  variable, and it says nothing about whether `redact()` is correct. What it
+  catches is the quiet re-introduction — pasting `logLine("rx",
+  JSON.stringify(m))` back in looks like ordinary debugging and breaks nothing
+  visible.
+
+- **The serve path has never run on a board.** What is established is that four
+  targets build, that the page is present in all four images with the old
+  response gone, that the embedded symbols resolve in every ELF, and that the
+  page's own logic holds against a faithful stand-in. What is *not* established
+  is anything that needs the real device: that `httpd_ws_get_fd_info()` returns
+  what is expected on a live non-websocket fd, that a 36 KB `httpd_resp_send`
+  completes to a real browser over real Wi-Fi, that the page and a real
+  `ezpi_msg_handler` agree on every envelope, or that a browser and the Ezlo app
+  can be served at once. Also untested: the two methods the stand-in does not
+  implement, `hub.network.wifi.scan.stop` and `hub.mqtt.config.reset`.
 
 ### Provisioning — [feat]
 

@@ -475,10 +475,81 @@ static esp_err_t ezpi_trigger_async_send(httpd_req_t *req)
     return ret;
 }
 
+/* The configuration page, linked in by EMBED_TXTFILES in CMakeLists.txt.
+**
+** TXTFILES appends a NUL, so `end` points one past it and the body length is
+** end - start - 1. Taken that way rather than with strlen() because the length
+** is known at link time and a 36 KB strlen on every request, over data that is
+** read from flash through the instruction cache, would be real work to
+** establish something the linker already told us. */
+extern const uint8_t config_ui_html_start[] asm("_binary_config_ui_html_start");
+extern const uint8_t config_ui_html_end[] asm("_binary_config_ui_html_end");
+
+/* Answer a plain HTTP GET -- a browser, not a websocket client -- with the
+** local configuration page.
+**
+** WHY THIS IS NOT INSIDE __send_lock
+**
+** It used to be, because the whole handler was. That is a 36 KB body written
+** to a socket whose far end is a browser that may be slow, on a LAN, or
+** halfway through going away; esp_http_server's send_wait_timeout is 5 s per
+** write by default and httpd_resp_send loops until the body is gone. Holding
+** __send_lock across that blocks every broadcast from every other task for as
+** long as it takes, and the broadcast paths take the same lock with a 2000 ms
+** timeout and give up when they cannot get it. So one browser fetching this
+** page could make the device silently drop item-value broadcasts to the Ezlo
+** app -- a page meant to make configuration easier would have degraded the
+** thing it sits beside.
+**
+** It is safe to answer outside the lock because nothing else can touch this
+** socket. __send_lock serialises sends to *registered websocket clients*, and
+** a connection that did not negotiate a websocket is never registered -- that
+** is what the httpd_ws_get_fd_info() check below is for. This handler also
+** runs on the single esp_http_server task, so there is no second writer to
+** this descriptor by any route.
+**
+** NO CACHE HEADERS, DELIBERATELY
+**
+** The page is part of the firmware image, so a cached copy outliving an OTA
+** would be a stale UI talking to a newer API, and that failure looks like the
+** device misbehaving rather than like a cache. 36 KB on a local network is not
+** worth buying that with. */
+static esp_err_t ezpi_serve_config_page(httpd_req_t *req)
+{
+    const size_t len = (size_t)(config_ui_html_end - config_ui_html_start) - 1;
+
+    TRACE_I("WSL: serving the config page, fd: %d, %u bytes",
+            httpd_req_to_sockfd(req), (unsigned)len);
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+
+    return httpd_resp_send(req, (const char *)config_ui_html_start, len);
+}
+
 static esp_err_t ezpi_msg_handler(httpd_req_t *req)
 {
     esp_err_t ret = ESP_FAIL;
 #if 1 // def CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
+
+    /* A GET reaching this handler does NOT prove a websocket was negotiated.
+    ** esp_http_server only performs the handshake when the request carried the
+    ** Upgrade header (httpd_uri.c, the is_websocket && ws_handshake_detect
+    ** branch) -- but it invokes the handler either way. So a plain browser or
+    ** `curl http://hub:17001/` arrives here too, and the old code logged
+    ** "Handshake done" and registered that socket as a broadcast target.
+    ** Broadcasts then wrote websocket frames into a connection that had never
+    ** agreed to speak the protocol.
+    **
+    ** Ask the server what the socket actually is instead of assuming. Done
+    ** before the send-lock is taken so that serving the page does not hold it;
+    ** see the comment on ezpi_serve_config_page(). httpd_ws_get_fd_info() only
+    ** reads esp_http_server's own session table from esp_http_server's own
+    ** task, so it needs no lock of ours. */
+    if (HTTP_GET == req->method &&
+        HTTPD_WS_CLIENT_WEBSOCKET != httpd_ws_get_fd_info(req->handle, httpd_req_to_sockfd(req)))
+    {
+        return ezpi_serve_config_page(req);
+    }
 
     if (__send_lock && (pdTRUE == xSemaphoreTake(__send_lock, 5000)))
     {
@@ -486,43 +557,14 @@ static esp_err_t ezpi_msg_handler(httpd_req_t *req)
 
         if (req->method == HTTP_GET)
         {
-            /* A GET reaching this handler does NOT prove a websocket was
-            ** negotiated. esp_http_server only performs the handshake when the
-            ** request carried the Upgrade header (httpd_uri.c, the
-            ** is_websocket && ws_handshake_detect branch) -- but it invokes the
-            ** handler either way. So a plain browser or `curl http://hub:17001/`
-            ** arrived here too, and the old code logged "Handshake done" and
-            ** registered that socket as a broadcast target. Broadcasts then
-            ** wrote websocket frames into a connection that had never agreed to
-            ** speak the protocol.
-            **
-            ** Ask the server what the socket actually is instead of assuming. */
+            /* A websocket, then: the check above already turned away everything
+            ** that is not one. Registering it as a broadcast target does touch
+            ** shared state, so this half stays inside the lock. */
             const int fd = httpd_req_to_sockfd(req);
 
-            if (HTTPD_WS_CLIENT_WEBSOCKET == httpd_ws_get_fd_info(req->handle, fd))
-            {
-                TRACE_I("Handshake done, the new connection was opened, id: %p", req);
-                EZPI_service_ws_server_clients_add((void *)req->handle, fd);
-                ret = ESP_OK;
-            }
-            else
-            {
-                /* Not a websocket. Nothing is registered and nothing is
-                ** authorised; the session for this descriptor was already
-                ** created unauthenticated by the accept hook. Answering
-                ** rather than failing keeps a stray GET from closing the
-                ** socket noisily, and gives a person who points a browser at
-                ** the port something to read. */
-                TRACE_W("WSL: plain HTTP request on the websocket port, fd: %d", fd);
-
-                static const char msg[] =
-                    "EzloPi local API. This port speaks WebSocket; "
-                    "connect with ws:// and call hub.offline.login.ui first.\n";
-
-                httpd_resp_set_type(req, "text/plain");
-                httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
-                ret = ESP_OK;
-            }
+            TRACE_I("Handshake done, the new connection was opened, id: %p", req);
+            EZPI_service_ws_server_clients_add((void *)req->handle, fd);
+            ret = ESP_OK;
         }
         else
         {

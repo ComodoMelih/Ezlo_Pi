@@ -1,0 +1,903 @@
+<!doctype html>
+<html lang="en">
+<!--
+  EzloPi local configuration page.
+
+  Served by ezlopi_service_ws_server.c from the device itself, on the same port
+  as the local websocket API (default 17001), in answer to a plain HTTP GET.
+  Embedded in the firmware image with EMBED_TXTFILES, so there is no filesystem
+  partition and nothing to upload.
+
+  WHY ONE FILE
+
+  The server registers exactly one URI, "/" (see ezpi_start_server). A request
+  for /style.css or /app.js would 404, so the CSS and the script are inline and
+  there are no images: the favicon is an empty data: URI purely to stop the
+  browser asking for /favicon.ico. Keeping it to one file is a constraint of the
+  server, not a style choice.
+
+  WHAT THIS PAGE IS FOR, AND WHAT IT IS NOT
+
+  It removes the toolchain from device configuration: a browser on the same
+  network can set up devices, Wi-Fi, and MQTT without ESP-IDF, without Python
+  and without flashing anything.
+
+  It is NOT initial onboarding. This firmware runs the Wi-Fi in station mode
+  only -- there is no SoftAP anywhere in the tree -- so the device has to be on
+  a network before this page can be fetched at all. First-time Wi-Fi setup
+  stays with BLE provisioning or Improv. The Wi-Fi panel here is for moving an
+  already-connected device to a different network, which is a real need and a
+  different one.
+
+  THE ERROR CONTRACT THIS PAGE DEPENDS ON
+
+  Every reply carries an "error" member: null on success, an object on failure.
+  This page checks `reply.error != null` and nothing else.
+
+  That contract is the reason the duplicate-"error" defect in
+  EZPI_core_api_consume_cjson mattered enough to fix before writing this. The
+  envelope used to append error:null unconditionally, so a failed call returned
+  two "error" members -- and a browser's JSON.parse keeps the LAST duplicate,
+  where cJSON keeps the first. Every failure would have arrived here looking
+  like a success. A C client never noticed; this page would have been wrong
+  about everything.
+
+  UNTRUSTED STRINGS
+
+  Device names, room names, item values and Wi-Fi SSIDs all reach this page
+  from outside it, and an SSID is chosen by whoever owns the access point. None
+  of them are ever concatenated into innerHTML. Everything goes in through
+  textContent or setAttribute via the el() helper, so a network advertising
+  itself as <img src=x onerror=...> renders as that text.
+-->
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EzloPi</title>
+<link rel="icon" href="data:,">
+<style>
+:root{
+  --bg:#12151a; --panel:#1a1f27; --line:#2b3340; --fg:#e6e9ef;
+  --dim:#9aa4b2; --accent:#4da3ff; --ok:#3ecf8e; --bad:#ff6b6b; --warn:#ffb454;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--fg); font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  padding-bottom:3rem;
+}
+header{
+  display:flex; align-items:center; gap:.6rem; padding:.7rem 1rem;
+  background:var(--panel); border-bottom:1px solid var(--line);
+  position:sticky; top:0; z-index:5;
+}
+header h1{font-size:1rem; margin:0; font-weight:600; letter-spacing:.02em}
+header .sub{color:var(--dim); font-size:.8rem}
+.spacer{flex:1}
+.dot{width:.6rem; height:.6rem; border-radius:50%; background:var(--dim); flex:none}
+.dot.on{background:var(--ok)} .dot.off{background:var(--bad)} .dot.wait{background:var(--warn)}
+main{max-width:52rem; margin:0 auto; padding:1rem}
+section{
+  background:var(--panel); border:1px solid var(--line); border-radius:.5rem;
+  padding:1rem; margin-bottom:1rem;
+}
+h2{font-size:.95rem; margin:0 0 .75rem; font-weight:600}
+h2 .hint{font-weight:400; color:var(--dim); font-size:.8rem; margin-left:.4rem}
+label{display:block; margin:.5rem 0 .2rem; font-size:.8rem; color:var(--dim)}
+input,select,textarea,button{font:inherit}
+input,select,textarea{
+  width:100%; padding:.5rem .6rem; background:#0e1116; color:var(--fg);
+  border:1px solid var(--line); border-radius:.3rem;
+}
+textarea{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.82rem; resize:vertical}
+button{
+  padding:.5rem .9rem; background:var(--accent); color:#04121f; border:0;
+  border-radius:.3rem; font-weight:600; cursor:pointer;
+}
+button.ghost{background:transparent; color:var(--accent); border:1px solid var(--line); font-weight:500}
+button.danger{background:var(--bad); color:#fff}
+button:disabled{opacity:.45; cursor:default}
+.row{display:flex; gap:.5rem; align-items:flex-end; flex-wrap:wrap}
+.row>*{flex:1 1 10rem}
+.row>.tight{flex:0 0 auto}
+nav{display:flex; gap:.25rem; flex-wrap:wrap; margin-bottom:1rem}
+nav button{background:transparent; color:var(--dim); border:1px solid transparent; font-weight:500}
+nav button[aria-current=page]{color:var(--fg); border-color:var(--line); background:var(--panel)}
+table{width:100%; border-collapse:collapse; font-size:.85rem}
+th,td{text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--line); vertical-align:top}
+th{color:var(--dim); font-weight:500}
+code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.85em}
+.msg{padding:.5rem .7rem; border-radius:.3rem; margin:.5rem 0; font-size:.85rem; white-space:pre-wrap}
+.msg.err{background:#3a1a1d; color:#ffc9c9; border:1px solid #6b2a30}
+.msg.ok{background:#12301f; color:#bdf0d4; border:1px solid #255c3d}
+.msg.info{background:#15202c; color:#c3d6e8; border:1px solid #2b4257}
+.dim{color:var(--dim)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.hide{display:none !important}
+.pill{font-size:.7rem; padding:.1rem .4rem; border-radius:1rem; border:1px solid var(--line); color:var(--dim)}
+#log{max-height:18rem; overflow:auto; font-size:.78rem}
+#log div{padding:.15rem 0; border-bottom:1px solid #20262f; white-space:pre-wrap; word-break:break-all}
+#log .tx{color:var(--accent)} #log .rx{color:var(--fg)} #log .bc{color:var(--warn)} #log .er{color:var(--bad)}
+footer{max-width:52rem; margin:0 auto; padding:0 1rem; color:var(--dim); font-size:.78rem}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="dot" id="conn-dot" title="connection"></span>
+  <h1>EzloPi</h1>
+  <span class="sub" id="hub-sub"></span>
+  <span class="spacer"></span>
+  <span class="pill" id="conn-text">connecting</span>
+</header>
+
+<main>
+
+  <!-- ---------------------------------------------------------------- login -->
+  <section id="sec-login">
+    <h2>Log in<span class="hint">the local API key</span></h2>
+    <div class="msg info">
+      The key is printed once on the serial console at boot, in a box headed
+      <em>EzloPi local API key</em>. It is generated on the device and is not
+      known to anyone else. If you provisioned this device through the Ezlo app
+      instead, the app holds the key and it is not printed.
+    </div>
+    <div id="login-msg"></div>
+    <div class="row">
+      <div>
+        <label for="f-user">User</label>
+        <input id="f-user" value="local" autocomplete="username">
+      </div>
+      <div>
+        <label for="f-token">Local API key</label>
+        <input id="f-token" type="password" autocomplete="current-password"
+               placeholder="paste the key from the serial console">
+      </div>
+      <div class="tight">
+        <button id="b-login">Log in</button>
+      </div>
+    </div>
+    <p class="dim" style="margin-bottom:0">
+      The <em>User</em> field is not checked unless this firmware was built with
+      <code>CONFIG_EZPI_OFFLINE_LOGIN_VERIFY_USER_ID</code>; the key is the
+      credential. Authorisation applies to this browser tab's connection only.
+    </p>
+  </section>
+
+  <!-- ------------------------------------------------------------------ app -->
+  <div id="app" class="hide">
+
+    <nav id="tabs">
+      <button data-tab="hub" aria-current="page">Hub</button>
+      <button data-tab="devices">Devices</button>
+      <button data-tab="wifi">Wi-Fi</button>
+      <button data-tab="mqtt">MQTT</button>
+      <button data-tab="console">Console</button>
+    </nav>
+
+    <!-- hub -->
+    <section id="tab-hub">
+      <h2>Hub<span class="hint">hub.info.get</span></h2>
+      <div id="hub-msg"></div>
+      <table><tbody id="hub-table"></tbody></table>
+      <div class="row" style="margin-top:1rem">
+        <div class="tight"><button class="ghost" id="b-hub-refresh">Refresh</button></div>
+        <div class="tight"><button class="danger" id="b-reboot">Reboot device</button></div>
+      </div>
+    </section>
+
+    <!-- devices -->
+    <section id="tab-devices" class="hide">
+      <h2>Devices and items<span class="hint">hub.devices.list, hub.items.list</span></h2>
+      <div id="dev-msg"></div>
+      <div class="row">
+        <div class="tight"><button class="ghost" id="b-dev-refresh">Refresh</button></div>
+      </div>
+      <table>
+        <thead><tr><th>Device</th><th>Item</th><th>Value</th><th></th></tr></thead>
+        <tbody id="dev-table"></tbody>
+      </table>
+      <p class="dim">
+        A writable item shows a box. Values are sent with
+        <code>hub.item.value.set</code>; the device decides whether to accept
+        them, and the reply is shown above.
+      </p>
+    </section>
+
+    <!-- wifi -->
+    <section id="tab-wifi" class="hide">
+      <h2>Wi-Fi<span class="hint">hub.network.get, hub.network.wifi.*</span></h2>
+      <div class="msg info">
+        This moves the device to a different network. It cannot do first-time
+        setup: the firmware is station-only, so you are reading this page over
+        the network the device is already on. If the new credentials are wrong
+        the device falls back to the stored network, which is also the only way
+        you get this page back.
+      </div>
+      <div id="wifi-msg"></div>
+      <div class="row">
+        <div class="tight"><button class="ghost" id="b-net-refresh">Current network</button></div>
+        <div class="tight"><button class="ghost" id="b-scan">Scan</button></div>
+        <div class="tight"><button class="ghost" id="b-scan-stop">Stop scan</button></div>
+      </div>
+      <table><tbody id="net-table"></tbody></table>
+      <table>
+        <thead><tr><th>SSID</th><th>Signal</th><th>Security</th><th></th></tr></thead>
+        <tbody id="scan-table"></tbody>
+      </table>
+      <div class="row" style="margin-top:1rem">
+        <div>
+          <label for="f-ssid">SSID</label>
+          <input id="f-ssid" maxlength="31" autocomplete="off">
+        </div>
+        <div>
+          <label for="f-psk">Password</label>
+          <input id="f-psk" type="password" maxlength="31" autocomplete="off">
+        </div>
+        <div class="tight"><button id="b-join">Join</button></div>
+      </div>
+      <p class="dim">
+        Both fields are capped at 31 characters because the firmware copies them
+        into 32-byte buffers (<code>ezlopi_core_wifi.c</code>), and a longer
+        value would be silently truncated rather than refused.
+      </p>
+    </section>
+
+    <!-- mqtt -->
+    <section id="tab-mqtt" class="hide">
+      <h2>MQTT<span class="hint">hub.mqtt.config.get / .set / .reset</span></h2>
+      <div id="mqtt-msg"></div>
+      <div class="row">
+        <div class="tight"><button class="ghost" id="b-mqtt-get">Load</button></div>
+      </div>
+      <div class="row">
+        <div><label for="m-host">Broker host</label><input id="m-host"></div>
+        <div style="flex:0 0 7rem"><label for="m-port">Port</label><input id="m-port" type="number" min="1" max="65535"></div>
+      </div>
+      <div class="row">
+        <div><label for="m-user">Username</label><input id="m-user" autocomplete="off"></div>
+        <div><label for="m-pass">Password</label><input id="m-pass" type="password" autocomplete="off" placeholder="unchanged"></div>
+      </div>
+      <div class="row" style="margin-top:.75rem">
+        <div class="tight"><button id="b-mqtt-set">Save</button></div>
+        <div class="tight"><button class="danger" id="b-mqtt-reset">Reset</button></div>
+      </div>
+      <p class="dim">
+        The device never returns a stored password -- <code>hub.mqtt.config.get</code>
+        answers with a <code>passwordSet</code> flag instead -- so this box shows
+        up empty even when one is set. Leave it empty to keep the existing
+        password.
+      </p>
+    </section>
+
+    <!-- console -->
+    <section id="tab-console" class="hide">
+      <h2>Console<span class="hint">anything the panels above do not cover</span></h2>
+      <p class="dim" style="margin-top:0">
+        123 methods are registered; this page has panels for a handful. Send any
+        of the rest from here. <code>id</code> is filled in for you.
+      </p>
+      <div class="row">
+        <div style="flex:2 1 16rem">
+          <label for="c-method">Method</label>
+          <input id="c-method" class="mono" value="hub.info.get" list="c-methods">
+          <datalist id="c-methods"></datalist>
+        </div>
+        <div class="tight"><button id="b-send">Send</button></div>
+      </div>
+      <label for="c-params">params (JSON, blank for none)</label>
+      <textarea id="c-params" rows="4" class="mono" spellcheck="false"></textarea>
+      <div id="c-msg"></div>
+      <h2 style="margin-top:1rem">Traffic</h2>
+      <div class="row">
+        <div class="tight"><button class="ghost" id="b-log-clear">Clear</button></div>
+      </div>
+      <div id="log"></div>
+    </section>
+
+  </div><!-- /#app -->
+</main>
+
+<footer>
+  Served from the device, from flash. No internet, no cloud, no toolchain.
+</footer>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ helpers */
+
+/* Build an element. Text always goes in as text: nothing on this page
+** concatenates device-supplied strings into markup. See the note at the top
+** about SSIDs. */
+function el(tag, attrs, text) {
+  const n = document.createElement(tag);
+  if (attrs) for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (text !== undefined && text !== null) n.textContent = String(text);
+  return n;
+}
+function $(id) { return document.getElementById(id); }
+function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+
+function say(host, kind, text) {
+  const box = typeof host === "string" ? $(host) : host;
+  clear(box);
+  if (text) box.appendChild(el("div", { class: "msg " + kind }, text));
+}
+
+/* An error object from the API, rendered for a person. The shape is
+** {code, message, data} -- see the prepare_error helpers in ezlopi-cloud. */
+function errText(e) {
+  if (!e) return "failed";
+  const bits = [];
+  if (e.message) bits.push(e.message);
+  if (e.data && e.data !== e.message) bits.push("(" + e.data + ")");
+  if (e.code !== undefined) bits.push("[" + e.code + "]");
+  return bits.join(" ") || JSON.stringify(e);
+}
+
+/* ---------------------------------------------------------------------- rpc */
+
+const RPC = {
+  ws: null,
+  seq: 0,
+  pending: new Map(),
+  authed: false,
+  onBroadcast: null,
+  TIMEOUT_MS: 12000,
+
+  url() {
+    /* Same host and port the page came from, so this works at whatever address
+    ** the device has without anything being configured. wss when the page
+    ** itself was served over TLS -- it is not today, but deriving it costs
+    ** nothing and avoids a mixed-content failure if that ever changes. */
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    return scheme + "//" + location.host + "/";
+  },
+
+  connect() {
+    status("wait", "connecting");
+    let ws;
+    try {
+      ws = new WebSocket(this.url());
+    } catch (e) {
+      status("off", "cannot open socket");
+      return;
+    }
+    this.ws = ws;
+
+    ws.onopen = () => {
+      status("on", "connected");
+      /* A reload makes a new connection, and authorisation is per connection,
+      ** so the session does not survive it. If we still hold a key from this
+      ** tab, log in again without asking. */
+      const tok = sessionStorage.getItem("ezpi_token");
+      const usr = sessionStorage.getItem("ezpi_user");
+      if (tok) login(usr || "local", tok, true);
+    };
+
+    ws.onclose = () => {
+      status("off", "disconnected");
+      this.authed = false;
+      /* Fail every in-flight call rather than leaving callers hanging until
+      ** their timeouts. */
+      for (const [, p] of this.pending) p.reject(new Error("connection closed"));
+      this.pending.clear();
+      setTimeout(() => RPC.connect(), 2000);
+    };
+
+    ws.onerror = () => { logLine("er", "socket error"); };
+
+    ws.onmessage = (ev) => {
+      let m;
+      try {
+        m = JSON.parse(ev.data);
+      } catch (e) {
+        /* The body is withheld rather than printed. redact() works on a parsed
+        ** object and there isn't one here, so there is no way to know what is
+        ** in these bytes -- and the length is enough to tell a truncated frame
+        ** from a wrong one. */
+        logLine("er", "unparseable frame, " + String(ev.data).length
+                      + " chars (body withheld: it could not be parsed, so it "
+                      + "could not be redacted)");
+        return;
+      }
+
+      /* Broadcasts are not answers to anything. They are tagged with
+      ** id:"ui_broadcast" and carry msg_subclass instead of method -- see
+      ** EZPI_core_device_value_update_*_broadcast(). */
+      if (m.id === "ui_broadcast" || m.msg_subclass) {
+        logLine("bc", (m.msg_subclass || "broadcast") + " "
+                      + JSON.stringify(redact(m.result)));
+        if (RPC.onBroadcast) RPC.onBroadcast(m);
+        return;
+      }
+
+      const p = RPC.pending.get(m.id);
+      if (!p) {
+        logLine("rx", "reply with no pending call, id=" + m.id);
+        return;
+      }
+      RPC.pending.delete(m.id);
+      clearTimeout(p.timer);
+      logFrame("rx", m);
+
+      /* THE contract: error is null on success and an object on failure.
+      ** Checked with != null so that both null and undefined count as "no
+      ** error", because the refusal built in __message_upcall() for an
+      ** unauthorised call carries error but nothing else does differently. */
+      if (m.error != null) p.reject(m.error);
+      else p.resolve(m.result === undefined ? {} : m.result);
+    };
+  },
+
+  call(method, params) {
+    return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        reject(new Error("not connected"));
+        return;
+      }
+      const id = "ui" + (++this.seq);
+      const req = { method: method, id: id, sender: { type: "ui" } };
+      if (params !== undefined) req.params = params;
+
+      const timer = setTimeout(() => {
+        RPC.pending.delete(id);
+        reject(new Error("no reply after " + (RPC.TIMEOUT_MS / 1000) + "s"));
+      }, this.TIMEOUT_MS);
+
+      this.pending.set(id, { resolve, reject, timer });
+
+      logFrame("tx", req);
+      this.ws.send(JSON.stringify(req));
+    });
+  }
+};
+
+function status(cls, text) {
+  const d = $("conn-dot");
+  d.className = "dot " + cls;
+  $("conn-text").textContent = text;
+}
+
+/* Credential fields, stripped from the LOGGED copy of a frame only. What goes
+** on the wire is untouched -- this exists because the traffic log is the thing
+** a person screenshots into a bug report.
+**
+** It has to run in BOTH directions. Outbound, three methods carry a secret in
+** their params: hub.offline.login.ui -> token, hub.network.wifi.try_connect ->
+** network.key, hub.mqtt.config.set -> password. Inbound, hub.network.get
+** reports the device's stored PSK back as wifi.network.key (see
+** ezlopi_cloud_network.c, where the wire format is deliberately unchanged
+** because the Ezlo app depends on it) -- so a reply leaks it even though no
+** request did.
+**
+** By field name and not by method name, because the next method to carry a
+** credential will not be on anybody's list.
+**
+** "key" is blanked only in an object that also has an "ssid", which is the
+** Wi-Fi shape in both directions. Unqualified, "key" is too ordinary a word to
+** blank in a log whose whole purpose is to be read -- scene blocks and
+** settings use it for data that is not secret. Empty and null are left alone:
+** "no password is set" is a thing you need to see, and is not a secret.
+**
+** A WEAKER GUARANTEE THAN THE FIRMWARE'S, DELIBERATELY
+**
+** tests/ci/check_no_secret_logging.py argues the opposite for the C side: a
+** Kconfig switch over per-field redaction, because redaction "fails silently
+** the first time a new method adds a secret field nobody adds to the list".
+** That objection applies here too and is not answered -- it is accepted, for
+** two reasons the firmware does not have. There is no Kconfig in a static page
+** served to a browser, so the switch is not available; and the other half of
+** that objection, that redaction means parsing untrusted input purely to
+** decide what to log, does not apply, because the frame is already a parsed
+** object -- the page needs it parsed regardless.
+**
+** So this is a mitigation, not a guarantee. Two things follow from admitting
+** that: the list keys on field NAMES rather than on method names, so a new
+** method carrying an already-known field name is covered without anyone
+** noticing it needs to be; and the places that dump structure this page has
+** never seen -- the Hub table's unknown-field loop and the Console's reply
+** pane -- redact on the way to the screen as well, since those are exactly
+** where an unlisted field would surface. */
+const SECRET_FIELDS = ["token", "password", "passphrase", "psk"];
+
+function redact(v) {
+  if (Array.isArray(v)) return v.map(redact);
+  if (v === null || typeof v !== "object") return v;
+  const out = {};
+  const wifiShaped = Object.prototype.hasOwnProperty.call(v, "ssid");
+  for (const k of Object.keys(v)) {
+    const secret = SECRET_FIELDS.indexOf(k) !== -1 || (k === "key" && wifiShaped);
+    if (secret && v[k] !== "" && v[k] !== null && v[k] !== undefined) {
+      out[k] = "***";
+    } else {
+      out[k] = redact(v[k]);
+    }
+  }
+  return out;
+}
+
+function logFrame(cls, obj) {
+  logLine(cls, JSON.stringify(redact(obj)));
+}
+
+let logCount = 0;
+function logLine(cls, text) {
+  const box = $("log");
+  if (!box) return;
+  if (logCount > 300) { clear(box); logCount = 0; }
+  logCount++;
+  box.appendChild(el("div", { class: cls }, text));
+  box.scrollTop = box.scrollHeight;
+}
+
+/* -------------------------------------------------------------------- login */
+
+function login(user, token, quiet) {
+  $("b-login").disabled = true;
+  return RPC.call("hub.offline.login.ui", { user: user, token: token })
+    .then(() => {
+      RPC.authed = true;
+      sessionStorage.setItem("ezpi_token", token);
+      sessionStorage.setItem("ezpi_user", user);
+      $("sec-login").classList.add("hide");
+      $("app").classList.remove("hide");
+      loadHub();
+      loadMethodList();
+    })
+    .catch((e) => {
+      /* "Already logged in" means this very connection is authorised, which
+      ** happens if a retry raced the first attempt. Treat it as success rather
+      ** than locking the user out of their own device. */
+      if (e && e.data === "user.login.alreadylogged") {
+        RPC.authed = true;
+        $("sec-login").classList.add("hide");
+        $("app").classList.remove("hide");
+        loadHub();
+        loadMethodList();
+        return;
+      }
+      sessionStorage.removeItem("ezpi_token");
+      if (!quiet) say("login-msg", "err", errText(e));
+      else say("login-msg", "err", "Stored key was rejected: " + errText(e));
+      $("sec-login").classList.remove("hide");
+      $("app").classList.add("hide");
+    })
+    .finally(() => { $("b-login").disabled = false; });
+}
+
+$("b-login").onclick = () => {
+  const t = $("f-token").value.trim();
+  if (!t) { say("login-msg", "err", "The key cannot be empty."); return; }
+  say("login-msg", "info", "logging in...");
+  login($("f-user").value.trim() || "local", t, false);
+};
+$("f-token").addEventListener("keydown", (e) => { if (e.key === "Enter") $("b-login").click(); });
+
+/* --------------------------------------------------------------------- tabs */
+
+for (const b of $("tabs").querySelectorAll("button")) {
+  b.onclick = () => {
+    for (const o of $("tabs").querySelectorAll("button")) o.removeAttribute("aria-current");
+    b.setAttribute("aria-current", "page");
+    for (const name of ["hub", "devices", "wifi", "mqtt", "console"]) {
+      $("tab-" + name).classList.toggle("hide", name !== b.dataset.tab);
+    }
+  };
+}
+
+/* ---------------------------------------------------------------------- hub */
+
+/* Shown in this order when present. hub.info.get returns a good deal more
+** than this; these are the fields worth a person's attention, and anything
+** else is a Console call away. */
+const HUB_FIELDS = [
+  ["model", "Model"],
+  ["architecture", "Architecture"],
+  ["firmware", "Firmware"],
+  ["serial", "Serial"],
+  ["uptime", "Uptime"],
+  ["localtime", "Local time"],
+  ["location", "Location"],
+  ["build", "Build"],
+  ["hardware", "Hardware"]
+];
+
+function loadHub() {
+  say("hub-msg", "info", "loading...");
+  RPC.call("hub.info.get").then((r) => {
+    say("hub-msg", "", "");
+    const t = $("hub-table");
+    clear(t);
+    /* Redacted for display because the loop below deliberately prints fields
+    ** this page has never heard of -- so a firmware that starts reporting a
+    ** credential in hub.info.get would otherwise put it on screen. Nothing
+    ** here needs a secret's value. */
+    r = redact(r);
+    const seen = new Set();
+    for (const [key, label] of HUB_FIELDS) {
+      if (r[key] === undefined) continue;
+      seen.add(key);
+      const tr = el("tr");
+      tr.appendChild(el("th", null, label));
+      tr.appendChild(el("td", { class: "mono" },
+        typeof r[key] === "object" ? JSON.stringify(r[key]) : r[key]));
+      t.appendChild(tr);
+    }
+    /* Anything the list above did not name, so a firmware that reports a new
+    ** field does not hide it behind a page that has not been updated. */
+    for (const key in r) {
+      if (seen.has(key)) continue;
+      const tr = el("tr");
+      tr.appendChild(el("th", { class: "dim" }, key));
+      tr.appendChild(el("td", { class: "mono dim" },
+        typeof r[key] === "object" ? JSON.stringify(r[key]) : r[key]));
+      t.appendChild(tr);
+    }
+    const name = r.model || r.serial;
+    if (name) $("hub-sub").textContent = name;
+  }).catch((e) => say("hub-msg", "err", errText(e)));
+}
+
+$("b-hub-refresh").onclick = loadHub;
+
+$("b-reboot").onclick = () => {
+  if (!confirm("Reboot the device now?\n\nThis page will go blank until it comes back.")) return;
+  /* hub.reboot does not reply -- the device restarts first -- so a timeout
+  ** here is the expected outcome and is not reported as a failure. */
+  say("hub-msg", "info", "reboot requested; the device will drop this connection.");
+  RPC.call("hub.reboot").catch(() => {});
+};
+
+/* ------------------------------------------------------------------ devices */
+
+function loadDevices() {
+  say("dev-msg", "info", "loading...");
+  Promise.all([RPC.call("hub.devices.list"), RPC.call("hub.items.list")])
+    .then(([dev, items]) => {
+      say("dev-msg", "", "");
+      const names = new Map();
+      for (const d of (dev.devices || [])) names.set(d._id, d.name || d._id);
+
+      const t = $("dev-table");
+      clear(t);
+      const list = items.items || [];
+      if (!list.length) {
+        const tr = el("tr");
+        tr.appendChild(el("td", { colspan: "4", class: "dim" },
+          "No items. Nothing is configured on this device yet."));
+        t.appendChild(tr);
+      }
+      for (const it of list) {
+        const tr = el("tr");
+        tr.appendChild(el("td", null, names.get(it.deviceId) || it.deviceId || ""));
+        tr.appendChild(el("td", null, it.name || it._id));
+
+        const val = it.value !== undefined ? it.value
+          : (it.valueFormatted !== undefined ? it.valueFormatted : "");
+        const vcell = el("td", { class: "mono" },
+          typeof val === "object" ? JSON.stringify(val) : val);
+        if (it.scale) vcell.appendChild(el("span", { class: "dim" }, " " + it.scale));
+        tr.appendChild(vcell);
+
+        const act = el("td");
+        if (it.hasSetter) {
+          const box = el("input", { value: val === null ? "" : String(val), "aria-label": "new value" });
+          box.style.minWidth = "5rem";
+          const b = el("button", { class: "ghost" }, "Set");
+          b.onclick = () => setItem(it, box.value);
+          act.appendChild(box);
+          act.appendChild(b);
+        }
+        tr.appendChild(act);
+        t.appendChild(tr);
+      }
+    })
+    .catch((e) => say("dev-msg", "err", errText(e)));
+}
+
+function setItem(item, raw) {
+  /* The API is typed: a number item wants a number, not "23". Convert when the
+  ** item says it is numeric and the text parses, and otherwise send the text
+  ** and let the device refuse it -- which it can now say so about. */
+  let v = raw;
+  if (/^(int|float|number)/i.test(item.valueType || "") && raw.trim() !== "" && !isNaN(Number(raw))) {
+    v = Number(raw);
+  } else if (/^bool/i.test(item.valueType || "")) {
+    v = /^(1|true|on|yes)$/i.test(raw.trim());
+  }
+  say("dev-msg", "info", "setting " + (item.name || item._id) + "...");
+  RPC.call("hub.item.value.set", { _id: item._id, value: v })
+    .then(() => { say("dev-msg", "ok", "accepted."); setTimeout(loadDevices, 600); })
+    .catch((e) => say("dev-msg", "err", errText(e)));
+}
+
+$("b-dev-refresh").onclick = loadDevices;
+
+/* --------------------------------------------------------------------- wifi */
+
+function loadNetwork() {
+  say("wifi-msg", "info", "reading...");
+  RPC.call("hub.network.get").then((r) => {
+    say("wifi-msg", "", "");
+    const t = $("net-table");
+    clear(t);
+    for (const iface of (r.interfaces || [])) {
+      const tr = el("tr");
+      tr.appendChild(el("th", null, iface._id || "interface"));
+      const bits = [];
+      if (iface.ipv4 && iface.ipv4.ip) bits.push("ip " + iface.ipv4.ip);
+      if (iface.ipv4 && iface.ipv4.gateway) bits.push("gw " + iface.ipv4.gateway);
+      if (iface.hwaddr) bits.push("mac " + iface.hwaddr);
+      if (iface.network && iface.network.ssid) bits.push("ssid " + iface.network.ssid);
+      tr.appendChild(el("td", { class: "mono" }, bits.join("  ")));
+      t.appendChild(tr);
+    }
+  }).catch((e) => say("wifi-msg", "err", errText(e)));
+}
+
+/* Scan results do not come back as the reply to scan.start. They arrive later
+** as a broadcast tagged hub.network.wifi.scan.progress, possibly more than
+** once, so the table is replaced on each one. */
+RPC.onBroadcast = (m) => {
+  if (m.msg_subclass !== "hub.network.wifi.scan.progress") return;
+  const nets = (m.result && m.result.networks) || [];
+  const t = $("scan-table");
+  clear(t);
+  nets.sort((a, b) => (b.rssi || -999) - (a.rssi || -999));
+  for (const n of nets) {
+    const tr = el("tr");
+    tr.appendChild(el("td", null, n.ssid || "(hidden)"));
+    tr.appendChild(el("td", { class: "mono" }, (n.rssi !== undefined ? n.rssi + " dBm" : "")));
+    tr.appendChild(el("td", null, n.security || ""));
+    const act = el("td");
+    if (n.ssid) {
+      const b = el("button", { class: "ghost" }, "Use");
+      b.onclick = () => { $("f-ssid").value = n.ssid; $("f-psk").focus(); };
+      act.appendChild(b);
+    }
+    tr.appendChild(act);
+    t.appendChild(tr);
+  }
+  say("wifi-msg", "ok", nets.length + " network(s) found.");
+};
+
+$("b-net-refresh").onclick = loadNetwork;
+$("b-scan").onclick = () => {
+  say("wifi-msg", "info", "scanning; results arrive as a broadcast...");
+  RPC.call("hub.network.wifi.scan.start").catch((e) => say("wifi-msg", "err", errText(e)));
+};
+$("b-scan-stop").onclick = () => {
+  RPC.call("hub.network.wifi.scan.stop")
+    .then(() => say("wifi-msg", "info", "scan stopped."))
+    .catch((e) => say("wifi-msg", "err", errText(e)));
+};
+
+$("b-join").onclick = () => {
+  const ssid = $("f-ssid").value;
+  const key = $("f-psk").value;
+  if (!ssid || !key) {
+    say("wifi-msg", "err", "The firmware rejects an empty SSID or password without trying.");
+    return;
+  }
+  if (!confirm("Move the device to \"" + ssid + "\"?\n\nIf this fails the device returns to the "
+             + "current network. If it succeeds, this page is at a new address.")) return;
+  /* interfaceId and the {ssid, key} shape are what EZPI_network_wifi_try_connect
+  ** reads; "key" rather than "password" is the firmware's spelling. */
+  say("wifi-msg", "info", "sent. The device tries this in the background and may drop this connection.");
+  RPC.call("hub.network.wifi.try_connect", {
+    interfaceId: "wlan0",
+    network: { ssid: ssid, key: key }
+  }).then(() => {
+    $("f-psk").value = "";
+  }).catch((e) => say("wifi-msg", "err", errText(e)));
+};
+
+/* --------------------------------------------------------------------- mqtt */
+
+function loadMqtt() {
+  say("mqtt-msg", "info", "loading...");
+  RPC.call("hub.mqtt.config.get").then((r) => {
+    $("m-host").value = r.host || r.broker || "";
+    $("m-port").value = r.port || "";
+    $("m-user").value = r.username || "";
+    $("m-pass").value = "";
+    $("m-pass").placeholder = r.passwordSet ? "unchanged (one is stored)" : "none stored";
+    say("mqtt-msg", "", "");
+  }).catch((e) => say("mqtt-msg", "err", errText(e)));
+}
+
+$("b-mqtt-get").onclick = loadMqtt;
+
+$("b-mqtt-set").onclick = () => {
+  const p = {};
+  if ($("m-host").value.trim()) p.host = $("m-host").value.trim();
+  if ($("m-port").value) p.port = Number($("m-port").value);
+  if ($("m-user").value.trim()) p.username = $("m-user").value.trim();
+  /* Omitted rather than sent empty, so saving the form without retyping the
+  ** password does not wipe the stored one. */
+  if ($("m-pass").value) p.password = $("m-pass").value;
+  say("mqtt-msg", "info", "saving...");
+  RPC.call("hub.mqtt.config.set", p)
+    .then(() => { say("mqtt-msg", "ok", "saved."); $("m-pass").value = ""; loadMqtt(); })
+    .catch((e) => say("mqtt-msg", "err", errText(e)));
+};
+
+$("b-mqtt-reset").onclick = () => {
+  if (!confirm("Clear the stored MQTT configuration?")) return;
+  RPC.call("hub.mqtt.config.reset")
+    .then(() => { say("mqtt-msg", "ok", "cleared."); loadMqtt(); })
+    .catch((e) => say("mqtt-msg", "err", errText(e)));
+};
+
+/* ------------------------------------------------------------------ console */
+
+/* The method names this page knows about, for the datalist. Not fetched from
+** the device: there is no method that lists methods. */
+const KNOWN_METHODS = [
+  "hub.info.get", "hub.status.get", "hub.reboot",
+  "hub.devices.list", "hub.items.list", "hub.item.value.set",
+  "hub.device.name.set", "hub.device.room.set", "hub.device.settings.list",
+  "hub.network.get", "hub.network.wifi.scan.start", "hub.network.wifi.scan.stop",
+  "hub.network.wifi.try_connect",
+  "hub.ezlopi.config.get", "hub.ezlopi.config.set", "hub.ezlopi.config.drivers.list",
+  "hub.mqtt.config.get", "hub.mqtt.config.set", "hub.mqtt.config.reset",
+  "hub.room.list", "hub.room.create", "hub.room.delete",
+  "hub.scenes.list", "hub.scenes.create", "hub.scenes.run", "hub.scenes.delete",
+  "hub.settings.list", "hub.setting.value.set",
+  "hub.modes.get", "hub.modes.current.get", "hub.modes.switch",
+  "hub.data.list", "hub.gateways.list", "hub.favorite.list",
+  "hub.log.local.set", "hub.coordinates.get", "hub.coordinates.set",
+  "hub.firmware.update.start", "cloud.firmware.info.get"
+];
+
+function loadMethodList() {
+  const dl = $("c-methods");
+  clear(dl);
+  for (const m of KNOWN_METHODS) dl.appendChild(el("option", { value: m }));
+}
+
+$("b-send").onclick = () => {
+  const method = $("c-method").value.trim();
+  if (!method) { say("c-msg", "err", "Need a method name."); return; }
+  const raw = $("c-params").value.trim();
+  let params;
+  if (raw) {
+    try {
+      params = JSON.parse(raw);
+    } catch (e) {
+      say("c-msg", "err", "params is not valid JSON: " + e.message);
+      return;
+    }
+  }
+  say("c-msg", "info", "sent...");
+  /* Redacted for display: this box answers any method, including
+  ** hub.network.get, whose reply carries the device's stored Wi-Fi PSK. */
+  RPC.call(method, params)
+    .then((r) => say("c-msg", "ok", JSON.stringify(redact(r), null, 2)))
+    .catch((e) => say("c-msg", "err", errText(e)));
+};
+
+$("b-log-clear").onclick = () => { clear($("log")); logCount = 0; };
+
+/* Load each panel the first time it is opened, so logging in does not fire
+** eight calls at once at a device with one core. */
+const loaded = {};
+for (const b of $("tabs").querySelectorAll("button")) {
+  const prev = b.onclick;
+  b.onclick = () => {
+    prev();
+    const t = b.dataset.tab;
+    if (loaded[t]) return;
+    loaded[t] = true;
+    if (t === "devices") loadDevices();
+    if (t === "wifi") loadNetwork();
+    if (t === "mqtt") loadMqtt();
+  };
+}
+
+RPC.connect();
+</script>
+</body>
+</html>
