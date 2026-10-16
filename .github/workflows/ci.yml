@@ -125,6 +125,36 @@ jobs:
       - name: TRACE_* format strings stay compiler-checked
         run: python3 tests/ci/check_trace_format_attr.py
 
+      # config_ui.html's traffic log -- the thing a person screenshots into a
+      # bug report -- printed every frame verbatim, and hub.network.get answers
+      # with the stored Wi-Fi PSK as `key` beside `ssid`. Opening the Wi-Fi tab
+      # wrote the PSK onto the page. Three more methods carry a credential in
+      # their params. This check was written with the fix but never added to any
+      # workflow, so until now it ran nowhere: a check that protects nothing is
+      # worse than no check, because it reads as coverage.
+      - name: Local configuration page cannot display a credential
+        run: python3 tests/ci/check_ui_frame_redaction.py
+
+      # GPIO_IS_VALID_GPIO() looks like a range check and is not one: it is
+      # ((1ULL << pin) & SOC_GPIO_VALID_GPIO_MASK) != 0, with no range term at
+      # all. A shift count past the register width is truncated rather than
+      # rejected, so an out-of-range pin does not fail the test -- it aliases
+      # onto a real pin and passes. Measured against all four target masks, pin
+      # 70 is accepted as bit 6 and pin 64 as bit 0, and GPIO 6 is the SPI flash
+      # clock. The fix is a single bound inside
+      # EZPI_core_cjson_get_value_gpio(), reached through CJSON_GET_VALUE_GPIO.
+      #
+      # Sixteen pin reads across five drivers were on the general-purpose
+      # integer readers instead, which do not and should not carry that bound,
+      # and the worst of them (pms5003) had no GPIO_IS_VALID_GPIO of its own
+      # either. Fixing sixteen sites does nothing about a seventeenth, and every
+      # driver here was visibly written by copying another one. So this enforces
+      # both halves: pin keys are read through the accessor, and the accessor
+      # still bounds against GPIO_NUM_MAX -- delete that bound and all 144 call
+      # sites keep compiling while silently protecting nothing.
+      - name: Device-configuration pin numbers stay bounded
+        run: python3 tests/ci/check_gpio_accessor.py
+
       # Eight lines across seven files printed a credential: the local API key
       # twice, the Wi-Fi PSK twice, the cloud provisioning token, the device's
       # SSL private key, and two whole request-body dumps -- one of which

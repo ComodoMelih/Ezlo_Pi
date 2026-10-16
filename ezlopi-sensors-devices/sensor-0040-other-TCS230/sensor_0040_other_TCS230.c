@@ -182,12 +182,24 @@ static void __prepare_item_interface_properties(l_ezlopi_item_t *item, cJSON *cj
         if (user_data)
         {
             item->interface_type = EZLOPI_DEVICE_INTERFACE_MAX;
-            CJSON_GET_VALUE_UINT32(cj_device, ezlopi_gpio1_str, user_data->TCS230_pin.gpio_s0);           // gpio_s0
-            CJSON_GET_VALUE_UINT32(cj_device, ezlopi_gpio2_str, user_data->TCS230_pin.gpio_s1);           // gpio_s1
-            CJSON_GET_VALUE_UINT32(cj_device, ezlopi_gpio3_str, user_data->TCS230_pin.gpio_s2);           // gpio_s2
-            CJSON_GET_VALUE_UINT32(cj_device, ezlopi_gpio4_str, user_data->TCS230_pin.gpio_s3);           // gpio_s3
-            CJSON_GET_VALUE_UINT32(cj_device, ezlopi_gpio5_str, user_data->TCS230_pin.gpio_output_en);    // gpio_output_en
-            CJSON_GET_VALUE_UINT32(cj_device, ezlopi_gpio6_str, user_data->TCS230_pin.gpio_pulse_output); // gpio_pulse_output
+            /* CJSON_GET_VALUE_GPIO rather than _UINT32, so the number is bounded
+            ** to [0, GPIO_NUM_MAX) before it reaches the GPIO_IS_VALID_GPIO chain
+            ** at line ~239. That macro is a shift, not a range test, so an
+            ** out-of-range pin aliases onto a real one and passes it -- 70 is
+            ** accepted as bit 6, the SPI flash clock, on all four target masks.
+            **
+            ** These six fields stay uint32_t. The accessor returns -1 for a pin
+            ** it refuses, which lands here as 4294967295, and that was measured
+            ** to be indistinguishable from -1 to the valid-pin macro: both give
+            ** 1ULL << n == 0x8000000000000000, which every target mask rejects.
+            ** So the refusal still reads as a refusal and init fails cleanly,
+            ** without changing the struct. */
+            CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio1_str, user_data->TCS230_pin.gpio_s0);           // gpio_s0
+            CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio2_str, user_data->TCS230_pin.gpio_s1);           // gpio_s1
+            CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio3_str, user_data->TCS230_pin.gpio_s2);           // gpio_s2
+            CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio4_str, user_data->TCS230_pin.gpio_s3);           // gpio_s3
+            CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio5_str, user_data->TCS230_pin.gpio_output_en);    // gpio_output_en
+            CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio6_str, user_data->TCS230_pin.gpio_pulse_output); // gpio_pulse_output
         }
     }
 }

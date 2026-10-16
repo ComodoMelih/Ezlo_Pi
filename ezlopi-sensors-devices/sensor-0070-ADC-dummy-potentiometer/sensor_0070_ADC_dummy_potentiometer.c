@@ -156,7 +156,10 @@ static void __prepare_item_cloud_properties(l_ezlopi_item_t *item, cJSON *cj_dev
     item->user_arg = user_data;
 
     item->interface_type = EZLOPI_DEVICE_INTERFACE_ANALOG_INPUT; // other
-    CJSON_GET_VALUE_INT(cj_device, ezlopi_gpio_str, item->interface.adc.gpio_num);
+    /* CJSON_GET_VALUE_GPIO, so the pin is bounded to [0, GPIO_NUM_MAX) like the
+    ** other 127 pin reads in the tree. This was the last site still reading the
+    ** plain "gpio" key through the unbounded int reader. */
+    CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio_str, item->interface.adc.gpio_num);
     item->interface.adc.resln_bit = 3;
 }
 

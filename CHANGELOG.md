@@ -2233,7 +2233,7 @@ targets.
 
   `EZPI_core_cjson_get_value_gpio()` is the one place that number entered. It
   checked nothing — it returned `(int)o_item->valuedouble` for whatever the
-  document carried, and `-1` only when the key was missing — and 128 call sites
+  document carried, and `-1` only when the key was missing — and 144 call sites
   across 10 of the pin keys fed it straight to the macro.
 
   Measured on the host, with the macro's own expression and the esp32 mask, at
@@ -2254,7 +2254,7 @@ targets.
   check; "accepted when it should not be" is a host measurement, not an
   inference.
 
-  **The fix is one bound at the read, not 128 changes at the call sites.** A
+  **The fix is one bound at the read, not 144 changes at the call sites.** A
   number is returned only if it is in `[0, GPIO_NUM_MAX)` for the target being
   built, or is one of the two sentinels. The test is on the `double`, before the
   narrowing cast, because converting a `double` that does not fit an `int` is
@@ -2327,9 +2327,12 @@ targets.
 
   Four-target build sweep: all of esp32, esp32s2, esp32s3 and esp32c3 build, the
   new warning string is present in all four images, and the edited file produces
-  **zero** warnings on any of them — the 87 (85 on the C3)
-  `-Wincompatible-pointer-types` in the build are the pre-existing ones from the
-  header, documented above `CJSON_GET_VALUE_INT`.
+  **zero** warnings on any of them. The `-Wincompatible-pointer-types` in the
+  build are pre-existing: 87 on esp32/s2/s3, all of them from the header
+  documented above `CJSON_GET_VALUE_INT`, and 92 on the C3 — 85 from that header
+  plus 7 that only the riscv32 compiler is able to report, because `uint32_t` is
+  `long unsigned int` there and `unsigned int` on xtensa. See *Device
+  configuration pins* below.
 
 - **A device configuration that will not parse no longer bricks the hub.**
   `EZPI_device_prepare()` reads the stored configuration once per boot, and when
@@ -4142,6 +4145,54 @@ enumerators — so the live half of this component was never affected.
   reports all four defects at the right functions, and against the current
   tree, where it reports none.
 
+- **New CI check that device-configuration pin numbers stay bounded,
+  [`tests/ci/check_gpio_accessor.py`](tests/ci/check_gpio_accessor.py).** Same
+  reason as the chunk-clamp check: the fix was right and nothing kept it right.
+  Sixteen pin reads across five drivers were on the general-purpose integer
+  readers rather than the GPIO accessor, so the bound that makes an
+  out-of-range pin fail instead of aliasing onto a real one did not apply to
+  them — and every driver in this tree was visibly written by copying another,
+  so a seventeenth is a matter of time. See *Device configuration pins* above
+  for the aliasing itself.
+
+  It enforces two rules, because either one failing alone removes the protection
+  from all of them: a pin key is read through `CJSON_GET_VALUE_GPIO`, and
+  `EZPI_core_cjson_get_value_gpio()` still bounds against `GPIO_NUM_MAX`. The
+  second is the quieter failure — delete that comparison and all 144 call sites
+  keep compiling while protecting nothing.
+
+  Two deliberate design choices, each because the obvious version would have
+  missed a real site. **The pin keys are derived, not listed**, from the
+  `ezlopi_gpio*_str` declarations in
+  [`ezlopi_cloud_keywords.c`](ezlopi-cloud/ezlopi-cloud-constants/ezlopi_cloud_keywords.c)
+  — 15 of them today — so a pin key added later is covered without editing the
+  check. **Bare string literals count too**, because `pms_dev_items_prepare.c`
+  read its fourth pin as a literal `"gpio4"` rather than through
+  `ezlopi_gpio4_str`, and a check keyed only on the keyword variables would have
+  passed over precisely the least protected site in the tree. Conversely the 26
+  reads whose *destination* mentions gpio but whose key is a flag
+  (`ezlopi_logic_inv_str` into `item->interface.gpio.gpio_in.invert`, and
+  friends) must not be flagged, and `SELF_TEST['flag_not_a_pin']` pins that down.
+
+  Verified by mutation against the real tree in a scratch copy, not only by its
+  self-tests: undoing one of the sixteen reroutes is reported at the right line,
+  undoing the bare-literal one is reported, and replacing the accessor's
+  `GPIO_NUM_MAX` comparison is reported — the last one while `GPIO_NUM_MAX` still
+  appears twice elsewhere in that file, which is what shows the check is reading
+  the function body rather than grepping the file. Baseline and restored copies
+  both pass. A literal bound is rejected as well as a missing one, because
+  `GPIO_NUM_MAX` is 40 on esp32 and 22 on esp32c3, so a hard-coded 40 would be
+  wrong on three targets out of four.
+
+- **[`tests/ci/check_ui_frame_redaction.py`](tests/ci/check_ui_frame_redaction.py)
+  was written, committed, and never wired into a workflow.** It ran nowhere. It
+  is in `ci.yml` now. Found by asking, for each of the 13 `tests/ci/check_*.py`,
+  whether any workflow file names it — twelve did. A check that exists and never
+  runs is worse than no check, because it reads as coverage in exactly the place
+  someone would look for it: this one is the only thing standing between
+  `hub.network.get`'s reply and the Wi-Fi PSK appearing in the local
+  configuration page's traffic log.
+
 - **New CI check that `TRACE_*` stays compiler-checked,
   [`tests/ci/check_trace_format_attr.py`](tests/ci/check_trace_format_attr.py).**
   The underlying fix is a one-line `__attribute__((format(printf, …)))` on
@@ -5109,18 +5160,89 @@ Listed because a changelog that only mentions what was finished is misleading.
   **One part of this gap is now closed, and it was the dangerous part.** A pin
   number outside `[0, GPIO_NUM_MAX)` used to be *accepted* — it aliased onto a
   real pin, because the valid-pin macro is a shift and not a range test — and is
-  now refused at the single accessor all 128 `CJSON_GET_VALUE_GPIO` sites read
+  now refused at the single accessor all 144 `CJSON_GET_VALUE_GPIO` sites read
   through. See *Device configuration* above. What that entry does **not** close,
   and what the rest of this entry is about, is pins that are perfectly real and
   still the wrong choice.
 
-  Sixteen pin reads are also still outside it, because they go through
-  `CJSON_GET_VALUE_INT`/`UINT32` rather than the GPIO accessor: device-0038 RGB
-  (3), sensor-0037 pms5003 (4), sensor-0040 TCS230 (6), sensor-0047 HX711 (2),
-  sensor-0070 (1). Those two macros are general integer readers used by hundreds
-  of non-pin keys, so the bound does not belong in them; routing the sixteen
-  through the GPIO accessor means changing their destination types, which is a
-  separate change rather than a line on the end of this one.
+  The sixteen pin reads that were outside the accessor are now inside it, and
+  `tests/ci/check_gpio_accessor.py` is what keeps them there. They had gone
+  through `CJSON_GET_VALUE_INT`/`UINT32`: device-0038 RGB (3), sensor-0037
+  pms5003 (4), sensor-0040 TCS230 (6), sensor-0047 HX711 (2), sensor-0070 (1).
+  Those two macros are general integer readers used by hundreds of non-pin keys,
+  so the bound does not belong in them.
+
+  **This cost no destination-type changes, which is why it was worth doing now
+  rather than as its own project.** The earlier version of this paragraph said
+  routing the sixteen "means changing their destination types"; that was wrong
+  twice over. `CJSON_GET_VALUE_GPIO` *assigns* its result
+  (`gpio_num = EZPI_core_cjson_get_value_gpio(...)`) where every other accessor
+  writes through a pointer (`EZPI_core_cjson_get_value_int(..., &item_val)`), so
+  the destination is converted by the compiler rather than aliased, and the
+  three destination types present — `int`, `uint32_t`, and `gpio_num_t` — all
+  take the assignment. And the ten `uint32_t` destinations do not need widening
+  to hold `-1`: measured against all four target masks, `-1` and
+  `(uint32_t)4294967295` are *indistinguishable* to `GPIO_IS_VALID_GPIO`,
+  because both give `1ULL << n == 0x8000000000000000` and every mask rejects
+  bit 63. The "no pin" sentinel survives the unsigned round trip.
+
+  One of the sixteen was worse than the other fifteen and is the reason this
+  moved up the list. `pms_dev_items_prepare.c` read its fourth pin as a bare
+  `"gpio4"` string literal rather than through `ezlopi_gpio4_str`, and
+  `pms_gpio_config_output()` in `pms5003.c` builds `pin_bit_mask = (1ULL << pin)`
+  with **no** `GPIO_IS_VALID_GPIO` call at all, while `pms_init()` is `void` so
+  the failing `gpio_config()` return has nowhere to go (it is one of the two
+  exceptions tabulated above). Nothing anywhere in that path would have refused
+  pin 70. For pms5003 the reroute converts "silently reconfigure the SPI flash
+  clock" into "`gpio_config()` returns `ESP_ERR_INVALID_ARG` and that pin does
+  not work", which is the same trade this entry already makes elsewhere. The
+  other four drivers do gate their pins on `GPIO_IS_VALID_GPIO`, so for them a
+  refused pin was already handled.
+
+  **The reroute removes none of the `-Wincompatible-pointer-types` warnings, and
+  an earlier draft of the HX711 comment claimed it removed two.** Built both
+  ways on esp32c3 from the same mirror with the same grep: 92 pointer-type
+  warnings before, 92 after, with the same set of sites. HX711's two pin fields
+  *are* `gpio_num_t`, an enum, and the old code did take their address as an
+  `int *` — but `gpio_num_t` declares `GPIO_NUM_NC = -1`, so its compatible type
+  is `int` and `gpio_num_t *` genuinely is compatible with `int *`. The enums
+  that warn, such as the `e_ezlopi_device_interface_type_t` on the line above,
+  have no negative enumerator, so the compiler picks `unsigned int` for them.
+  Confirmed with a two-enum probe: the one with a `-1` member passes `&x` to an
+  `int *` parameter silently; the all-non-negative one warns. HX711 contributes
+  exactly one pointer-type warning, on that `interface_type` read, before and
+  after.
+
+  Finding that out corrected the count this entry had been quoting. The warnings
+  are **87 on esp32, esp32s2 and esp32s3 and 92 on esp32c3**, not 87
+  everywhere. On the three xtensa targets all 87 are reported at
+  `ezlopi_core_cjson_macros.h` and none anywhere else. esp32c3 has 85 there —
+  the two missing ones are both in `sensor_0016_oneWire_DHT22.c`, whose entire
+  body, lines 43 to 375 of 378, sits inside
+  `#if (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)`,
+  so on the C3 that file compiles to a 1152-byte object containing nothing. That
+  was established by replaying the build's own compile command for the file with
+  a control (`device_0004_digitalIn_generic.c`, same macro, same destination
+  field, 2 warnings on the same compiler) rather than by reading the `#if`,
+  because the first three explanations tried — not compiled, `ccache` replaying
+  a cached object, a per-component `-w` — were all wrong, and the flags are
+  byte-identical between the two files. **Separately, this means the DHT11 and
+  DHT22 drivers are absent from esp32c3 firmware while
+  `SENSOR_0015_ONEWIRE_DHT11` and `SENSOR_0016_ONEWIRE_DHT22` are unconditionally
+  `1` in `ezlopi_core_device_macros.h`, so the device list offers both on every
+  target.** That is not touched here and is recorded as its own open question.
+
+  The remaining 7 on the C3 are in five files that every target builds —
+  `ezlopi_service_uart.c` and
+  `ezlopi_core_log.c` (2 each), `ezlopi_hal_uart.c`,
+  `hilink_presence_sensor_setting.c` and
+  `ezlopi_service_system_temperature_sensor.c`. Those 7 are an ABI difference,
+  not a c3-only bug: `__UINT32_TYPE__` is `unsigned int` on
+  `xtensa-esp32-elf-gcc` and `long unsigned int` on `riscv32-esp-elf-gcc`, so
+  `&some_enum` passed to a `uint32_t *` parameter is compatible on xtensa and
+  incompatible on riscv32. Probed directly on both compilers with the same four
+  lines. The type confusion is equally real on all four targets; only one
+  toolchain is in a position to say so.
 
   Beyond those sixteen, one real hole is left, and a second one this entry used
   to claim turned out not to exist:

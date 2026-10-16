@@ -357,9 +357,16 @@ static void __prepare_device_cloud_properties(l_ezlopi_device_t *device, cJSON *
 
 static void __prepare_RGB_LED_user_args(s_rgb_args_t *rgb_args, cJSON *cj_device)
 {
-    CJSON_GET_VALUE_INT(cj_device, ezlopi_gpio1_str, rgb_args->red_struct.gpio_num);
-    CJSON_GET_VALUE_INT(cj_device, ezlopi_gpio2_str, rgb_args->green_struct.gpio_num);
-    CJSON_GET_VALUE_INT(cj_device, ezlopi_gpio3_str, rgb_args->blue_struct.gpio_num);
+    /* CJSON_GET_VALUE_GPIO, not CJSON_GET_VALUE_INT: the GPIO accessor bounds the
+    ** number to [0, GPIO_NUM_MAX) for the target being built, and the plain int
+    ** reader does not. Without it a configuration naming pin 70 reached
+    ** GPIO_IS_VALID_GPIO at line ~305 below, which is a shift and not a range
+    ** test, and 1ULL << 70 sets bit 6 -- so the check passed and EZPI_hal_pwm_init
+    ** drove GPIO 6, the SPI flash clock. Measured: 70 and 64 are accepted by all
+    ** four target masks, as bit 6 and bit 0. */
+    CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio1_str, rgb_args->red_struct.gpio_num);
+    CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio2_str, rgb_args->green_struct.gpio_num);
+    CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio3_str, rgb_args->blue_struct.gpio_num);
 
     rgb_args->red_struct.duty_cycle = 0;
     rgb_args->green_struct.duty_cycle = 0;

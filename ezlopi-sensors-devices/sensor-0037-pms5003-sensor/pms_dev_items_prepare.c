@@ -545,10 +545,26 @@ static int pms5003_set_pms_object_details(cJSON *cj_properties, s_pms5003_sensor
 
     assert(pms_object != NULL);
 
-    CJSON_GET_VALUE_UINT32(cj_properties, ezlopi_gpio1_str, pms_object->pms_tx_pin);
-    CJSON_GET_VALUE_UINT32(cj_properties, ezlopi_gpio2_str, pms_object->pms_rx_pin);
-    CJSON_GET_VALUE_UINT32(cj_properties, ezlopi_gpio3_str, pms_object->pms_set_pin);
-    CJSON_GET_VALUE_UINT32(cj_properties, "gpio4", pms_object->pms_reset_pin);
+    /* CJSON_GET_VALUE_GPIO rather than _UINT32. This driver had the least
+    ** protection of any of them: pms_gpio_config_output() in pms5003.c builds
+    ** pin_bit_mask as (1ULL << pin) with no GPIO_IS_VALID_GPIO check at all, so a
+    ** configuration naming pin 70 shifted by 70, which truncates to a shift of 6
+    ** and handed gpio_config() a mask selecting GPIO 6 -- the SPI flash clock --
+    ** as a push-pull output. Nothing downstream would have refused it, and
+    ** pms_init() is void and discards the gpio_config() return anyway.
+    **
+    ** The four fields stay uint32_t: the accessor's -1 lands in them as
+    ** 4294967295, which was measured to behave identically to -1 here, giving
+    ** 1ULL << n == 0x8000000000000000 -- a mask with no valid pin in it, which
+    ** gpio_config() rejects with ESP_ERR_INVALID_ARG. A pin this driver cannot
+    ** use now fails to configure instead of configuring the wrong pin.
+    **
+    ** "gpio4" was the one pin key in the tree written as a bare string literal
+    ** instead of its keyword; ezlopi_gpio4_str is the same "gpio4". */
+    CJSON_GET_VALUE_GPIO(cj_properties, ezlopi_gpio1_str, pms_object->pms_tx_pin);
+    CJSON_GET_VALUE_GPIO(cj_properties, ezlopi_gpio2_str, pms_object->pms_rx_pin);
+    CJSON_GET_VALUE_GPIO(cj_properties, ezlopi_gpio3_str, pms_object->pms_set_pin);
+    CJSON_GET_VALUE_GPIO(cj_properties, ezlopi_gpio4_str, pms_object->pms_reset_pin);
     pms_object->pms_baud_rate = 9600;
 
     pms_object->pms_active_time = 30;

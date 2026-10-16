@@ -171,8 +171,23 @@ static void __prepare_item_cloud_properties(l_ezlopi_item_t *item, cJSON *cj_dev
     item->user_arg = user_data;
 
     CJSON_GET_VALUE_INT(cj_device, ezlopi_dev_type_str, item->interface_type); // _max = 10
-    CJSON_GET_VALUE_INT(cj_device, ezlopi_gpio1_str, user_data->HX711_SCK_pin);
-    CJSON_GET_VALUE_INT(cj_device, ezlopi_gpio2_str, user_data->HX711_DT_pin);
+    /* CJSON_GET_VALUE_GPIO bounds the number to [0, GPIO_NUM_MAX); the plain int
+    ** reader did not, and GPIO_IS_VALID_GPIO at line ~223 cannot catch the
+    ** difference because it is a shift rather than a range test -- 1ULL << 70
+    ** sets bit 6, so pin 70 passed and (1ULL << 70) became a pin_bit_mask of
+    ** GPIO 6, the SPI flash clock, at lines 227 and 235.
+    **
+    ** These two fields are gpio_num_t, an enum, and the old CJSON_GET_VALUE_INT
+    ** took their address as an int *. That is NOT one of the
+    ** -Wincompatible-pointer-types warnings described in
+    ** ezlopi_core_cjson_macros.h, and rerouting it removes none of them:
+    ** measured on esp32c3, the count is identical before and after this change.
+    ** gpio_num_t declares GPIO_NUM_NC = -1, so its compatible type is int and
+    ** gpio_num_t * really is compatible with int *. The enums that do warn, such
+    ** as the e_ezlopi_device_interface_type_t on the line above, have no negative
+    ** enumerator, so the compiler picks unsigned int for them. */
+    CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio1_str, user_data->HX711_SCK_pin);
+    CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio2_str, user_data->HX711_DT_pin);
 
     TRACE_I("hx711_DT_PIN: %d ", user_data->HX711_DT_pin);
     TRACE_I("hx711_SCL_PIN: %d ", user_data->HX711_SCK_pin);
