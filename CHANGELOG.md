@@ -482,9 +482,10 @@ None of these have been exercised on physical hardware; see Known gaps.
   evaluating nothing was the real cost. Now assigns to the outer variable.
 
   This one was found by building with `-Wshadow`, which is not otherwise
-  enabled. The sweep found nine unique shadowed declarations; this is the only
-  one so far shown to change behaviour. The other eight are listed under Known
-  gaps as untriaged.
+  enabled. The sweep found nine unique shadowed declarations; the other eight
+  were each read afterwards and none changes behaviour, so this is the only one
+  of the nine that was a defect. The per-site reasoning is under Known gaps,
+  with the residual gap being that the flag still is not enabled.
 
   Found by the same reading pass: the tree is now also deleted on the path
   where it was built but not adopted into `user_arg`, which previously leaked
@@ -3502,20 +3503,36 @@ Listed because a changelog that only mentions what was finished is misleading.
   "properly" and "stopped working" look the same for as long as the condition
   does not change.
 
-- **Eight shadowed declarations found by `-Wshadow` are untriaged.** The sweep
-  that found the `cj_device_items_data` defect above found nine; one was shown
-  to change behaviour and fixed. The remaining eight have been looked at only
-  far enough to know they exist: `ezlopi_cloud_items.c:124` (`device_id`),
-  `ezlopi_cloud_scenes.c:875` (`new_scene_id`), `ezlopi_core_broadcast.c:241`
-  (`curr_node`), `ezlopi_core_scenes_cjson.c:797` (`value_type_name`),
-  `ezlopi_core_scenes_operators.c:1058` (`item_id`), `gxhtc3.c:224` (`i`),
-  `sensor_0037_pms5003_sensor.c:138` (`pms_object`) and
-  `ezlopi_service_ws_server.c:337` (`cj_method`). Most shadowing is harmless;
-  the one that was not had the same shape as several of these — an inner
-  declaration initialised from a call whose result the outer variable was
-  supposed to receive — so they are worth reading individually rather than
-  dismissing as a class. `-Wshadow` is not enabled in the build, so nothing
-  stops a tenth from appearing.
+- **`-Wshadow` is not enabled in the build, so nothing stops a ninth shadowed
+  declaration from appearing.** The eight that the sweep left are no longer
+  untriaged — each was read individually and none changes behaviour — but that
+  result is a snapshot, not a guard. Enabling the flag would mean either
+  silencing eight warnings nobody intends to act on or renaming across eight
+  files for no behavioural gain, and the flag also fires inside ESP-IDF
+  headers, so it cannot simply be added with `-Werror`.
+
+  The triage is recorded here so it does not have to be redone. The sweep that
+  found the `cj_device_items_data` defect above found nine; that one was shown
+  to change behaviour and was fixed. For the remaining eight, what makes each
+  one safe is specific, and in every case it is that the shadowed outer
+  variable is either already spent or holds the identical value:
+
+  | site | variable | why it is benign |
+  |---|---|---|
+  | `ezlopi_cloud_items.c:124` | `device_id` | a `uint32_t` shadows the `cJSON *` loop variable, but the pointer is consumed on the line above and `cJSON_ArrayForEach`'s increment runs in the enclosing scope, so iteration is unaffected |
+  | `ezlopi_cloud_scenes.c:875` | `new_scene_id` | the inner sits in the `else` of `if (new_scene_id && …->valuestring)`, so the outer is known falsy there and is never read again |
+  | `ezlopi_core_broadcast.c:241` | `curr_node` | the outer was walked to `NULL` by the duplicate-check loop above; the inner re-seeds from `__method_head`, which is what a fresh walk needs |
+  | `ezlopi_core_scenes_cjson.c:797` | `value_type_name` | outer and inner are both initialised from `EZPI_core_scenes_get_scene_value_type_name(curr_field->value_type)` with `curr_field` unchanged between them, so the values are identical |
+  | `ezlopi_core_scenes_operators.c:1059` | `item_id` | the outer id was already resolved into `item_left`; the inner resolves the right-hand item. Correct, just identically named |
+  | `gxhtc3.c:224` | `i` | the inner is the 8-bit shift counter of a CRC8; the outer byte index is not referenced inside it |
+  | `sensor_0037_pms5003_sensor.c:138` | `pms_object` | the inner re-reads the same `item->user_arg` the outer already holds |
+  | `ezlopi_service_ws_server.c:337` | `cj_method` | the outer is `NULL` from its declaration until line 361 reassigns it, and line 368 is its only read, so the inner is redundant rather than load-bearing |
+
+  Worth saying plainly, because the first pass over this list got it wrong:
+  `scenes_cjson.c:797` looks like the dangerous shape — an inner declaration
+  initialised from a call — and is in fact the safest of the eight, because the
+  outer is initialised from the very same call. The shape is not the evidence;
+  what the outer holds at the point of the shadow is.
 
 - **The seven functions in `ezlopi_cloud_devcfg_port.c` have no automated
   coverage of any kind.** They are the only part of the device-configuration
