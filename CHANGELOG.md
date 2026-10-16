@@ -1040,6 +1040,99 @@ failure.
   It now falls back to a single-byte state code and lets the client read the
   characteristic for the detail.
 
+### BLE read-back — [sec]
+
+Both BLE characteristics that hand data *out* — the device config and the
+provisioning record — base64-encoded it into a fixed buffer and then checked
+the wrong thing to decide whether that had worked.
+
+- **`mbedtls_base64_encode()`'s failure was undetectable by the check used.**
+  Both call sites tested `0 == out_put_len`. On a short output buffer mbedtls
+  returns `MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL` and sets `*olen` to the size it
+  *wanted* — `n + 1`, necessarily non-zero — without writing a single byte to
+  the destination (`library/base64.c`, the `dlen < n + 1` branch). So the check
+  passed on exactly the failure it was meant to catch, and the function returned
+  a heap buffer it had never written. That buffer was then `strlen()`-ed, with
+  no terminator anywhere in it, and sent out over BLE as the device's
+  configuration or its provisioning record. The provisioning one is the record
+  carrying the SSL private key and certificates. The encode return value is now
+  the check; `0 == out_put_len` is kept alongside it only for `slen == 0`, the
+  one input mbedtls accepts without writing a NUL.
+
+- **The buffers were too small for payloads the device accepts.** Both were
+  fixed sizes — 4096 for the config, 6 KB for the provisioning record — where
+  base64 needs `ceil(n/3)*4 + 1`. They are now derived from the length actually
+  being encoded.
+
+  For the config this was a reachable range and not a corner: the field is
+  `EZLOPI_FINFO_LEN_EZLOPI_CONFIG_JSON` = `0x1000`, whose base64 needs 5465
+  bytes, so a 4096-byte buffer encoded configs up to 3069 bytes and refused
+  every larger one. The *write* path in the same file bounds incoming base64 by
+  `EZPI_BLE_DYNCFG_MAX_BASE64_LEN`, which is `ceil(0x1000/3)*4` and was
+  deliberately given a ceiling rather than a floor so that a config exactly
+  filling the field is accepted. The two directions therefore disagreed, and a
+  config between 3070 and 4096 bytes — 1027 of the sizes the field holds —
+  stored correctly and could never be read back.
+
+  The threshold is not asserted from the formula: `ceil(n/3)*4` was checked
+  against coreutils `base64 -w0` at the boundary, which agrees at 3069 fitting
+  and 3070 not.
+
+  For the provisioning record the sizing was worse in practice.
+  `ezpi_provisioning_info_jsonify()` embeds three PEM fields, each capped at
+  `0x1000` by `EZLOPI_FINFO_LEN_CA_CERTIFICATE` and its siblings, so an
+  ordinarily provisioned device clears the 4605-byte ceiling that 6 KB implied.
+  Nothing upstream held it below that either — the `6 * 1024` passed to
+  `cJSON_PrintBuffered()` is a growth hint, not a cap.
+
+- **`ezpi_provisioning_info_read_func()` dereferenced the buffer before
+  checking it for NULL.** `strlen(g_provisioning_info_base64)` ran twice on the
+  line after the assignment; the `if (NULL != g_provisioning_info_base64)` test
+  was one line too late. `ezpi_provisioning_info_base64()` returns NULL on a
+  failed `cJSON_CreateObject`, a failed `cJSON_PrintBuffered`, a failed malloc,
+  or the short-buffer case above — so this was a remote NULL dereference on a
+  characteristic readable by anyone in radio range, before anything in that file
+  has authenticated them. `ezpi_dynamic_config_read_func()` already guards the
+  identical block; only this copy was missing it. Same shape as the
+  check-after-use fix in
+  [`ezlopi_core_factory_info.c:564`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L564),
+  where `isprint(ret[0])` read the buffer before the `if (ret)` below it. Two
+  instances of the idiom now, in unrelated files, which is enough to look for it
+  deliberately rather than treat each as a one-off — recorded as a known gap.
+
+The matching `mbedtls_base64_decode()` calls were left alone deliberately.
+They discard their return value too, but the destination is `bzero`-ed first,
+so a failed decode yields an empty string that then fails `cJSON_Parse` — the
+`bzero` is doing the work the return check would, and their `o_len` was already
+a `size_t`.
+
+`out_put_len` was also a `uint32_t` where mbedtls declares `size_t *`, and the
+reason that had gone unnoticed is worth recording, because it is a general
+property of this four-target build and not a detail of this call. `size_t` is
+`unsigned int` on all four targets; `uint32_t` is `unsigned int` on xtensa but
+`long unsigned int` on riscv32. Distinct types, identical 32-bit width — so the
+store always landed correctly, and **only esp32c3 diagnosed it**. The esp32,
+esp32s2 and esp32s3 builds said nothing. Any `uint32_t`/`size_t` pointer
+confusion in this tree is therefore a c3-only diagnostic, which is an argument
+for keeping c3 in the build matrix beyond its `SOC_I2C_NUM` differences.
+
+Verified by four-target build rather than by host test, which is weaker
+evidence than this repo's norm and worth naming: both functions reach cJSON,
+the factory-info partition and the GATT layer, so a host harness would have to
+stub more than the change touches. What the build does establish is the
+`size_t *` prototype match — invisible to the host suite, which has no mbedtls
+header — the `TRACE_*` format strings against their newly cast arguments, and
+that removing the `#ifndef CONFIG_EZPI_UTIL_TRACE_EN` pair around the encode
+call left no set-but-unused `ret` in the trace-disabled configuration. The
+arithmetic is covered independently by the `base64 -w0` comparison above.
+
+The warning count moved the way the change predicts: esp32 146 → 146, esp32s2
+143 → 143, esp32s3 146 → 146, esp32c3 152 → 151, the single removal being the
+`-Wincompatible-pointer-types` above. esp32s2's image is byte-identical before
+and after, which is the expected result rather than a null one — s2 has no
+Bluetooth radio, so both of these files preprocess away entirely there. On the
+three BLE-capable targets the image grew 16, 32 and 32 bytes.
+
 ### BLE transport — [bug]
 
 - **Advertising was over the 31-byte legacy payload limit.** The advertised
@@ -3641,6 +3734,38 @@ enumerators — so the live half of this component was never affected.
 ## Known gaps
 
 Listed because a changelog that only mentions what was finished is misleading.
+
+- **"Check the pointer after using it" has now turned up twice in unrelated
+  files, and nothing systematically looks for it.** Both instances had the same
+  shape — a pointer assigned from a call that can return `NULL`, read on the
+  next line, and tested one line below that:
+  [`ezlopi_core_factory_info.c:564`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L564)
+  (`isprint(ret[0])` before `if (ret)`) and
+  `ezpi_provisioning_info_read_func()` (two `strlen()`s before
+  `if (NULL != g_provisioning_info_base64)`). The second was found only because
+  its sibling `ezpi_dynamic_config_read_func()` guards the identical block, so
+  the divergence was visible by comparison; that is luck, not method.
+
+  What makes this a gap rather than a to-do is that the obvious mechanisations
+  do not work. The compiler cannot see it: the pointer is genuinely maybe-NULL
+  and the deref is genuinely before the test, but `-Wnull-dereference` needs the
+  NULL to be provable on a path, and here it depends on whether a malloc
+  failed. A grep cannot see it either, because the idiom has no stable textual
+  form — the use may be `p[0]`, `strlen(p)`, `p->field`, or a call taking `p`,
+  and the test below may be `if (p)`, `if (NULL != p)` or an early return.
+
+  The honest option is a static analyser that handles this class properly —
+  `clang --analyze` or `cppcheck --enable=nullPointer` over the component
+  sources, neither of which is wired into CI. The alternative, reading every
+  call site, is larger than it looks: the `EZPI_core_factory_info_v3_get_*`
+  family alone is called from 116 places, and most of those getters return a
+  freshly allocated string that is `NULL` on four separate paths. That count is
+  a reason to automate rather than audit, and it is only one family of
+  `NULL`-returning getters.
+
+  Noting it rather than doing it, because inventing a grep that catches the two
+  cases already known and calling that a check is exactly the cry-wolf pattern
+  this file argues against elsewhere.
 
 - **`EZPI_hal_i2c_master_deinit()` is dead code with two defects in it, and was
   left alone deliberately.** It is declared in

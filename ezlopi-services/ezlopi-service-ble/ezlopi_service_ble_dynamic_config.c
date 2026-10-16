@@ -661,36 +661,70 @@ static char *ezpi_base64_decode_dynamic_config(uint32_t total_size)
 
 static char *ezpi_dynamic_config_base64(void)
 {
-    const uint32_t base64_data_len = 4096;
-    char *base64_data = ezlopi_malloc(__FUNCTION__, base64_data_len);
-    if (base64_data)
+    char *base64_data = NULL;
+    char *str_ezlopi_config = EZPI_core_factory_info_v3_get_ezlopi_config();
+
+    if (str_ezlopi_config)
     {
-        uint32_t out_put_len = 0;
-        char *str_ezlopi_config = EZPI_core_factory_info_v3_get_ezlopi_config(); // do not free 'str_provisioning_data', it is used by other modules
-        if (str_ezlopi_config)
-        {
-            TRACE_D("device-config: [len: %d]\n%s", strlen(str_ezlopi_config), str_ezlopi_config);
+        const size_t config_len = strlen(str_ezlopi_config);
 
-#ifndef CONFIG_EZPI_UTIL_TRACE_EN
-            mbedtls_base64_encode((unsigned char *)base64_data, base64_data_len, &out_put_len,
-                                  (const unsigned char *)str_ezlopi_config, strlen(str_ezlopi_config));
-#else
+        TRACE_D("device-config: [len: %u]\n%s", (unsigned)config_len, str_ezlopi_config);
+
+        /* Sized from the config actually read, rather than a fixed 4096.
+        **
+        ** mbedtls_base64_encode() writes ceil(n/3)*4 characters plus a
+        ** terminating NUL, and if the buffer is one byte short of that it
+        ** returns MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL having written *nothing*.
+        ** This config comes out of a field of EZLOPI_FINFO_LEN_EZLOPI_CONFIG_JSON
+        ** = 0x1000 bytes, whose base64 needs 5465 -- so a fixed 4096 encoded
+        ** configs up to 3069 bytes and refused every larger one.
+        **
+        ** That window was reachable, not theoretical. The write path in this same
+        ** file accepts base64 up to EZPI_BLE_DYNCFG_MAX_BASE64_LEN, which is
+        ** ceil(0x1000/3)*4 and is deliberately derived -- ceiling, not floor -- so
+        ** that a config exactly filling the field is accepted. A config between
+        ** 3070 and 4096 bytes therefore stored correctly and then could not be
+        ** read back at all. */
+        const size_t base64_data_len = (((config_len + 2u) / 3u) * 4u) + 1u;
+
+        base64_data = ezlopi_malloc(__FUNCTION__, base64_data_len);
+        if (base64_data)
+        {
+            size_t out_put_len = 0;
+
+            /* mbedtls declares olen as size_t*. This was a uint32_t*, and only
+            ** esp32c3 ever said so: size_t is `unsigned int` on all four
+            ** targets, while uint32_t is `unsigned int` on xtensa but
+            ** `long unsigned int` on riscv32 -- distinct types of identical
+            ** 32-bit width, so the store landed correctly and the esp32,
+            ** esp32s2 and esp32s3 builds reported nothing at all. */
             int ret = mbedtls_base64_encode((unsigned char *)base64_data, base64_data_len, &out_put_len,
-                                            (const unsigned char *)str_ezlopi_config, strlen(str_ezlopi_config));
-            TRACE_D("'mbedtls_base64_encode' returned: %04x", ret);
-#endif
+                                            (const unsigned char *)str_ezlopi_config, config_len);
 
-            EZPI_core_factory_info_v3_free(str_ezlopi_config);
+            /* The return value is the only thing that reports the short-buffer
+            ** failure above. The previous check was `0 == out_put_len`, which
+            ** cannot: on BUFFER_TOO_SMALL mbedtls sets *olen to the size it
+            ** *wanted*, which is non-zero, so that check passed and this function
+            ** returned a buffer it had never written -- uninitialised heap, handed
+            ** to a BLE reader as the device config and strlen()'d on the way out.
+            **
+            ** out_put_len is still worth testing, for the one input mbedtls
+            ** accepts without writing a NUL: slen == 0 returns success with
+            ** *olen == 0, leaving the buffer unterminated. */
+            if ((0 != ret) || (0 == out_put_len))
+            {
+                TRACE_E("base64 of device-config failed: mbedtls returned %d for %u bytes into a %u byte buffer",
+                        ret, (unsigned)config_len, (unsigned)base64_data_len);
+                ezlopi_free(__FUNCTION__, base64_data);
+                base64_data = NULL;
+            }
+            else
+            {
+                TRACE_D("device-config base64[len: %u]", (unsigned)out_put_len);
+            }
         }
 
-        TRACE_D("out-put-len: %d", out_put_len);
-        TRACE_D("base64_data[len: %d]: %s", strlen(base64_data), base64_data);
-
-        if (0 == out_put_len)
-        {
-            ezlopi_free(__FUNCTION__, base64_data);
-            base64_data = NULL;
-        }
+        EZPI_core_factory_info_v3_free(str_ezlopi_config);
     }
 
     return base64_data;

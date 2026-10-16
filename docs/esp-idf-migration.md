@@ -246,7 +246,11 @@ to die. Ten files, one of which is an ESP-IDF header:
   pointers are 32 bits on these parts.
 - **`esp_chip_info_t.full_revision`** (2) — field changed in v5;
   `ezlopi_service_ble_device_info.c` and `ezlopi_service_uart.c`.
-- `-Werror=char-subscripts` (3), `mbedtls_base64_encode` arg 3 (1),
+- `-Werror=char-subscripts` (3), `mbedtls_base64_encode` arg 3 (1 — **fixed**;
+  the `olen` arguments in `ezlopi_service_ble_provisioning.c` and
+  `ezlopi_service_ble_dynamic_config.c` are `size_t` now, and the output
+  buffers they describe were wrongly sized besides, so see the CHANGELOG entry
+  rather than treating this as a cast),
   `-Werror=array-bounds` on a `char[0]` in `ezlopi_cloud_constants.h` (1),
   `-Werror=stringop-overread` on a `strlen` in
   `ezlopi_core_scenes_when_methods_helper_functions.c` (1), and one

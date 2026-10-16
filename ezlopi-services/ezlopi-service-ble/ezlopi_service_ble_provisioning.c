@@ -597,9 +597,24 @@ static void ezpi_provisioning_info_read_func(esp_gatt_value_t *value, esp_ble_ga
         {
             g_provisioning_info_base64 = ezpi_provisioning_info_base64();
 
-            g_provisioning_sequence_no = 0;
-            g_provisioning_number_of_sequence = strlen(g_provisioning_info_base64) / EZPI_core_ble_gatt_get_max_data_size();
-            g_provisioning_number_of_sequence = (strlen(g_provisioning_info_base64) % EZPI_core_ble_gatt_get_max_data_size()) ? (g_provisioning_number_of_sequence + 1) : g_provisioning_number_of_sequence;
+            /* The NULL check has to come before the strlen, not after it.
+            ** ezpi_provisioning_info_base64() returns NULL whenever the payload
+            ** could not be built or encoded -- a failed cJSON_CreateObject or
+            ** cJSON_PrintBuffered under heap pressure, a failed malloc, or the
+            ** short-buffer case -- and the test below at `if (NULL !=
+            ** g_provisioning_info_base64)` was one line too late to stop these
+            ** two strlen()s from dereferencing it. This characteristic is
+            ** readable by anyone in radio range before anything here has
+            ** authenticated them.
+            **
+            ** ezpi_dynamic_config_read_func() already guards the identical block
+            ** this way; only this copy was missing it. */
+            if (g_provisioning_info_base64)
+            {
+                g_provisioning_sequence_no = 0;
+                g_provisioning_number_of_sequence = strlen(g_provisioning_info_base64) / EZPI_core_ble_gatt_get_max_data_size();
+                g_provisioning_number_of_sequence = (strlen(g_provisioning_info_base64) % EZPI_core_ble_gatt_get_max_data_size()) ? (g_provisioning_number_of_sequence + 1) : g_provisioning_number_of_sequence;
+            }
         }
 
         if (NULL != g_provisioning_info_base64)
@@ -868,19 +883,47 @@ static char *ezpi_provisioning_info_base64(void)
 
     if (str_provisioning_data)
     {
-        const uint32_t base64_data_len = 6 * 1024;
+        const size_t prov_len = strlen(str_provisioning_data);
+
+        TRACE_D("str_provisioning_data[len: %u]: %s", (unsigned)prov_len, str_provisioning_data);
+
+        /* Sized from the payload actually built, rather than a fixed 6 KB.
+        **
+        ** mbedtls_base64_encode() needs ceil(n/3)*4 + 1 bytes and, one byte short
+        ** of that, returns MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL without writing
+        ** anything. 6 KB therefore covered provisioning payloads up to 4605 bytes
+        ** -- and ezpi_provisioning_info_jsonify() embeds three PEM fields which
+        ** EZLOPI_FINFO_LEN_CA_CERTIFICATE and its siblings each cap at 0x1000, so
+        ** a genuinely provisioned device clears 4605 bytes with ordinary
+        ** certificates. cJSON_PrintBuffered()'s 6 KB there is a growth hint and
+        ** not a cap, so nothing upstream held the payload below the line either. */
+        const size_t base64_data_len = (((prov_len + 2u) / 3u) * 4u) + 1u;
+
         base64_data = ezlopi_malloc(__FUNCTION__, base64_data_len);
 
         if (base64_data)
         {
-            uint32_t out_put_len = 0;
-            TRACE_D("str_provisioning_data[len: %d]: %s", strlen(str_provisioning_data), str_provisioning_data);
+            size_t out_put_len = 0;
 
+            /* mbedtls declares olen as size_t*; see the note on the matching
+            ** call in ezlopi_service_ble_dynamic_config.c for why only esp32c3
+            ** diagnosed the uint32_t* this used to be. */
             int ret = mbedtls_base64_encode((unsigned char *)base64_data, base64_data_len, &out_put_len,
-                                            (const unsigned char *)str_provisioning_data, strlen(str_provisioning_data));
+                                            (const unsigned char *)str_provisioning_data, prov_len);
 
-            if (0 == out_put_len)
+            /* ret was previously assigned and never read, and the check below it
+            ** was `0 == out_put_len`, which cannot detect a short buffer: on
+            ** BUFFER_TOO_SMALL mbedtls sets *olen to the size it *wanted*, so the
+            ** check passed and this function returned uninitialised heap to be
+            ** read out over BLE as the device's provisioning info -- which is the
+            ** record holding the private key and certificates.
+            **
+            ** out_put_len is still tested for the input mbedtls accepts without
+            ** writing a NUL: slen == 0 returns success with *olen == 0. */
+            if ((0 != ret) || (0 == out_put_len))
             {
+                TRACE_E("base64 of provisioning-info failed: mbedtls returned %d for %u bytes into a %u byte buffer",
+                        ret, (unsigned)prov_len, (unsigned)base64_data_len);
                 ezlopi_free(__FUNCTION__, base64_data);
                 base64_data = NULL;
             }
