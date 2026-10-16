@@ -107,28 +107,61 @@ s_linked_buffer_t *EZPI_core_ble_buffer_create(esp_ble_gatts_cb_param_t *param)
     return linked_buffer;
 }
 
-void EZPI_core_ble_buffer_add_to_buffer(s_linked_buffer_t *buffer, esp_ble_gatts_cb_param_t *param)
+bool EZPI_core_ble_buffer_add_to_buffer(s_linked_buffer_t *buffer, esp_ble_gatts_cb_param_t *param)
 {
+    if (NULL == buffer)
+    {
+        return false;
+    }
+
     while (buffer->next)
     {
         buffer = buffer->next;
     }
 
     buffer->next = EZPI_core_ble_buffer_create(param);
+
+    return (NULL != buffer->next);
 }
 
+uint32_t EZPI_core_ble_buffer_total_len(const s_linked_buffer_t *l_buffer)
+{
+    uint32_t tot_len = 0;
+
+    while (l_buffer)
+    {
+        tot_len += l_buffer->len;
+        l_buffer = l_buffer->next;
+    }
+
+    return tot_len;
+}
+
+/* Iterative, and that is the point rather than a style preference. This used to
+** recurse once per node before freeing anything, so the stack depth was the
+** number of chunks a client had sent -- a number nothing bounded. The BLE
+** stack's task does not have room for thousands of frames, so a long enough
+** transfer turned "free the accumulator" into a stack overflow at the moment
+** the transfer completed. Callers now also bound what they accumulate (see
+** EZPI_core_ble_buffer_total_len), but the two fixes are independent on
+** purpose: this one holds for every caller, including any added later that
+** forgets to check. */
 void EZPI_core_ble_buffer_free_buffer(s_linked_buffer_t *l_buffer)
 {
-    if (l_buffer)
+    while (l_buffer)
     {
+        s_linked_buffer_t *next = l_buffer->next;
+
         if (l_buffer->buffer)
         {
             ezlopi_free(__FUNCTION__, l_buffer->buffer);
             l_buffer->buffer = NULL;
         }
-        EZPI_core_ble_buffer_free_buffer(l_buffer->next);
+
         l_buffer->next = NULL;
         ezlopi_free(__FUNCTION__, l_buffer);
+
+        l_buffer = next;
     }
 }
 
@@ -136,13 +169,8 @@ void EZPI_core_ble_buffer_accumulate_to_start(s_linked_buffer_t *l_buffer)
 {
     if (l_buffer)
     {
-        uint32_t tot_len = 0;
-        s_linked_buffer_t *tmp_buffer = l_buffer;
-        while (tmp_buffer)
-        {
-            tot_len += tmp_buffer->len;
-            tmp_buffer = tmp_buffer->next;
-        }
+        uint32_t tot_len = EZPI_core_ble_buffer_total_len(l_buffer);
+        s_linked_buffer_t *tmp_buffer = NULL;
 
         uint8_t *tot_buffer = ezlopi_malloc(__FUNCTION__, tot_len + 1);
         if (tot_buffer)

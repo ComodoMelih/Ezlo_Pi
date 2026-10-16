@@ -31,6 +31,7 @@ MQTTAPI_DIR  := ../../ezlopi-cloud/ezlopi-cloud-mqtt-config
 MQTTCORE_DIR := ../../ezlopi-core/ezlopi-core-mqtt-config
 ERRORS_DIR   := ../../ezlopi-core/ezlopi-core-errors
 CONSTANTS_DIR := ../../ezlopi-cloud/ezlopi-cloud-constants
+BLEBUF_DIR   := ../../ezlopi-core/ezlopi-core-ble
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -64,7 +65,7 @@ BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
-           test_devcfg_api test_wssession test_scenefields
+           test_devcfg_api test_wssession test_scenefields test_ble_buffer
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -508,6 +509,35 @@ $(BUILD)/test_scenefields: test_scenefields.c $(SCENES_DIR)/ezlopi_core_scenes_d
 	$(CC) $(SCENEFIELDS_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/scenefields_cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_scenefields_main.o $(BUILD)/scenefields_subject.o \
 	      $(BUILD)/scenefields_cjext.o $(LDFLAGS) -lm
+
+# The BLE chunk accumulator: the linked list that holds a payload too large for
+# one ATT write until the last chunk arrives. Four characteristics use it and
+# two of them -- provisioning and dynamic-config -- keep it in a file-static
+# across writes, on a path that runs before any authentication.
+#
+# This is the only file in ezlopi-core-ble that can be compiled here, and the
+# reason is worth stating because it is the test for whether a seam is real:
+# ezlopi_core_ble_buffer.c calls no ESP-IDF function at all and touches exactly
+# two fields of the GATT callback parameter. Everything else in that component
+# is GATT state machine. So stubs-ble/ is two headers -- a one-symbol
+# sdkconfig.h and the union member those two fields live in -- rather than a
+# stand-in for the Bluetooth stack.
+#
+# The nm check is the same guard as in test_scenefields below, and it is here
+# for the same reason: the subject file is wrapped end to end in
+# `#ifdef CONFIG_EZPI_BLE_ENABLE`, so if stubs-ble/sdkconfig.h ever stops
+# reaching it the object file is empty, the link still succeeds, and the suite
+# passes while testing nothing.
+$(BUILD)/test_ble_buffer: BLEBUF_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                                           -I$(BLEBUF_DIR) \
+                                           -I stubs-ble -I$(STUBS_DIR) \
+                                           $(SANITIZERS)
+$(BUILD)/test_ble_buffer: test_ble_buffer.c $(BLEBUF_DIR)/ezlopi_core_ble_buffer.c | $(BUILD)
+	$(CC) $(BLEBUF_CFLAGS) -c -o $(BUILD)/test_ble_buffer_main.o test_ble_buffer.c
+	$(CC) $(BLEBUF_CFLAGS) -c -o $(BUILD)/ble_buffer_subject.o $(BLEBUF_DIR)/ezlopi_core_ble_buffer.c
+	@nm $(BUILD)/ble_buffer_subject.o | grep -q ' T EZPI_core_ble_buffer_total_len' \
+	  || { echo "ezlopi_core_ble_buffer.c compiled to an empty object -- CONFIG_EZPI_BLE_ENABLE is not reaching it"; exit 1; }
+	$(CC) -o $@ $(BUILD)/test_ble_buffer_main.o $(BUILD)/ble_buffer_subject.o $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $(BUILD)

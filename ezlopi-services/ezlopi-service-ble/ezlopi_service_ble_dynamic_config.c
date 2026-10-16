@@ -112,6 +112,63 @@
  */
 #define CJ_GET_NUMBER(name) cJSON_GetNumberValue(cJSON_GetObjectItem(__FUNCTION__, root, name))
 
+/* The largest base64 payload a config write can legitimately carry.
+ *
+ * Needed for correctness and not only for thrift, the same way
+ * EZPI_BLE_PROV_MAX_BASE64_LEN is in ezlopi_service_ble_provisioning.c. The
+ * declared total_len arrives off the air and reaches
+ * ezlopi_malloc(total_size + 1); that addition is on a uint32, so a claim of
+ * 0xFFFFFFFF wraps it to 0. ezlopi_malloc(0) returns either NULL or a minimal
+ * block, and if it returns a block then `base64_buffer[0] = '\0'` writes
+ * outside it, and `total_size - pos` -- the room argument to
+ * EZPI_util_clamp_copy_len() -- is ~4 GB of room that does not exist. The
+ * clamp added to stop chunks overrunning this buffer is computed from
+ * total_size, so leaving total_size unchecked disarms it. Bounding it first is
+ * what makes that clamp mean anything.
+ *
+ * The number is derived, not chosen. A config written here is persisted by
+ * EZPI_core_factory_info_v3_set_ezlopi_config(), which serialises into a 4 KB
+ * buffer with cJSON_PrintPreallocated() and fails if the JSON does not fit --
+ * EZLOPI_FINFO_LEN_EZLOPI_CONFIG_JSON is 0x1000 and the field in flash is that
+ * size. So a config whose decoded form exceeds 0x1000 bytes cannot be stored
+ * no matter what it claims, and base64 of 0x1000 bytes is ceil(0x1000/3)*4.
+ *
+ * The ceiling matters here and does not in the provisioning macro, which uses a
+ * floor over a region 6x larger than any payload that can reach it. At this
+ * size the two differ by 4 bytes, which is the difference between accepting and
+ * refusing a config that exactly fills the field. */
+#define EZPI_BLE_DYNCFG_MAX_BASE64_LEN ((((uint32_t)EZLOPI_FINFO_LEN_EZLOPI_CONFIG_JSON + 2u) / 3u) * 4u)
+
+/* The largest the chunk accumulator may grow to before the transfer is
+ * abandoned.
+ *
+ * This is a separate limit from the one above and both are needed. The cap on
+ * total_len bounds the buffer the chunks are copied *into*, and does nothing
+ * about the list they are copied *from*: every write appends a node, and the
+ * completion test is `(sequence - 1) * 400 + len >= tot_len` on three numbers
+ * the client supplies. A client that keeps sending chunks whose arithmetic
+ * never satisfies that test -- or simply never sends the last one -- grew this
+ * list without limit, and the BLE characteristics take writes from anyone in
+ * radio range with no authentication at all. Two ways that ended badly: the
+ * heap ran out, or the transfer eventually completed and the accumulator was
+ * freed by a function that recursed once per node.
+ *
+ * It cannot be EZPI_BLE_DYNCFG_MAX_BASE64_LEN, which is the trap worth naming:
+ * the nodes hold whole JSON envelopes -- {"len":400,"total_len":...,
+ * "sequence":...,"data":"..."} -- not the bare base64, so the bytes held always
+ * exceed the payload they encode. Bounding the list at the payload size would
+ * refuse a perfectly ordinary config somewhere around three quarters of the way
+ * through.
+ *
+ * So it is derived from what a legitimate transfer actually does: a client
+ * sends ceil(total_len / 400) chunks, because 400 is the data-per-chunk this
+ * file's read path emits and the offset its write path assumes, and each chunk
+ * is one ATT write, which this service already requires to be 517 bytes
+ * (g_required_ble_prov_buffer_size). That is 14 * 517 = 7238 bytes for a config
+ * that exactly fills the 4 KB field -- comfortably above any real one, and a
+ * bound rather than no bound. */
+#define EZPI_BLE_DYNCFG_MAX_ACCUM_LEN ((((EZPI_BLE_DYNCFG_MAX_BASE64_LEN + 399u) / 400u) * 517u))
+
 /*******************************************************************************
  *                          Static Function Prototypes
  *******************************************************************************/
@@ -151,6 +208,9 @@ static void ezpi_dynamic_config_read_func(esp_gatt_value_t *value, esp_ble_gatts
  *******************************************************************************/
 static s_gatt_service_t *g_dynamic_config_service = NULL;
 static s_linked_buffer_t *g_dynamic_config_linked_buffer = NULL;
+/* Which connection the chunks in the accumulator above belong to, so chunks
+** left behind by a dropped connection are discarded rather than appended to. */
+static uint32_t g_dynamic_config_buffer_generation;
 
 /*******************************************************************************
  *                          Extern Data Definitions
@@ -208,13 +268,56 @@ static void ezpi_dynamic_config_write_func(esp_gatt_value_t *value, esp_ble_gatt
     TRACE_D("Write function called!");
     TRACE_D("GATT_WRITE_EVT value: %.*s", param->write.len, param->write.value);
 
+    /* Nothing used to end a part-finished transfer except its own completion,
+    ** so a client that started a config write and dropped the link left its
+    ** chunks in this global for the lifetime of the boot. The next client did
+    ** not start a new transfer, it appended to the abandoned one: the decode
+    ** then concatenated both and produced base64 that does not parse, and the
+    ** only way back to a working config write was a reboot. On a product whose
+    ** point is to be plugged in and configured from a phone, "retry after the
+    ** connection dropped" is the common case, not an edge case.
+    **
+    ** conn_generation is bumped on every CONNECT_EVT, which is what makes a
+    ** new connection distinguishable -- conn_id alone is reused by the
+    ** controller. Treating generation 0 (no service object) as "same" is
+    ** deliberate: the fallback should lose the reset, not discard a transfer
+    ** that is in progress. */
+    const uint32_t conn_generation = (NULL != g_dynamic_config_service) ? g_dynamic_config_service->conn_generation : 0;
+
+    if ((NULL != g_dynamic_config_linked_buffer) && (conn_generation != g_dynamic_config_buffer_generation))
+    {
+        TRACE_W("discarding %d byte(s) of config left by an earlier connection", EZPI_core_ble_buffer_total_len(g_dynamic_config_linked_buffer));
+        EZPI_core_ble_buffer_free_buffer(g_dynamic_config_linked_buffer);
+        g_dynamic_config_linked_buffer = NULL;
+    }
+
+    g_dynamic_config_buffer_generation = conn_generation;
+
+    /* See EZPI_BLE_DYNCFG_MAX_ACCUM_LEN. total_len() of NULL is 0, so the
+    ** first chunk of a transfer goes through the same test as the rest. */
+    if ((EZPI_core_ble_buffer_total_len(g_dynamic_config_linked_buffer) + param->write.len) > EZPI_BLE_DYNCFG_MAX_ACCUM_LEN)
+    {
+        TRACE_E("config transfer exceeded %d byte(s) without completing, abandoning it", (uint32_t)EZPI_BLE_DYNCFG_MAX_ACCUM_LEN);
+        EZPI_core_ble_buffer_free_buffer(g_dynamic_config_linked_buffer);
+        g_dynamic_config_linked_buffer = NULL;
+        return;
+    }
+
     if (NULL == g_dynamic_config_linked_buffer)
     {
         g_dynamic_config_linked_buffer = EZPI_core_ble_buffer_create(param);
     }
-    else
+    else if (false == EZPI_core_ble_buffer_add_to_buffer(g_dynamic_config_linked_buffer, param))
     {
-        EZPI_core_ble_buffer_add_to_buffer(g_dynamic_config_linked_buffer, param);
+        /* The chunk could not be stored. Carrying on would leave a hole in the
+        ** middle of the base64 while the length test at the end still passed,
+        ** so what landed in flash would be a config that decodes to nothing
+        ** useful -- and the failure would surface one reboot later as a hub
+        ** with no devices. Abandoning the transfer is the honest outcome. */
+        TRACE_E("could not store config chunk, abandoning the transfer");
+        EZPI_core_ble_buffer_free_buffer(g_dynamic_config_linked_buffer);
+        g_dynamic_config_linked_buffer = NULL;
+        return;
     }
 
     if (g_dynamic_config_linked_buffer)
@@ -439,7 +542,17 @@ static void ezpi_dynamic_config_read_func(esp_gatt_value_t *value, esp_ble_gatts
 static char *ezpi_base64_decode_dynamic_config(uint32_t total_size)
 {
     char *decoded_config_json = NULL;
-    char *base64_buffer = ezlopi_malloc(__FUNCTION__, total_size + 1);
+    char *base64_buffer = NULL;
+
+    /* See EZPI_BLE_DYNCFG_MAX_BASE64_LEN. This has to happen before the
+    ** allocation below, because total_size + 1 is what wraps. */
+    if ((0 == total_size) || (total_size > EZPI_BLE_DYNCFG_MAX_BASE64_LEN))
+    {
+        TRACE_E("total_len %d is outside 1..%d, refusing", total_size, (uint32_t)EZPI_BLE_DYNCFG_MAX_BASE64_LEN);
+        return NULL;
+    }
+
+    base64_buffer = ezlopi_malloc(__FUNCTION__, total_size + 1);
 
     if (base64_buffer)
     {

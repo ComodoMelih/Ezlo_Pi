@@ -49,6 +49,9 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "esp_gatts_api.h"
 
 /*******************************************************************************
@@ -85,10 +88,32 @@ extern "C"
     /**
      * @brief This function adds gatt params to ll-buffer
      *
+     * Returns false if the chunk could not be stored, which used to be
+     * unreportable: this returned void, and the only caller that could have
+     * noticed was the one that needed to. A chunk silently dropped in the
+     * middle of a transfer is worse than a refused transfer, because the
+     * remaining chunks still arrive, the length test at the end still passes,
+     * and what gets base64-decoded and written to flash is a config with a
+     * hole in it.
+     *
      * @param buffer Destination buffer to append incoming chunk
      * @param param Source of data
+     * @return bool true if the chunk was appended
      */
-    void EZPI_core_ble_buffer_add_to_buffer(s_linked_buffer_t *buffer, esp_ble_gatts_cb_param_t *param);
+    bool EZPI_core_ble_buffer_add_to_buffer(s_linked_buffer_t *buffer, esp_ble_gatts_cb_param_t *param);
+    /**
+     * @brief Total number of payload bytes held across every node in the list
+     *
+     * Callers accumulating chunks off the air need this to bound what they are
+     * willing to hold: neither the node count nor the total was limited by
+     * anything, and a client that keeps writing chunks which never satisfy its
+     * own declared total_len could grow this list until the heap ran out --
+     * before authenticating, since the BLE characteristics are open.
+     *
+     * @param l_buffer Head of the list, may be NULL
+     * @return uint32_t Sum of every node's len, 0 for NULL
+     */
+    uint32_t EZPI_core_ble_buffer_total_len(const s_linked_buffer_t *l_buffer);
     /**
      * @brief This function frees a ble-buffer-node
      *

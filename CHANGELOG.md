@@ -50,6 +50,21 @@ Evidence differs by item, so it is worth being explicit about which:
   need the ESP-IDF GATT headers, so there is no host harness for them yet.
   That is a gap, and it is why the check pairs clamps and frees structurally
   rather than relying on anyone re-reading these files.
+- The chunk accumulator is split between a primitive that *can* be host-tested
+  and service code that cannot, and the evidence splits the same way.
+  [`tests/host/test_ble_buffer.c`](tests/host/test_ble_buffer.c) compiles the
+  real `ezlopi_core_ble_buffer.c` against two stub headers and covers the
+  iterative free, the new `total_len()` and the `bool` return — 36 checks, each
+  one confirmed to fail against the specific wrong version it guards. The free
+  check is the best-evidenced: reverting the function to its recursive form
+  makes it abort with an ASan `stack-overflow`, so the regression is
+  demonstrated rather than asserted. Two of the mutations also showed that a
+  wrong `total_len()` is a *heap* overflow inside `accumulate_to_start()`, not
+  merely a wrong number. The two service-level bounds and the
+  discard-on-new-connection logic have **no automated coverage**: those files
+  pull in cjext, NVS, the factory-info partition, FreeRTOS tasks and the GATT
+  profile. For them the only check is that all four targets build and link the
+  new symbol, which catches a type error but not a wrong constant.
 - The format-attribute defect is covered by the compiler itself: with the
   attribute in place and `-Werror=format` already on, reintroducing the bad
   call fails the build. That was verified by reintroducing it, not assumed.
@@ -122,6 +137,71 @@ None of these have been exercised on physical hardware; see Known gaps.
   provisioning payload can persist lands below
   `EZLOPI_FINFO_OFFSET_HUB_DATA` (`0x6000`), and base64 expands by 4/3, so 4/3
   of that region already exceeds any storable payload.
+
+- **Dynamic-config had no such bound — the bullet above silently said so.**
+  When provisioning was capped, the dynamic-config assembler was left with the
+  bare `ezlopi_malloc(total_size + 1)`, so the wrap described above was still
+  reachable on characteristic `0xE501`. It now rejects any `total_len` outside
+  `1..EZPI_BLE_DYNCFG_MAX_BASE64_LEN`, derived the same way but from a tighter
+  constraint: `EZPI_core_factory_info_v3_set_ezlopi_config` stores the config
+  with `cJSON_PrintPreallocated` into a buffer of
+  `EZLOPI_FINFO_LEN_EZLOPI_CONFIG_JSON` (`0x1000`) bytes, so a config larger
+  than that cannot be stored at all and there is nothing to be gained by
+  accepting its base64. The macro uses the *ceiling* form of the 4/3 expansion
+  where provisioning's uses the floor form; at this size the two differ by four
+  bytes, which is the difference between accepting and refusing a config that
+  exactly fills the field.
+
+- **The BLE chunk accumulator grew on unauthenticated input, and freeing it
+  recursed once per node.** Listed as a Known gap in the previous entry; closed
+  here. Both reachable services append every incoming chunk to a file-static
+  linked list before parsing anything, and only free it when the client's own
+  arithmetic — `((sequence - 1) * 400 + len) >= total_len` — says the transfer
+  is done. A client that repeats one never-completing chunk, or simply stops one
+  chunk short, kept appending. Three separate defects, and the second is the one
+  worth the most attention:
+
+  1. *Nothing bounded the list.* Both services now refuse a write that would
+     push the bytes held past `EZPI_BLE_PROV_MAX_ACCUM_LEN` /
+     `EZPI_BLE_DYNCFG_MAX_ACCUM_LEN`, discarding what has accumulated. These are
+     deliberately **not** the base64 caps above: a node holds the whole JSON
+     envelope (`{"len":400,"total_len":...,"sequence":...,"data":"..."}`), not
+     the 400 bytes of payload inside it, so bounding the list at the payload cap
+     would refuse an ordinary config about three-quarters of the way through.
+     The accumulator caps are the payload cap divided into 400-byte chunks and
+     multiplied back up by the 517-byte envelope — 7238 bytes for dynamic-config
+     and roughly 42 KB for provisioning, which is large because that payload
+     legitimately is (three PEM blobs at `0x1000` each).
+
+  2. *The free recursed before freeing.* `EZPI_core_ble_buffer_free_buffer()`
+     called itself on `->next` and only then released the current node, so peak
+     stack depth was one frame per node — a quantity the client chose. The crash
+     therefore landed at the moment the transfer *succeeded*, which presents as
+     an unexplained reboot into an unprovisioned state rather than as anything
+     pointing at BLE. Now iterative.
+
+  3. *A failed append was indistinguishable from a successful one.*
+     `EZPI_core_ble_buffer_add_to_buffer()` returned `void` and ignored a `NULL`
+     from `create()`. The remaining chunks still arrive, the completion test is
+     still satisfied, and what gets base64-decoded into the factory partition is
+     a configuration with a hole in the middle. It now returns `bool` and both
+     services abandon the transfer when it is `false`.
+
+  Two deliberate deviations from what that Known gap predicted. It said the fix
+  "needs a real app transfer to size it" — the bound is instead derived from the
+  storage limit, which is a stronger argument than a measurement: a payload that
+  cannot be stored need not be accumulated. And it called for "a free on
+  disconnect"; what is implemented is a discard when a *new connection* writes,
+  keyed off the `conn_generation` counter each service already maintains. A
+  disconnect-time free would require `ezlopi-core-ble` to know about its
+  services, inverting the dependency. More importantly, a cleanup that only runs
+  on a connection event fails silently if the event does not arrive, so it
+  carries none of the security weight here — the unconditional append-time bound
+  in (1) does, and the generation check only prevents one client's partial
+  transfer being concatenated onto the next client's.
+
+  The two bounds and the generation check live in the service files, which cannot
+  be host-compiled; see Known gaps for what that leaves unverified.
 
 - **Flash overflow writing certificates and keys: one field could overwrite
   the next.** The four PEM setters in
@@ -3631,40 +3711,51 @@ Listed because a changelog that only mentions what was finished is misleading.
   piece of work in its own right rather than a few lines on the end of this
   one.
 
-- **The BLE chunk accumulator is still unbounded, and is not reset on
-  disconnect.** Separate from the overflow fixed above, and deliberately not
-  fixed in the same change. Every write handler calls
-  `EZPI_core_ble_buffer_create()` / `EZPI_core_ble_buffer_add_to_buffer()` at
-  the top, before parsing or validating anything, and the list is only freed
-  when the completion test `((sequence - 1) * 400 + len) >= total_len` passes.
-  A client that repeats `{"total_len":99999999,"sequence":1,"len":1,"data":"A"}`
-  never satisfies that test, so each write appends a node holding a copy of the
-  payload and nothing ever frees it.
+- **The BLE accumulator bounds are not tested, and nothing is freed on
+  disconnect.** The accumulator itself is now bounded and freed iteratively (see
+  Memory safety above), so this is what is left of that gap rather than the gap
+  itself.
+
+  The bounds and the generation check are in the two service files, and those
+  cannot be host-compiled — cjext, NVS, the factory partition, FreeRTOS and the
+  GATT profile. So `EZPI_BLE_PROV_MAX_ACCUM_LEN` and
+  `EZPI_BLE_DYNCFG_MAX_ACCUM_LEN` are checked by reading the arithmetic and by
+  the four-target build, which proves the expressions compile and the symbols
+  link but says nothing about whether the numbers are right. The specific risk
+  is not a too-small cap being unsafe but a too-small cap **refusing a real
+  provisioning transfer from the phone app**, which would be worse than the bug
+  it fixes. The derivation says it cannot happen — a payload that exceeds the
+  cap could not have been stored anyway — but that reasoning has not been run
+  against an actual app transfer.
 
   `ESP_GATTS_DISCONNECT_EVT` in
   [`ezlopi_core_ble_gatt.c`](ezlopi-core/ezlopi-core-ble/ezlopi_core_ble_gatt.c)
-  only sets `disconnected_service->connected = false` — it frees no buffers. So
-  the growth is not even bounded per connection: connect, send one
-  never-completing chunk, disconnect, repeat. It also means a half-finished
-  transfer from one client is still in the list when the next client starts, and
-  the two get concatenated.
+  still only sets `disconnected_service->connected = false`, so a partial
+  transfer survives the disconnect and is held until the next client writes.
+  That is now a bounded quantity rather than an unbounded one, which is why it
+  was left: freeing at disconnect means core calling into its services, and the
+  cheap version of that — a free-callback registry in
+  `ezlopi_core_ble_buffer.c` — adds a dependency inversion for a few kilobytes.
 
-  Two things make it worse than a plain leak. `EZPI_core_ble_buffer_free_buffer()`
-  recurses once per node, so a list long enough to matter risks blowing a small
-  FreeRTOS task stack at the moment it is finally freed. And the accumulator is
-  a single file-scope pointer per characteristic, so there is no notion of which
-  client the partial data belongs to.
+  The generation check also rests on an assumption that has not been verified on
+  hardware: that `ESP_GATTS_CONNECT_EVT` is delivered to every registered
+  `gatts_if`, not only to the one whose characteristic the client first touches.
+  If it is not, a second client's write would be treated as a continuation of
+  the first's transfer — it would then be caught by the length bound rather than
+  by the generation counter, and would fail as a refused transfer instead of as
+  concatenated data, which is the right way round for it to be wrong.
 
-  Not fixed here because the accumulator lives in
-  [`ezlopi_core_ble_buffer.c`](ezlopi-core/ezlopi-core-ble/ezlopi_core_ble_buffer.c)
-  and is shared by the provisioning, dynamic-config, Wi-Fi, device-info and
-  Improv characteristics, which have different legitimate payload sizes. A cap
-  picked without knowing the real maximum for each one risks refusing a valid
-  transfer, and "do not break the existing Ezlo provisioning flow" outranks
-  closing a memory-exhaustion path on this branch. The clamp fixes above are
-  safe in a way a cap is not: they only ever restrict a copy that was already
-  out of bounds. The right fix is probably a per-characteristic byte budget
-  plus a free on disconnect, and it needs a real app transfer to size it.
+  Two other characteristics use the accumulator — Wi-Fi and Improv — and are
+  untouched by this change, with no bound of their own. They were left alone
+  because each frees the list unconditionally at the end of every write
+  ([`ezlopi_service_ble_wifi.c:272`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_wifi.c#L272),
+  [`ezlopi_service_ble_improv.c:470`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_improv.c#L470)),
+  so nothing persists across writes to grow. That is a property of those two
+  handlers rather than a guarantee, and it is the thing to re-check if either is
+  ever changed to hold a transfer open across writes. (The previous version of
+  this gap also listed device-info as a user of the accumulator. It is not —
+  `ezlopi_service_ble_device_info.c` includes the header and never calls into
+  it.)
 
 - **Three sets of real-looking device provisioning credentials are committed in
   `ezlopi-services/ezlopi-service-webprov/ezlopi_test_prov.c`, and this change

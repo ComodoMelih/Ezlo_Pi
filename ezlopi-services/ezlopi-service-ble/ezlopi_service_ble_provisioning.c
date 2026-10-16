@@ -137,6 +137,26 @@
  */
 #define EZPI_BLE_PROV_MAX_BASE64_LEN ((EZLOPI_FINFO_OFFSET_HUB_DATA / 3u) * 4u)
 
+/* The largest the chunk accumulator may grow to before the transfer is
+ * abandoned. A different limit from the one above, and both are needed: that
+ * one bounds the buffer the chunks are decoded *into*, this one bounds the
+ * linked list they arrive *in*, which nothing bounded at all.
+ *
+ * Every write appends a node and the only thing that freed the list was the
+ * transfer completing -- on a test the client itself supplies the numbers for
+ * (`(sequence - 1) * 400 + len >= tot_len`). A client in radio range, with no
+ * authentication, could therefore send chunks whose arithmetic never completes
+ * and grow this list until the heap ran out.
+ *
+ * Derived the same way as the dynamic-config equivalent, and note it cannot be
+ * EZPI_BLE_PROV_MAX_BASE64_LEN: the nodes hold whole JSON envelopes rather than
+ * the bare base64, so the bytes held always exceed the payload they encode. A
+ * legitimate client sends ceil(total_len / 400) chunks of at most one 517-byte
+ * ATT write each, so the bound is that product -- about 42 KB here, which is
+ * large because the provisioning payload legitimately is: three PEM blobs at
+ * 0x1000 each. */
+#define EZPI_BLE_PROV_MAX_ACCUM_LEN ((((EZPI_BLE_PROV_MAX_BASE64_LEN + 399u) / 400u) * 517u))
+
 /*******************************************************************************
  *                          Static Function Prototypes
  *******************************************************************************/
@@ -193,6 +213,9 @@ static char *ezpi_base64_decode_provisioning_info(uint32_t total_size);
  *******************************************************************************/
 static s_gatt_service_t *g_provisioning_service;
 static s_linked_buffer_t *g_provisioning_linked_buffer = NULL;
+/* Which connection the chunks in the accumulator above belong to, so chunks
+** left behind by a dropped connection are discarded rather than appended to. */
+static uint32_t g_provisioning_buffer_generation;
 
 /*******************************************************************************
  *                          Extern Data Definitions
@@ -324,13 +347,48 @@ static void ezpi_provisioning_info_write_func(esp_gatt_value_t *value, esp_ble_g
 
     TRACE_D("GATT_WRITE_EVT value: %.*s", param->write.len, param->write.value);
 
+    /* The accumulator outlived its connection: a client that began a
+    ** provisioning write and dropped the link left its chunks here for the rest
+    ** of the boot, and the next client appended to them instead of starting
+    ** fresh. See the longer note on the same change in
+    ** ezlopi_service_ble_dynamic_config.c. */
+    const uint32_t conn_generation = (NULL != g_provisioning_service) ? g_provisioning_service->conn_generation : 0;
+
+    if ((NULL != g_provisioning_linked_buffer) && (conn_generation != g_provisioning_buffer_generation))
+    {
+        TRACE_W("discarding %d byte(s) of provisioning data left by an earlier connection", EZPI_core_ble_buffer_total_len(g_provisioning_linked_buffer));
+        EZPI_core_ble_buffer_free_buffer(g_provisioning_linked_buffer);
+        g_provisioning_linked_buffer = NULL;
+    }
+
+    g_provisioning_buffer_generation = conn_generation;
+
+    /* See EZPI_BLE_PROV_MAX_ACCUM_LEN. The cap on total_len bounds the buffer
+    ** the chunks are decoded into; this bounds the list they arrive in, which
+    ** nothing limited. total_len() of NULL is 0, so the first chunk takes the
+    ** same test as the rest. */
+    if ((EZPI_core_ble_buffer_total_len(g_provisioning_linked_buffer) + param->write.len) > EZPI_BLE_PROV_MAX_ACCUM_LEN)
+    {
+        TRACE_E("provisioning transfer exceeded %d byte(s) without completing, abandoning it", (uint32_t)EZPI_BLE_PROV_MAX_ACCUM_LEN);
+        EZPI_core_ble_buffer_free_buffer(g_provisioning_linked_buffer);
+        g_provisioning_linked_buffer = NULL;
+        return;
+    }
+
     if (NULL == g_provisioning_linked_buffer)
     {
         g_provisioning_linked_buffer = EZPI_core_ble_buffer_create(param);
     }
-    else
+    else if (false == EZPI_core_ble_buffer_add_to_buffer(g_provisioning_linked_buffer, param))
     {
-        EZPI_core_ble_buffer_add_to_buffer(g_provisioning_linked_buffer, param);
+        /* A dropped chunk leaves a hole that the end-of-transfer length test
+        ** does not notice, so the certificates written to flash would be
+        ** truncated and the hub would fail to reach the cloud with no
+        ** indication of why. */
+        TRACE_E("could not store provisioning chunk, abandoning the transfer");
+        EZPI_core_ble_buffer_free_buffer(g_provisioning_linked_buffer);
+        g_provisioning_linked_buffer = NULL;
+        return;
     }
 
     if (g_provisioning_linked_buffer)
