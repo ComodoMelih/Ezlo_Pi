@@ -408,12 +408,13 @@ int main(void)
      *
      *   - Where the entropy comes from. On a device it is esp_fill_random(),
      *     which cannot be reached from a host, and that is the point of taking
-     *     the bytes as an argument. What is NOT acceptable is the repository's
-     *     other randomness, ezlopi_util_uuid_generate_random()'s
+     *     the bytes as an argument. What would NOT be acceptable is
      *     srand(time(NULL))/rand(): a key from that source is guessable to
-     *     within whichever second the device first booted. The wiring in
-     *     ezlopi_core_factory_info.c is where that choice lives and where it
-     *     has to be read.
+     *     within whichever second the device first booted. That used to be how
+     *     ezlopi_util_uuid_generate_random() worked and no longer is, so there
+     *     is now no rand()-based source in the tree to confuse this with. The
+     *     wiring in ezlopi_core_factory_info.c is where the choice lives and
+     *     where it has to be read.
      *
      *   - Whether the key is actually persisted and reloaded. That needs NVS
      *     and the factory-info partition, neither of which exists on a host.

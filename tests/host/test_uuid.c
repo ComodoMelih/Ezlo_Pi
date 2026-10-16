@@ -1,31 +1,47 @@
 /* Host tests for ezlopi-util-uuid.
  *
- * This component needs no stubs at all -- not the UART HAL headers, not
- * EZLOPI_USER_CONFIG.h, nothing. ezlopi_util_uuid.c includes <stdlib.h>,
- * <time.h> and its own header, and the header includes nothing. It is the
- * cheapest rule in this Makefile, and it is worth stating why that matters:
+ * This component needed no stubs at all when these tests were written -- not
+ * the UART HAL headers, not EZLOPI_USER_CONFIG.h, nothing. That was the
+ * cheapest rule in this Makefile, and it was worth stating why it mattered:
  * the component was unreachable from any test for no reason other than nobody
  * having written one. Four defects had been sitting in
  * ezlopi_util_uuid_parse() the whole time, one of them a read past the end of
  * the input buffer.
  *
- * None of the four was reachable on a device, because nothing in the
- * repository calls any function in this component -- it compiles into the
- * image as dead code. That is the honest severity: these are tests for a
- * library nobody uses yet, written so that the first caller does not inherit
- * the defects. It is not a field bug fix and should not be read as one.
+ * It now takes exactly one stub, stubs-uuid/esp_random.h, because
+ * generate_random() was changed to draw from the hardware RNG instead of
+ * srand(time(NULL)) plus rand(). The stub is a faithful copy of the real
+ * header's two declarations, so the translation unit under test is the same
+ * one the firmware compiles; only the entropy source behind it differs. The
+ * alternative -- an #ifdef ESP_PLATFORM in the component -- would have meant
+ * testing code the firmware does not run.
  *
- * The parse tests are the substance. generate_random() is tested only for the
- * RFC 4122 version and variant bits it sets, not for randomness: it is seeded
- * from time(NULL) via srand(), which is not a property a unit test should
- * pretend to check, and is noted as a weakness at the bottom of this file
- * rather than asserted about.
+ * None of the four parse defects was reachable on a device, because nothing in
+ * the repository calls any function in this component. Earlier versions of
+ * this comment added "it compiles into the image as dead code", which is
+ * wrong, and the RNG change is what measured it: all four targets produced
+ * images byte-for-byte identical in size to the build before it, and `nm` on
+ * the esp32c3 ELF finds no ezlopi_util_uuid_* symbol at all. The component is
+ * compiled and then discarded at link. So it costs nothing in flash, and a
+ * defect in it cannot be reached even in principle.
+ *
+ * That is the honest severity: these are tests for a library nobody uses yet,
+ * written so that the first caller does not inherit the defects. It is not a
+ * field bug fix and should not be read as one. The same applies to the RNG
+ * change -- a weak UUID generator that is not in the image has no victim.
+ *
+ * The parse tests are the substance. For generate_random() a unit test still
+ * cannot check randomness, but since the entropy now arrives through a seam
+ * the test controls, it can check the thing that actually went wrong: that all
+ * sixteen bytes come from that source and only the two RFC 4122 nibbles are
+ * overwritten afterwards.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "ezlopi_util_uuid.h"
+#include "stub_random.h"
 
 static int g_checks;
 static int g_fails;
@@ -266,11 +282,10 @@ static void test_generate_and_copy(void)
 {
     printf("generate_random() bit fields, and copy()\n");
 
-    /* Not a randomness test. srand(time(NULL)) is seeded once per process at
-       one-second resolution, so two devices powering up together can produce
-       the same sequence -- noted at the bottom of this file, not asserted
-       here. What is checkable is that the version and variant nibbles RFC
-       4122 s4.4 requires are actually set, every time. */
+    /* Not a randomness test; see test_generate_uses_the_rng_for_every_byte()
+       below for what is actually checkable. What this one covers is that the
+       version and variant nibbles RFC 4122 s4.4 requires are set every time,
+       across enough calls that a value-dependent path would show up. */
     for (int t = 0; t < 64; t++)
     {
         ezlopi_uuid_t u;
@@ -305,6 +320,67 @@ static void test_generate_and_copy(void)
     ok(0x40 == (viamacro[6] & 0xf0), "the uuid_generate() macro still compiles and works");
 }
 
+/* The defect this guards against is not "the UUID looks non-random" -- no
+   assertion can see that -- it is that only some of the bytes came from the
+   entropy source. The old loop ran `i < 16 / RAND_LENGTH` and filled
+   `out[i * RAND_LENGTH + j]`, so the count of bytes written depended on a
+   macro; had RAND_LENGTH been 3 or 5, four or one bytes of the UUID would have
+   been whatever the caller's stack already held, and every existing assertion
+   above would still have passed. With the entropy arriving through a stub the
+   test controls, "all sixteen, from the RNG, in order" becomes checkable.
+
+   Asserting the exact buffer rather than a property also pins down the
+   reverse: that generate_random() does not post-process the bytes beyond the
+   two nibbles RFC 4122 requires. */
+static void test_generate_uses_the_rng_for_every_byte(void)
+{
+    printf("generate_random() takes all 16 bytes from the hardware RNG\n");
+
+    ezlopi_uuid_t u;
+    unsigned char want[16];
+
+    /* Poison, so a byte the generator never writes cannot coincidentally
+       match the value the stub would have supplied. */
+    memset(u, 0xee, sizeof u);
+
+    stub_random_reset();
+    ezlopi_util_uuid_generate_random(u);
+
+    ok(1 == g_stub_random_calls, "the RNG is consulted exactly once");
+    ok(16 == g_stub_random_bytes, "exactly 16 bytes are drawn from the RNG");
+
+    for (size_t i = 0; i < sizeof want; i++)
+    {
+        want[i] = stub_random_byte_at(i);
+    }
+    /* The only two bytes the function is allowed to alter afterwards. */
+    want[6] = (unsigned char)((want[6] & 0x0f) | 0x40);
+    want[8] = (unsigned char)((want[8] & 0x0f) | 0xa0);
+
+    int same = (0 == memcmp(u, want, sizeof want));
+    ok(same, "every byte is the RNG's, except the version and variant nibbles");
+    if (!same)
+    {
+        hexdump("got:", u);
+        hexdump("want:", want);
+    }
+
+    /* The low nibbles of bytes 6 and 8 must survive, which is what
+       distinguishes `(x & 0x0f) | 0x40` from an outright assignment -- an
+       assignment would also pass both bit-field checks above. */
+    ok((stub_random_byte_at(6) & 0x0f) == (u[6] & 0x0f),
+       "byte 6 keeps its random low nibble");
+    ok((stub_random_byte_at(8) & 0x0f) == (u[8] & 0x0f),
+       "byte 8 keeps its random low nibble");
+
+    /* Successive calls must not repeat. Trivially true of a counter, but it
+       would also catch a generator that filled the buffer once and cached. */
+    ezlopi_uuid_t a, b;
+    ezlopi_util_uuid_generate_random(a);
+    ezlopi_util_uuid_generate_random(b);
+    ok(0 != memcmp(a, b, sizeof a), "two calls do not return the same bytes");
+}
+
 int main(void)
 {
     printf("=== ezlopi-util-uuid ===\n");
@@ -316,6 +392,7 @@ int main(void)
     test_parse_malformed();
     test_parse_heap_bounded();
     test_generate_and_copy();
+    test_generate_uses_the_rng_for_every_byte();
 
     /* Same wording as the other eight suites, so that one grep over the whole
        run totals them. */
@@ -324,17 +401,20 @@ int main(void)
     /* Deliberately not tested, so that nobody reads a green run as meaning
        more than it does:
 
-         - Randomness. generate_random() calls srand(time(NULL)) once and then
-           rand(). On ESP-IDF that is a weak PRNG seeded at one-second
-           resolution, so two devices booting in the same second produce
-           identical UUIDs. esp_random() / esp_fill_random() is the hardware
-           RNG and is what this should use. Not changed here because doing so
-           adds an ESP-IDF dependency to the one component in this suite that
-           currently has none, which would cost it its host tests -- the fix
-           is a seam, not a one-liner, and it belongs in its own commit.
+         - Randomness itself. The generator now calls esp_fill_random(), and
+           the tests above check that it takes all sixteen bytes from there and
+           alters only the two RFC 4122 nibbles. They say nothing about the
+           quality of those bytes, because on the host they come from a counter
+           in stubs-uuid/stub_random.c. The real guarantee is ESP-IDF's, and it
+           is conditional: esp_random() is a true RNG when Wi-Fi or Bluetooth
+           is up, and otherwise has prerequisites in the "Random Number
+           Generation" section of the programming guide. Nothing here, and
+           nothing in the component, checks that the radio is on.
 
          - Whether any of this is reachable on a device. It is not. Nothing in
-           the repository calls these functions. */
+           the repository calls these functions, so the weak generator these
+           tests replaced had no victim and the strong one has no beneficiary
+           yet. */
     if (g_fails)
     {
         printf("UUID TESTS FAILED\n");

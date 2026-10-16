@@ -285,11 +285,12 @@ static char *__resolve(e_ezpi_local_key_source_t *source)
 /**
  * @brief Make a key from hardware entropy and persist it.
  *
- * esp_fill_random() and not rand(). The repository's other random source,
- * ezlopi_util_uuid_generate_random(), is srand(time(NULL)) plus rand(), whose
- * seed is guessable to within the second the device first booted -- a
- * credential from that source would have perhaps 20 bits of real entropy, not
- * 160. The distinction is the entire security of this function.
+ * esp_fill_random() and not rand(), and that distinction is the entire
+ * security of this function: a credential seeded from srand(time(NULL)) would
+ * carry perhaps 20 bits of real entropy rather than 160, because the seed is
+ * guessable to within the second the device first booted. The repository's
+ * other random source, ezlopi_util_uuid_generate_random(), used to be exactly
+ * that and now calls esp_fill_random() as well.
  *
  * @return the new key, which the caller must release, or NULL
  */

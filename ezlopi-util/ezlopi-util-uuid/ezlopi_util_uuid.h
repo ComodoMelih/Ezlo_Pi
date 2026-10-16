@@ -55,7 +55,11 @@ extern "C"
 /*******************************************************************************
  *                          Type & Macro Declarations
  *******************************************************************************/
-#define RAND_LENGTH 4
+/* `RAND_LENGTH 4` used to be defined here. It said how many bytes the
+   generator took from each rand() call, and nothing takes bytes from rand()
+   any more -- one esp_fill_random() fills the buffer. Removed rather than kept
+   for compatibility: it was an implementation detail of a loop that is gone,
+   and an unprefixed RAND_LENGTH in a public header is a name that collides. */
 
 /* Bytes needed for the canonical string form: 32 hex digits + 4 hyphens + the
    terminator. ezlopi_util_uuid_unparse() writes out[36] unconditionally, so a

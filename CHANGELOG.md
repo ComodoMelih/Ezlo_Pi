@@ -2075,9 +2075,13 @@ would change that, and it is listed under Known gaps rather than claimed here.
   step.
 
   `esp_fill_random()` and not `rand()`. The repository's other random source,
-  `ezlopi_util_uuid_generate_random()`, is `srand(time(NULL))` plus `rand()`,
+  `ezlopi_util_uuid_generate_random()`, was `srand(time(NULL))` plus `rand()`,
   whose seed is guessable to within the second the device first booted — a key
-  from that source would carry roughly 20 bits of real entropy rather than 160.
+  from that source would have carried roughly 20 bits of real entropy rather
+  than 160. That function has since been changed to use `esp_fill_random()`
+  too, so the contrast this paragraph drew no longer exists in the tree; it is
+  left standing because it is the reason this function was written the way it
+  was.
 
 - **The generated key is printed once at startup**, behind
   `CONFIG_EZPI_LOCAL_KEY_ANNOUNCE` (`default y`). A generated credential nobody
@@ -2393,15 +2397,57 @@ the rest of this entry with that in front of it.
   documented that it needs 37 bytes — there is now an `EZLOPI_UUID_STR_SIZE`
   for that.
 
-- **Not fixed, and the more serious weakness of the two:**
-  `ezlopi_util_uuid_generate_random()` uses `srand(time(NULL))` and `rand()`.
-  That is seeded once per boot at one-second resolution, so two devices powering
-  up in the same second generate identical UUIDs, and the sequence is
-  predictable to anyone who knows roughly when a device booted. ESP-IDF provides
-  `esp_fill_random()` for exactly this. It is left alone here because adding it
-  would give this component its first ESP-IDF dependency and cost it the host
-  tests added below — the fix is a seam, not a one-liner, and it is listed in
-  [Known gaps](#known-gaps).
+- **`ezlopi_util_uuid_generate_random()` was not random.** It called
+  `srand(time(NULL))` once and then `rand()` four times. Both halves were wrong
+  on this hardware. `time(NULL)` before SNTP has synchronised is a small count
+  from the epoch, so the seed is not merely guessable to within the second a
+  device booted — it is frequently the *same* small value on every device of a
+  batch. And `rand()` is a deterministic PRNG, so recovering that one seed
+  yields every UUID the device will ever emit. A version-4 UUID is specified to
+  carry 122 random bits; this produced on the order of twenty an attacker could
+  not already predict.
+
+  Now one `esp_fill_random()`, the hardware RNG, which
+  `ezlopi_core_local_key.c` already uses for the same reason. Filling the
+  buffer in one call also removes the old loop's second, smaller defect:
+  `rand()` returns at most `RAND_MAX`, which is `0x7fffffff` in newlib, so the
+  top bit of each four-byte group was always zero and four of the 128 bits were
+  not random at all.
+
+  `RAND_LENGTH`, which described how many bytes came out of each `rand()` call,
+  is gone from the public header along with the loop it belonged to.
+
+  What this does **not** promise: `esp_random()` is a true RNG when Wi-Fi or
+  Bluetooth is up, and otherwise carries the prerequisites in the "Random
+  Number Generation" section of the ESP-IDF guide. Neither this function nor
+  its caller checks that the radio is on.
+
+  The earlier version of this entry said the fix was "a seam, not a one-liner"
+  because an ESP-IDF dependency would cost this component its host tests. That
+  was right, and the seam is `tests/host/stubs-uuid/esp_random.h` — a verbatim
+  redeclaration of the real header's two functions, with
+  `esp_fill_random()` implemented in `stub_random.c` as a counter. An
+  `#ifdef ESP_PLATFORM` inside the component would have been smaller and would
+  have meant the firmware and the test compiled two different functions, which
+  is the one thing that would have made the test stop being evidence.
+
+  The counter is also what makes the new assertion possible. Randomness is not
+  checkable in a unit test, but *provenance* is: with a predictable source, the
+  test asserts that all sixteen bytes of the UUID came from `esp_fill_random()`
+  in order, and that only the two nibbles RFC 4122 §4.4 requires were
+  overwritten afterwards. That matters because the old loop's byte count
+  depended on a macro — had `RAND_LENGTH` been 3 or 5, four bytes or one byte
+  of every UUID would have been uninitialised stack, and every assertion the
+  suite had at the time would still have passed.
+
+  | mutation | caught by |
+  |---|---|
+  | back to `srand()` + `rand()` | "the RNG is consulted exactly once", and four more |
+  | fill 12 of the 16 bytes | "exactly 16 bytes are drawn from the RNG" |
+  | `out[6] = 0x40` instead of `(out[6] & 0x0f) \| 0x40` | "byte 6 keeps its random low nibble" — while "version nibble is 4", the assertion that existed before, still passes |
+
+  The third row is the one that justifies the test: it is a wrong version the
+  suite could not previously see.
 
 ### Action name table — [bug]
 
@@ -2732,13 +2778,15 @@ enumerators — so the live half of this component was never affected.
   going missing, and a root the docs warn is absent appearing — and was
   verified by mutating real bundles, not just its own ten fixtures.
 
-- **`ezlopi-util-uuid` joined the suite** — `tests/host/test_uuid.c`, 431
-  checks. It ties MB1013 for the shortest build rule in the `Makefile` — one
+- **`ezlopi-util-uuid` joined the suite** — `tests/host/test_uuid.c`, 437
+  checks. It tied MB1013 for the shortest build rule in the `Makefile` — one
   `-I`, its own directory, no stubs — but it reached that point differently,
-  and the difference is the point: MB1013 needed a parser split, and this
-  needed nothing. The whole translation unit compiles unmodified against the
+  and the difference was the point: MB1013 needed a parser split, and this
+  needed nothing. The whole translation unit compiled unmodified against the
   system compiler. Every other entry in this suite needed either a split or a
-  shim; this one needed neither and had simply never been tested. It could have
+  shim; this one needed neither and had simply never been tested. (It takes one
+  stub directory now — `stubs-uuid`, for `esp_random.h` — which is the price of
+  the RNG fix above and is argued for there.) It could have
   been covered from the day it was written. `ezlopi_util_uuid_parse()` turned
   out to have four defects, described under **UUID utility — [bug]** above, one
   of which ASan reports as a buffer overflow — so the cost of leaving a dependency-free file untested was
@@ -3642,18 +3690,6 @@ Listed because a changelog that only mentions what was finished is misleading.
   cloud account — the keys should be treated as disclosed and revoked, and only
   then is removing the file a tidy-up rather than a false reassurance. Flagged
   here rather than quietly edited.
-
-- **`ezlopi_util_uuid_generate_random()` is not random.** It calls
-  `srand(time(NULL))` once and then `rand()`. The seed has one-second
-  resolution, so two devices powering up in the same second produce identical
-  UUIDs, and the sequence is predictable to anyone who knows roughly when a
-  device booted. ESP-IDF ships `esp_fill_random()`, backed by the hardware RNG,
-  for precisely this. It was left alone while fixing the four `parse()` defects
-  above because switching to it gives `ezlopi-util-uuid` its first ESP-IDF
-  dependency and would immediately cost the component the 431 host checks just
-  added — it needs the same HAL/parser seam the UART drivers needed, not a
-  one-line substitution. Nothing calls this function today, which is the only
-  reason it is a gap and not a defect.
 
 - **Only `esp32` has been run on hardware.** All four targets now compile
   cleanly, but compiling is not running. `esp32s2`, `esp32s3` and `esp32c3`

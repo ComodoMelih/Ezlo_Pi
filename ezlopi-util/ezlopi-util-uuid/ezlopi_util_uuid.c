@@ -42,7 +42,8 @@
  *******************************************************************************/
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+
+#include <esp_random.h>
 
 // #include "config.h"
 #include "ezlopi_util_uuid.h"
@@ -91,26 +92,33 @@ static const unsigned char hex[] = "0123456789abcdef";
  * Convention : Use capital letter for initial word on extern function
  * @param arg
  */
+/* Was srand(time(NULL)) once, then rand() four times.
+ *
+ * Both halves of that were wrong on this hardware. The seed came from
+ * time(NULL), which on an ESP32 before SNTP has synchronised is a small number
+ * counting from the epoch -- so the seed is not merely guessable to within the
+ * second a device booted, it is often the same small value on every device.
+ * And rand() is a deterministic PRNG, so recovering that one seed yields every
+ * UUID the device will ever produce. A version-4 UUID is specified to be 122
+ * random bits; this produced on the order of twenty that an attacker could not
+ * already predict.
+ *
+ * esp_fill_random() is the hardware RNG, and is already what
+ * ezlopi_core_local_key.c uses for exactly this reason. One call, because
+ * filling the whole buffer at once also drops the old loop's second, smaller
+ * defect: rand() returns at most RAND_MAX, which is 0x7fffffff in newlib, so
+ * the top bit of each four-byte group was always zero and four of the 128 bits
+ * were not random at all.
+ *
+ * Carried over from the real header: esp_random() returns true random numbers
+ * when Wi-Fi or Bluetooth is enabled, and otherwise has prerequisites listed
+ * under "Random Number Generation" in the ESP-IDF guide. Every path in this
+ * firmware that would want a UUID has the radio up, but this function cannot
+ * check that, so it is the caller's constraint to know about.
+ */
 void ezlopi_util_uuid_generate_random(ezlopi_uuid_t out)
 {
-    int i, j, rnd;
-    static int seeded = 0;
-
-    if (!seeded)
-    {
-        srand(time(NULL));
-        seeded = 1;
-    }
-
-    for (i = 0; i < (16 / RAND_LENGTH); i++)
-    {
-        rnd = rand();
-
-        for (j = 0; j < RAND_LENGTH; j++)
-        {
-            out[i * RAND_LENGTH + j] = (0xff & rnd >> (8 * j));
-        }
-    }
+    esp_fill_random(out, sizeof(ezlopi_uuid_t));
 
     // set the version to 4
     out[6] = (out[6] & 0x0f) | 0x40;

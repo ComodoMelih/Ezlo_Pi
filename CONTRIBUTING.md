@@ -201,9 +201,18 @@ first. The answer is sometimes that nobody has written the file.
 
 That component is also a reminder to check *reachability* before writing
 "fixed a bug" anywhere. Nothing in this repository calls any function in
-`ezlopi-util-uuid`; it compiles into the image as dead code. The defects were
-real and are now tested, but they were never reachable, and the CHANGELOG
-entry says so in those words.
+`ezlopi-util-uuid`. This paragraph used to go on to say "it compiles into the
+image as dead code", and that was an assumption nobody had checked: `nm` on
+the linked esp32c3 ELF finds no `ezlopi_util_uuid_*` symbol, and a later change
+to the component left all four images byte-identical in size. The linker
+discards the whole thing. The defects were real and are now tested, but they
+were not merely unreachable, they were absent — and the CHANGELOG says so in
+those words.
+
+Worth noting how that error survived: "compiles into the image" is the kind of
+clause that sounds like a measurement and is actually a guess, and it was
+repeated into three files before anything disproved it. If you write a claim
+about the built artifact, run `nm` on the artifact.
 
 **That sweep has already been run, so don't run it again.** The obvious way to
 generalise the paragraph above is to ask the compiler which other files are in

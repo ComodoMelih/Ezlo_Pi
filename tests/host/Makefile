@@ -179,26 +179,38 @@ $(BUILD)/test_gps6mv2: GPS_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
 $(BUILD)/test_gps6mv2: test_gps6mv2.c $(GPS_DIR)/gyGPS6MV2.c | $(BUILD)
 	$(CC) $(GPS_CFLAGS) -o $@ $^ $(LDFLAGS)
 
-# ezlopi-util-uuid ties MB1013 for the shortest command line here -- one -I,
-# its own directory, and no stubs -- but it got there differently, and the
-# difference is the point. MB1013 needed a split: mb1013_parse.c was carved out
-# of a driver that configures GPIOs. This file needed nothing at all.
-# ezlopi_util_uuid.c includes <stdlib.h>, <string.h> and <time.h>, its header
-# includes nothing, and the whole translation unit compiles against the system
-# compiler unmodified.
+# ezlopi-util-uuid used to tie MB1013 for the shortest command line here --
+# one -I, its own directory, and no stubs -- and it got there differently, which
+# was the point. MB1013 needed a split: mb1013_parse.c was carved out of a
+# driver that configures GPIOs. This file needed nothing at all; it included
+# <stdlib.h>, <string.h> and <time.h>, and the whole translation unit compiled
+# against the system compiler unmodified.
 #
-# Which is the uncomfortable part: this component could have been tested from
+# Which was the uncomfortable part: this component could have been tested from
 # the day it was written, and was not. ezlopi_util_uuid_parse() turned out to
 # have four defects, including a read past the end of its input buffer that
 # ASan reports on any string shorter than 32 hex digits. None of them was
-# reachable, because nothing in the repository calls this component -- it is
-# dead code that compiles into the image. The argument for a seam is usually
-# about ESP-IDF dependencies; this one needed no seam and no argument, just
-# somebody writing the file.
+# reachable, because nothing in the repository calls this component. It is not
+# "dead code that compiles into the image", as this comment used to say: `nm`
+# on the linked esp32c3 ELF finds no ezlopi_util_uuid_* symbol, and the four
+# images came out byte-identical in size across a change to this component.
+# The linker discards all of it.
+#
+# It now takes one stub directory, and it is worth being clear that this is a
+# cost. <time.h> was replaced by <esp_random.h> when generate_random() stopped
+# using srand(time(NULL)), so the component is no longer portable by accident.
+# stubs-uuid/esp_random.h redeclares the real header's two functions verbatim
+# and stub_random.c implements esp_fill_random() as a counter. The reason to
+# pay this rather than put an #ifdef ESP_PLATFORM in the component is that the
+# #ifdef would give the firmware and the test two different functions, and the
+# test is only evidence while they are one. The counter is also what makes the
+# new assertion possible: "all sixteen bytes came from the RNG" is decidable
+# against a predictable source and not against rand().
 $(BUILD)/test_uuid: UUID_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
-                                   -I$(UUID_DIR) \
+                                   -I$(UUID_DIR) -Istubs-uuid \
                                    $(SANITIZERS)
-$(BUILD)/test_uuid: test_uuid.c $(UUID_DIR)/ezlopi_util_uuid.c | $(BUILD)
+$(BUILD)/test_uuid: test_uuid.c $(UUID_DIR)/ezlopi_util_uuid.c \
+                    stubs-uuid/stub_random.c | $(BUILD)
 	$(CC) $(UUID_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # ezlopi-core-actions was found the same way as uuid, by a sweep rather than by
