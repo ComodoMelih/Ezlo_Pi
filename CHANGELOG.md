@@ -3171,7 +3171,7 @@ Listed because a changelog that only mentions what was finished is misleading.
   size of the fix. The one-line change — make `add_item_to_object()` store the
   inclusive length — also changes what the key printer at
   [`cjext.c:2126`](ezlopi-components/cjext/cjext.c#L2126) is handed, and every
-  response from all 122 API methods goes through that printer. It needs its own
+  response from all 123 API methods goes through that printer. It needs its own
   commit, its own host test for the printer, and a board, none of which belong
   inside a feature change.
 
@@ -3183,12 +3183,12 @@ Listed because a changelog that only mentions what was finished is misleading.
   one is, the only thing established is that the device-configuration methods
   do not depend on it.
 
-- **The six functions in `ezlopi_cloud_devcfg_port.c` have no automated
+- **The seven functions in `ezlopi_cloud_devcfg_port.c` have no automated
   coverage of any kind.** They are the only part of the device-configuration
   feature that touches the partition and the compiled-in device table, which is
   precisely why they cannot be host-tested and why they were isolated into
-  their own file. The handler above them is covered by 261 host assertions and
-  twelve mutations; these six are covered by reading them. The specific
+  their own file. The handler above them is covered by 322 host assertions and
+  21 mutations; these seven are covered by reading them. The specific
   untested claim that matters most is that a configuration stored by
   `hub.ezlopi.config.set` is byte-for-byte what `ezlopi_device_parse_json_v3()`
   reads on the next boot.
