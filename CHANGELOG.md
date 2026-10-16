@@ -2222,6 +2222,115 @@ targets.
 
 ### Device configuration — [bug]
 
+- **A pin number a board does not have no longer turns into one it does.** The
+  valid-pin test every driver uses is not a range check. `GPIO_IS_VALID_GPIO(n)`
+  expands to `((1ULL << (n)) & SOC_GPIO_VALID_GPIO_MASK) != 0`
+  ([`driver/gpio.h:50`](https://github.com/espressif/esp-idf/blob/v4.4.6/components/driver/include/driver/gpio.h#L50)),
+  so the number out of the configuration is a *shift count*. Shifting by a count
+  outside 0–63 is undefined, and the way it actually behaved was not a rejection:
+  every shift instruction involved truncates the count to the register width, so
+  the number wrapped and named a different, real pin.
+
+  `EZPI_core_cjson_get_value_gpio()` is the one place that number entered. It
+  checked nothing — it returned `(int)o_item->valuedouble` for whatever the
+  document carried, and `-1` only when the key was missing — and 128 call sites
+  across 10 of the pin keys fed it straight to the macro.
+
+  Measured on the host, with the macro's own expression and the esp32 mask, at
+  runtime values so nothing could be constant-folded:
+
+  | `"gpio"` in the document | `GPIO_IS_VALID_GPIO` | `.pin_bit_mask` built next | pin actually configured |
+  |---|---|---|---|
+  | 70 | accepted | `0x40` | **GPIO 6 — SPI flash clock** |
+  | 64 | accepted | `0x01` | GPIO 0 |
+  | 72 | accepted | `0x100` | GPIO 8 |
+  | 100 | accepted | `0x10_0000_0000` | GPIO 36 |
+
+  GPIOs 6–11 are the flash bus on a standard esp32 module. A configuration
+  naming pin 70 passed the valid-pin test and had the driver reconfigure the
+  flash clock as a push-pull output, which takes down the running image. The
+  aliasing *target* is architecture-specific and was read off the assembly both
+  target compilers emit for `1ULL << n`, neither of which contains a range
+  check; "accepted when it should not be" is a host measurement, not an
+  inference.
+
+  **The fix is one bound at the read, not 128 changes at the call sites.** A
+  number is returned only if it is in `[0, GPIO_NUM_MAX)` for the target being
+  built, or is one of the two sentinels. The test is on the `double`, before the
+  narrowing cast, because converting a `double` that does not fit an `int` is
+  itself undefined and `cJSON` parses numbers with `strtod` — `"gpio":1e999`
+  arrives as `+inf`.
+
+  Three things were deliberately left alone:
+
+  - **The mask is not consulted.** In-range-but-reserved pins (24 and 28–31 on
+    esp32) are still the callers' business, and `GPIO_IS_VALID_GPIO` answers
+    that correctly once the shift count is in range. This closes the undefined
+    shift; it does not duplicate the valid-pin test. It also keeps the bound
+    expressible on a host, where `GPIO_NUM_MAX` exists and the mask does not.
+  - **`-1` and `255` pass through untouched.** Both are "no pin" spellings the
+    drivers test for by hand, and a configuration using either works on a board
+    today. They remain out-of-range shift counts; both were checked against the
+    xtensa and riscv32 compilers at `-O2` and both fold to `0`, which is the
+    answer the callers need. That is a measured accident and is named in the
+    source rather than left to be rediscovered.
+  - **The document is not refused.** An unusable pin number disables that one
+    pin, exactly as an absent key does. Refusing configurations that work today
+    is the failure mode this area already has a correction recorded for under
+    *Known gaps*.
+
+  **Three other readings of this code were wrong, and finding that out is most
+  of what the work was.** Each had been written down as the headline defect
+  before being checked:
+
+  | Claim | Why it is not a defect |
+  |---|---|
+  | Output pins are validated with the input-capable macro, so an input-only pin can be driven | ESP-IDF's `gpio_config()` already returns `ESP_ERR_INVALID_ARG` with `"GPIO can only be used as input mode"` for exactly that, and the drivers check the return. Adding `GPIO_IS_VALID_OUTPUT_GPIO` to ~25 sites would move *where* the rejection happens, not whether |
+  | `device_0001_digitalOut_generic.c:303` dereferences `item` outside the `if (item)` guard | The dispatcher at [`ezlopi_core_ezlopi.c:217`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L217) walks `while (curr_item)`, so `item` is never NULL. The guard is dead defensiveness, not a missing one |
+  | The `gpio_config()` return is discarded at `:325` | For an input-mode config its only failure paths are an empty mask or a bit outside the valid mask, both already excluded by the `GPIO_IS_VALID_GPIO` three lines earlier. Unreachable failure — sloppy, not broken |
+  | The sentinel shifts are undefined and therefore dangerous | Undefined, yes, and both toolchains fold `-1` and `255` to `0` at `-O2` with no warning. Latent and measured benign, which is a different entry than a live bug |
+
+  The per-target input-only pins were computed from the two SOC masks rather
+  than recalled: esp32 → 34–39, esp32s2 → 46, esp32s3 and esp32c3 → none.
+
+  **Tested by [`tests/host/test_cjsongpio.c`](tests/host/test_cjsongpio.c)**, 59
+  checks, which compiles the real `ezlopi_core_cjson_macros.c` rather than a
+  copy. It does what the call sites do — `1ULL << pin` on every value the table
+  can produce — and it was run against a subject broken on purpose in both
+  directions before being believed:
+
+  | Mutation | Result |
+  |---|---|
+  | The range check removed | 30 checks fail, and with `SANITIZERS=` too, so the table and not the sanitizer is what catches it |
+  | The `255` clause removed | 1 check fails — the one asserting the sentinel survives |
+
+  Checking the second direction is the point. The earlier attempt in this area
+  was withdrawn because it would have refused a normal two-sensor I²C
+  configuration; a test that only checks that bad input is rejected cannot
+  notice that kind of mistake.
+
+  Two things the mutations turned up about the harness itself, both fixed in the
+  Makefile rule for this test rather than assumed away:
+  `-fsanitize=float-cast-overflow` is **not** part of `-fsanitize=undefined` in
+  gcc, and gcc's sanitizer default is to print `runtime error: ...` and continue
+  with exit 0 — so without `-fno-sanitize-recover` a sanitizer finding would have
+  sat in the log of a suite reporting success. Nothing in this tree sets
+  `UBSAN_OPTIONS`.
+
+  Also in the same file, and only because compiling it on a host surfaced it:
+  the two `"%.*s"` calls in `EZPI_core_cjson_get_value_string_by_copy()` and
+  `..._by_alloc()` passed a `size_t` where the precision form reads an `int`
+  from the variable argument list. On every ESP target those are the same 32-bit
+  type, which is why it has shipped; they stop being the same type the moment
+  the file is compiled anywhere `size_t` is wider, and the precision is then read
+  from the wrong four bytes. Now cast. A no-op on target.
+
+  Four-target build sweep: all of esp32, esp32s2, esp32s3 and esp32c3 build, the
+  new warning string is present in all four images, and the edited file produces
+  **zero** warnings on any of them — the 87 (85 on the C3)
+  `-Wincompatible-pointer-types` in the build are the pre-existing ones from the
+  header, documented above `CJSON_GET_VALUE_INT`.
+
 - **A device configuration that will not parse no longer bricks the hub.**
   `EZPI_device_prepare()` reads the stored configuration once per boot, and when
   the parse failed it stamped this chip's name into the config, wrote it back
@@ -3949,8 +4058,8 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 4688 assertions across
-  twenty-one binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 4747 assertions across
+  twenty-two binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra
@@ -3972,6 +4081,40 @@ enumerators — so the live half of this component was never affected.
   with the fix removed and fails there on 4 of 30 checks, with the untouched
   paths still passing. Where a counterfactual was *not* run, the entry says that
   instead.
+
+- **New host test for the GPIO pin bound,
+  [`tests/host/test_cjsongpio.c`](tests/host/test_cjsongpio.c)** — 59 checks
+  compiling the real `ezlopi_core_cjson_macros.c`, not a copy of it. See *Device
+  configuration* for the defect. Two things about this one are worth recording
+  beyond the usual.
+
+  **It measures both directions.** The obvious direction is that out-of-range
+  pin numbers are refused: remove the range clause and 30 checks fail. The
+  direction that actually needed measuring is the opposite one — that ordinary
+  configurations still work — because the changelog already records an earlier
+  attempt at pin validation that was withdrawn for refusing a normal two-sensor
+  I²C config. So the `255`-means-unused sentinel has its own mutation, and
+  removing that clause fails exactly one check. A bound that is too tight breaks
+  working hardware, and a test that only pushes from one side cannot see it.
+
+  **The table is the verdict; the sanitizer is a second opinion.** The first
+  version of the comments in this file claimed UBSan would abort on the
+  out-of-range shift. It would not have: gcc does not include
+  `-fsanitize=float-cast-overflow` in `-fsanitize=undefined`, gcc's default on a
+  finding is to print and continue, and nothing in this tree sets
+  `UBSAN_OPTIONS` — so a finding would have been reported on stderr by a process
+  that then exited 0. The rule now passes both `-fsanitize=float-cast-overflow`
+  and `-fno-sanitize-recover=`, scoped to this one binary, and both mutations
+  were confirmed to fail with sanitizers switched off entirely. Which is the
+  property that matters: the assertions catch the defect on their own, and the
+  sanitizer is there to catch a *different* defect than the one being tested
+  for.
+
+  A side effect of making a finding fatal was worth a line in `main()`: the
+  first run of the deliberately-broken subject printed the sanitizer message and
+  none of the thirty `FAIL` lines before it, because `make` reads stdout through
+  a pipe and the immediate abort discarded the buffer. The failure was visible;
+  *which* checks failed was not. `setvbuf(stdout, NULL, _IOLBF, 0)`.
 
 - **New CI check for the BLE chunk-reassembly bug class,
   [`tests/ci/check_ble_chunk_clamp.py`](tests/ci/check_ble_chunk_clamp.py).**
@@ -4948,8 +5091,39 @@ Listed because a changelog that only mentions what was finished is misleading.
   pin that does not exist on the target is caught at init by most drivers,
   which fail with `EZPI_ERR_INIT_DEVICE_FAILED`.
 
-  One real hole is left, and a second one this entry used to claim turned out
-  not to exist:
+  35 is a count of sites where a failure *changes what happens next*, not of
+  sites that merely assign the result somewhere, and the distinction costs one:
+  a recount by the shape of the call returns 36. The two that do nothing with
+  the failure are
+
+  | site | what happens to the return |
+  | --- | --- |
+  | `device_0001_digitalOut_generic.c:325` | discarded on the spot |
+  | `pms5003.c:189` | `ret \|=`, propagated up through `pms_setup_control_gpio()`, then dropped by `pms_init()` at `pms5003.c:92` — `pms_init()` is `void`, so there is nowhere for it to go |
+
+  `pms5003.c:189` is the one a grep gets wrong: it looks like a checked call
+  for two stack frames. The other 35 either compare the return in place
+  (`if (0 == gpio_config(...))`, `ret = (0 == gpio_config(...)) ? ... : ...`)
+  or store it and test it on the next line, as `jsn_sr04t.c:114` and `:127` do.
+
+  **One part of this gap is now closed, and it was the dangerous part.** A pin
+  number outside `[0, GPIO_NUM_MAX)` used to be *accepted* — it aliased onto a
+  real pin, because the valid-pin macro is a shift and not a range test — and is
+  now refused at the single accessor all 128 `CJSON_GET_VALUE_GPIO` sites read
+  through. See *Device configuration* above. What that entry does **not** close,
+  and what the rest of this entry is about, is pins that are perfectly real and
+  still the wrong choice.
+
+  Sixteen pin reads are also still outside it, because they go through
+  `CJSON_GET_VALUE_INT`/`UINT32` rather than the GPIO accessor: device-0038 RGB
+  (3), sensor-0037 pms5003 (4), sensor-0040 TCS230 (6), sensor-0047 HX711 (2),
+  sensor-0070 (1). Those two macros are general integer readers used by hundreds
+  of non-pin keys, so the bound does not belong in them; routing the sixteen
+  through the GPIO accessor means changing their destination types, which is a
+  separate change rather than a line on the end of this one.
+
+  Beyond those sixteen, one real hole is left, and a second one this entry used
+  to claim turned out not to exist:
 
   - **Pins that are "valid" but already in use by the system.** On esp32
     `SOC_GPIO_VALID_GPIO_MASK` excludes only 24 and 28–31

@@ -71,7 +71,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
-           test_i2c_shared_bus test_api_envelope
+           test_i2c_shared_bus test_api_envelope test_cjsongpio
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -618,6 +618,64 @@ $(BUILD)/test_api_envelope: test_api_envelope.c $(COREAPI_DIR)/ezlopi_core_api.c
 	$(CC) $(APIENV_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/api_envelope_cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_api_envelope_main.o $(BUILD)/api_envelope_subject.o \
 	      $(BUILD)/api_envelope_cjext.o $(LDFLAGS) -lm
+
+# The pin number a device configuration is allowed to name. One function,
+# EZPI_core_cjson_get_value_gpio(), is where that number enters the firmware,
+# and 128 call sites shift by what it returns.
+#
+# This rule carries two sanitizer flags the rest of the suite does not. The
+# test's own table is what catches a broken subject -- it was run against one,
+# and it fails 30 checks with the bound removed, which is why the result does
+# not depend on these flags and still holds with SANITIZERS= -- but both flags
+# were worth keeping once measured:
+#
+#   -fsanitize=float-cast-overflow is NOT part of -fsanitize=undefined in gcc.
+#   The subject's one narrowing cast, (int)raw, is well defined only because of
+#   the bound in front of it; this flag is an independent check on that, and it
+#   fires on the broken subject at a different line than the shift does.
+#
+#   -fno-sanitize-recover makes any such finding fail the build. gcc's default
+#   is to print "runtime error: ..." and carry on with exit 0, which would have
+#   put a sanitizer finding in the log of a suite reporting success. Found by
+#   looking, not assumed: nothing in this tree sets UBSAN_OPTIONS.
+#
+# Both are scoped to this rule rather than to SANITIZERS. Turning them on for
+# every test is probably right and is not something to do as a side effect of
+# this one.
+#
+# -I$(STUBS_DIR) supplies driver/gpio.h, and it supplies the part that matters:
+# GPIO_NUM_MAX, which is the bound. It is 49 in the stub and 40 on an esp32, so
+# the test is written against the symbol and never against a literal.
+#
+# The whole file is compiled, not just the one function, because the rest of it
+# is what the subject shares a translation unit with -- and EZPI_core_cjson_trace()
+# references ezlopi__str, which the test defines for the same reason
+# test_devcfgval.c defines its four keywords. cjext.c is linked real: the
+# subject's input is a cJSON node's valuedouble, and faking that would let this
+# file decide for itself what strtod did with "1e999".
+# Empty when SANITIZERS is overridden away, so that a toolchain without them
+# still builds this rule rather than failing on a flag it cannot honour.
+# Two separate -fno-sanitize-recover= flags rather than one comma-separated
+# list, because a comma inside $(if ...) would need escaping to survive make.
+CJSONGPIO_SAN := $(if $(SANITIZERS),-fsanitize=float-cast-overflow \
+                                    -fno-sanitize-recover=undefined \
+                                    -fno-sanitize-recover=float-cast-overflow,)
+
+$(BUILD)/test_cjsongpio: CJSONGPIO_CFLAGS := -std=c99 -O1 -g \
+                                             -I$(COREEZLOPI_DIR) \
+                                             -I$(CONSTANTS_DIR) \
+                                             -I$(CJEXT_DIR) -I$(STUBS_DIR) \
+                                             $(SANITIZERS) $(CJSONGPIO_SAN)
+$(BUILD)/test_cjsongpio: test_cjsongpio.c \
+                         $(COREEZLOPI_DIR)/ezlopi_core_cjson_macros.c \
+                         $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(CJSONGPIO_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_cjsongpio_main.o test_cjsongpio.c
+	$(CC) $(CJSONGPIO_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/cjsongpio_subject.o $(COREEZLOPI_DIR)/ezlopi_core_cjson_macros.c
+	@nm $(BUILD)/cjsongpio_subject.o | grep -q ' T EZPI_core_cjson_get_value_gpio' \
+	  || { echo "ezlopi_core_cjson_macros.c compiled to an object without the subject in it"; exit 1; }
+	$(CC) $(CJSONGPIO_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/cjsongpio_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_cjsongpio_main.o $(BUILD)/cjsongpio_subject.o \
+	      $(BUILD)/cjsongpio_cjext.o $(LDFLAGS) $(CJSONGPIO_SAN) -lm
 
 $(BUILD):
 	mkdir -p $(BUILD)
