@@ -3178,10 +3178,80 @@ Listed because a changelog that only mentions what was finished is misleading.
   What is known: requests arrive parsed, so input validation across the
   firmware is unaffected, and serialised output is correct either way. The
   exposure is in-firmware code that looks up a longer member name against a
-  built tree holding a shorter prefix of it. **Not audited** — no sweep has
-  been done for other places in the tree where that pattern occurs, and until
-  one is, the only thing established is that the device-configuration methods
-  do not depend on it.
+  built tree holding a shorter prefix of it.
+
+  **Now audited.** The sweep is described in the entry below. Result: two call
+  sites in the whole tree are genuinely exposed, both are masked, and both are
+  unreachable on shipped hardware. The bug is still worth fixing, but it is not
+  currently costing a correct response anywhere.
+
+- **The prefix-lookup sweep: one latent collision is left, in the scene
+  block-data scale list.** This entry records the sweep the item above used to
+  say had not been done, because its residue is a gap rather than a fix.
+
+  The first thing the sweep needed was ground truth, not more reading of
+  `cjext.c` — a first pass at reading `parse_string()` got the convention
+  backwards, which would have made the bug universal rather than build-only.
+  So the convention was measured instead, by a 17-check C probe built under
+  ASan/UBSan that reports `str_key_len` beside `strlen()` for the same key
+  reached both ways, and that identifies a returned child by its *index* via
+  pointer identity so a correct-by-accident value cannot pass. Measured: a
+  parsed `"config"` stores 7, a built `"config"` stores 6. Seven of the
+  seventeen checks disagree with a correct lookup, and all seven are on built
+  trees. The probe also showed the exposure is wider than sibling pairs: an
+  object holding `{"config":1}` *alone* returns that member for a `configSize`
+  lookup, because the comparison stops before the mismatch.
+
+  With the convention established, the sweep was mechanical:
+
+  - **40 colliding names.** Of the key names this firmware looks up, the pairs
+    where one is a strict case-insensitive prefix of another.
+  - **127 call sites** look up one of those 40 names.
+  - **25 of the 127 search an object this firmware built**, found by an awk
+    pass that, per function body, intersects the locals assigned from
+    `cJSON_CreateObject`/`CreateArray`/`CreateRaw`/`Duplicate`/
+    `AddObjectToObject`/`AddArrayToObject` with the locals used as the search
+    object. The first version of that scan counted only `Create*` and so missed
+    two sites; `AddObjectToObject` returns a freshly built child and matters
+    just as much. Everything else searches a parsed tree, including
+    `cJSON_ParseWithRef`, which was checked and does use the inclusive
+    convention — parsed trees cannot misfire regardless of the name.
+  - **23 of those 25 are immune by construction.** They search an item-value
+    object, and every such object in the firmware is built by the single
+    chokepoint
+    [`ezlopi_core_valueformatter.c`](ezlopi-core/ezlopi-core-valueformatter/ezlopi_core_valueformatter.c),
+    which adds only `value` and `valueFormatted`. `value` is the shortest key
+    present, so nothing can be a strict prefix of it — confirmed mechanically
+    rather than by eye, by grepping for the only four names that could be
+    (`ezlopi_v_str`, `ezlopi_va_str`, `ezlopi_val_str`, `ezlopi_valu_str`):
+    zero matches.
+  - **2 sites are genuinely exposed**, both in
+    [`ezlopi_core_scenes_operators.c`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_operators.c)
+    at lines 1102 and 1148, and both look up `valueType` on a
+    freshly-built item-value object. Because that object never contains a
+    `valueType` key, the lookup resolves to the `value` item instead. Both are
+    masked: the result goes to `cJSON_GetStringValue()`, which returns `NULL`
+    for anything that is not a string, into a `NULL`-safe `STR_OP_COMP`
+    comparison against `"dictionary"`. For every shipped driver the outcome is
+    therefore identical to the outcome of a correct lookup. They are also dead:
+    no shipped driver has a dictionary-valued item.
+
+  What is left, and why this is a gap rather than a closed question:
+  `ezpi_value_scales_list()` at
+  [`ezlopi_cloud_scenes_block_data_list.c:268`](ezlopi-cloud/ezlopi-cloud-scenes/ezlopi_cloud_scenes_block_data_list.c#L268)
+  keys a built object by the runtime `value_type` of an item and then looks
+  that key back up. A prefix pair among the value-type names would silently
+  merge two types' scale lists into one. Counted: **zero prefix pairs among the
+  26 value types shipped drivers actually use**, so it is correct today. It is
+  one driver away from not being — a `value_type_int` already in the enum
+  alongside a new `value_type_int64`, or `volume` alongside `volume_flow`,
+  would do it, and the symptom would be a wrong scale list in a scene editor
+  rather than a crash. There is no test that would catch it.
+
+  One claim the sweep settled rather than left open: the item-id keys of
+  `cj_device_items_data` cannot collide, because every id is rendered `%08x`
+  and so every key is exactly 8 characters, and no fixed-width set can contain
+  a strict prefix pair.
 
 - **The seven functions in `ezlopi_cloud_devcfg_port.c` have no automated
   coverage of any kind.** They are the only part of the device-configuration
