@@ -42,6 +42,23 @@
  *******************************************************************************/
 #include <time.h>
 
+/* For esp_restart(), called below when `register` has failed five times. None
+** of this file's own includes named it; the declaration arrived down this
+** edge, traced through the IDF checkout rather than guessed at:
+**
+**   cjext.h -> EZLOPI_USER_CONFIG.h -> driver/uart.h -> freertos/task.h
+**           -> freertos/portmacro.h -> esp_system.h
+**
+** Unconditional in both the xtensa and the riscv port, so it held for all four
+** targets. It is also explicitly temporary at the far end: both ports carry
+** IDF's own "required by esp_get_...() functions in portable.h.
+** [refactor-todo] Update portable.h" against that very include -- xtensa
+** portmacro.h line 50, riscv line 45. When portable.h is updated and the
+** include goes, esp_restart() here becomes an implicit declaration returning
+** int rather than a compile error, which is the quiet kind of breakage. Named
+** here because this is the file that calls it. */
+#include "esp_system.h"
+
 // #include "ezlopi_util_trace.h"
 
 #include "ezlopi_core_api.h"
@@ -149,7 +166,32 @@ cJSON *EZPI_core_api_consume_cjson(const char *who, cJSON *cj_request, time_t ti
 
                     if (cj_response)
                     {
-                        cJSON_AddNullToObject(__FUNCTION__, cj_response, ezlopi_error_str);
+                        /* Only when the handler did not report one. This used
+                        ** to be unconditional, and cjext's add_item_to_object()
+                        ** ends in add_item_to_array() -- it appends, with no
+                        ** replace and no duplicate check -- so a handler that
+                        ** had already failed produced two "error" members on
+                        ** the wire:
+                        **
+                        **   {"result":{...},"error":{"code":-32602,...},"error":null}
+                        **
+                        ** Which one a client sees depends on its parser, and
+                        ** the two disagree. cjext's get_object_item() returns
+                        ** the FIRST match, so C callers saw the failure. A
+                        ** browser's JSON.parse keeps the LAST duplicate, as do
+                        ** Python's json and Go's encoding/json, so every error
+                        ** reply read as a success with error == null. That is
+                        ** the direction that matters now there is a local web
+                        ** UI: it would have reported a refused configuration as
+                        ** saved.
+                        **
+                        ** Success replies still carry an explicit error: null,
+                        ** so the contract a client checks is unchanged. */
+                        if (NULL == cJSON_GetObjectItem(__FUNCTION__, cj_response, ezlopi_error_str))
+                        {
+                            cJSON_AddNullToObject(__FUNCTION__, cj_response, ezlopi_error_str);
+                        }
+
                         cJSON_AddItemToObject(__FUNCTION__, cj_response, ezlopi_id_str, cJSON_Duplicate(__FUNCTION__, cj_id, true));
                         cJSON_AddItemToObject(__FUNCTION__, cj_response, ezlopi_sender_str, cJSON_Duplicate(__FUNCTION__, cj_sender, true));
                         cJSON_AddItemToObject(__FUNCTION__, cj_response, ezlopi_method_str, cJSON_Duplicate(__FUNCTION__, cj_method, true));

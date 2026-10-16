@@ -24,4 +24,27 @@ typedef long BaseType_t;
  * it. The conversion happens at the xSemaphoreTake() call instead. */
 #define portMAX_DELAY 0xffffffffU
 
+/* ESP-IDF's FreeRTOS.h includes esp_bit_defs.h, which is where BIT0..BIT31
+ * come from. ezlopi_core_event_group.h writes its enumerators as BIT0..BIT4
+ * and includes only ezlopi_core_errors.h, so on target it compiles solely
+ * because something upstream of it reached FreeRTOS.h first. Defined here for
+ * the same reason, spelled the same way esp_bit_defs.h spells them. Only the
+ * five the event group uses, extended to 8 so the next bit added there does
+ * not have to come back to this file.
+ *
+ * #ifndef-guarded individually: these are plain object macros, so defining
+ * them identically twice is legal C, but a stub directory that is first on the
+ * include path for one rule and second for another should not care which of
+ * the two got there first. */
+#ifndef BIT0
+#define BIT0 0x00000001U
+#define BIT1 0x00000002U
+#define BIT2 0x00000004U
+#define BIT3 0x00000008U
+#define BIT4 0x00000010U
+#define BIT5 0x00000020U
+#define BIT6 0x00000040U
+#define BIT7 0x00000080U
+#endif
+
 #endif /* _HOST_STUB_FREERTOS_H_ */

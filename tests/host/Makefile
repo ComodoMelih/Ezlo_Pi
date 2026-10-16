@@ -30,6 +30,10 @@ MQTTCFG_DIR  := ../../ezlopi-util/ezlopi-util-mqttcfg
 MQTTAPI_DIR  := ../../ezlopi-cloud/ezlopi-cloud-mqtt-config
 MQTTCORE_DIR := ../../ezlopi-core/ezlopi-core-mqtt-config
 ERRORS_DIR   := ../../ezlopi-core/ezlopi-core-errors
+COREAPI_DIR  := ../../ezlopi-core/ezlopi-core-api
+COREEZLOPI_DIR := ../../ezlopi-core/ezlopi-core-ezlopi
+SNTP_DIR     := ../../ezlopi-core/ezlopi-core-sntp
+EVENTGRP_DIR := ../../ezlopi-core/ezlopi-core-event-group
 CONSTANTS_DIR := ../../ezlopi-cloud/ezlopi-cloud-constants
 BLEBUF_DIR   := ../../ezlopi-core/ezlopi-core-ble
 I2C_HAL_DIR  := ../../ezlopi-hal/ezlopi-hal-i2c
@@ -67,7 +71,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
-           test_i2c_shared_bus
+           test_i2c_shared_bus test_api_envelope
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -564,6 +568,56 @@ $(BUILD)/test_i2c_shared_bus: test_i2c_shared_bus.c $(I2C_HAL_DIR)/ezlopi_hal_i2
 	@nm $(BUILD)/i2c_master_subject.o | grep -q ' T EZPI_hal_i2c_master_init' \
 	  || { echo "ezlopi_hal_i2c_master.c compiled to an empty object"; exit 1; }
 	$(CC) -o $@ $(BUILD)/test_i2c_shared_bus_main.o $(BUILD)/i2c_master_subject.o $(LDFLAGS)
+
+# ezlopi-core-api: the reply envelope, which is the one piece of code every
+# local API call passes through. A defect here is a defect in all 200-odd
+# methods at once, which is why no per-method test caught the duplicate "error"
+# member this rule now regression-tests -- see the header of
+# test_api_envelope.c.
+#
+# The subject is host-compilable for a reason worth stating, because it is not
+# luck: all six of ezlopi_core_api.c's own headers are ESP-IDF free. They pull
+# in cjext, <time.h>, the error enum and three sets of prototypes, and the only
+# ESP-IDF function the file calls is esp_restart(). So the fake surface is four
+# method-table functions, the broadcast queue, the event group and that one
+# reboot -- all defined in the test, all recording.
+#
+# Three things about the flags:
+#
+# -Wno-unused-parameter applies to the subject only. EZPI_core_api_consume_cjson()
+# takes a `who` it never uses -- it passes __FUNCTION__ to cjext instead -- and
+# the same is true of several arguments in the file. Not worth changing a
+# public signature over, and the test file itself is still built -Werror with
+# the parameter warning on.
+#
+# -I$(STUBS_DIR) supplies esp_system.h for esp_restart(), and the BIT0..BIT7
+# that ezlopi_core_event_group.h uses without including anything that defines
+# them. On target those arrive through FreeRTOS.h; stubs/ezlopi_util_trace.h
+# reproduces that edge rather than defining the bits somewhere they do not
+# belong. See the comments in both stub files.
+#
+# cjext.c gets the relaxed vendored-code flags it gets in every other rule
+# here, and it is linked real rather than faked: the defect being tested is in
+# cjext's append-on-duplicate-key semantics, so a fake tree would let the test
+# agree with itself.
+$(BUILD)/test_api_envelope: APIENV_CFLAGS := -std=c99 -O1 -g \
+                                             -I$(COREAPI_DIR) \
+                                             -I$(COREEZLOPI_DIR) \
+                                             -I$(SNTP_DIR) \
+                                             -I$(EVENTGRP_DIR) \
+                                             -I$(ERRORS_DIR) \
+                                             -I$(CONSTANTS_DIR) \
+                                             -I$(CJEXT_DIR) -I$(STUBS_DIR) \
+                                             $(SANITIZERS)
+$(BUILD)/test_api_envelope: test_api_envelope.c $(COREAPI_DIR)/ezlopi_core_api.c \
+                            $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(APIENV_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_api_envelope_main.o test_api_envelope.c
+	$(CC) $(APIENV_CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -c -o $(BUILD)/api_envelope_subject.o $(COREAPI_DIR)/ezlopi_core_api.c
+	@nm $(BUILD)/api_envelope_subject.o | grep -q ' T EZPI_core_api_consume_cjson' \
+	  || { echo "ezlopi_core_api.c compiled to an object without the subject in it"; exit 1; }
+	$(CC) $(APIENV_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/api_envelope_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_api_envelope_main.o $(BUILD)/api_envelope_subject.o \
+	      $(BUILD)/api_envelope_cjext.o $(LDFLAGS) -lm
 
 $(BUILD):
 	mkdir -p $(BUILD)

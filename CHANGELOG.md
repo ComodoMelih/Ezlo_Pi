@@ -1750,6 +1750,186 @@ able to intercept or spoof TCP on the LAN is unaffected by any of this — a
 session keyed on a descriptor authorises whoever holds that socket. Only TLS
 would change that, and it is listed under Known gaps rather than claimed here.
 
+### Local API replies — [sec]
+
+- **Every error reply carried two `error` members, and a browser read the
+  wrong one.** [`EZPI_core_api_consume_cjson()`](ezlopi-core/ezlopi-core-api/ezlopi_core_api.c#L146)
+  is the single function every one of this firmware's API methods answers
+  through. After the method handler had run it added `error: null`
+  unconditionally:
+
+  ```c
+  cj_response = __execute_method(cj_request, method);
+  if (cj_response)
+  {
+      cJSON_AddNullToObject(__FUNCTION__, cj_response, ezlopi_error_str);
+  ```
+
+  cjext's `add_item_to_object()`
+  ([`cjext.c:2386`](ezlopi-components/cjext/cjext.c#L2386)) ends in
+  `add_item_to_array()`. It appends — no replace, no duplicate check. So a
+  handler that had already reported a failure produced a reply with that member
+  twice:
+
+  ```json
+  {"result":{...},"error":{"code":-32602,"data":"devcfg.chipset.mismatch"},"error":null}
+  ```
+
+  Which of the two a reader sees is decided by its JSON parser, and the two
+  common answers disagree. cjext's own `get_object_item()` returns the **first**
+  match, so every C caller inside this firmware saw the failure — which is why
+  this survived: from the device's own side the API behaved correctly.
+  JavaScript's `JSON.parse` keeps the **last** duplicate, as do Python's `json`
+  and Go's `encoding/json`. A browser therefore read **every error reply from
+  this API as a success with `error === null`**.
+
+  Not deduced. A throwaway probe compiled against the real cjext built the
+  response the way `ezlopi_cloud_devcfg.c` does, applied the line above, and
+  printed the bytes: two children named `error`,
+  `cJSON_GetObjectItem()` → the object, last-wins → `null`.
+
+  The fix is a guard, three lines, and the shape of it matters as much as the
+  presence:
+
+  ```c
+  if (NULL == cJSON_GetObjectItem(__FUNCTION__, cj_response, ezlopi_error_str))
+  {
+      cJSON_AddNullToObject(__FUNCTION__, cj_response, ezlopi_error_str);
+  }
+  ```
+
+  Simply deleting the unconditional add would also have removed the duplicate,
+  and would have broken every client that tests `error === null` on a success:
+  a successful reply would carry no verdict at all. Both directions are
+  regression-tested, and both mutations were run (see Testing).
+
+  Scope, measured rather than estimated. Three files add an `error` *object* to
+  a reply that then passes through this envelope, each through a local
+  `prepare_error` helper, and between them they have **21 refusal paths**:
+  [`ezlopi_cloud_devcfg.c`](ezlopi-cloud/ezlopi-cloud-devcfg/ezlopi_cloud_devcfg.c#L128)
+  (8),
+  [`ezlopi_cloud_mqtt_config.c`](ezlopi-cloud/ezlopi-cloud-mqtt-config/ezlopi_cloud_mqtt_config.c#L127)
+  (8) and
+  [`ezlopi_cloud_offline_login.c`](ezlopi-cloud/ezlopi-cloud-offline-login/ezlopi_cloud_offline_login.c#L75)
+  (5). An earlier draft of this entry said "27 sites across 9 files"; that
+  counted the six prototype and definition lines as call sites and the file
+  count was simply wrong. The corrected number is smaller and the consequence
+  is worse, because of which three files they are.
+
+  The sharpest one is the login. `hub.offline.login.ui` refuses a wrong local
+  key with `{"code":-32500,"message":"Bad password","data":"user.login.badpassword"}`,
+  and that reply was shipped with `error: null` appended after it. A browser
+  reading `error === null` concludes the login succeeded. The device itself was
+  never fooled — it kept refusing every subsequent call, because the session
+  gate is server-side — so the failure mode is a UI that shows a connected hub
+  and then cannot do anything with it, with no error anywhere to explain why.
+
+  [`ezlopi_cloud_ota.c`](ezlopi-cloud/ezlopi-cloud-ota/ezlopi_cloud_ota.c#L92)
+  is a fourth case and a milder one: it adds its own `error: null` at two sites,
+  so those two replies carried the member twice with the *same* value. Harmless
+  to read either way round, still malformed, and now gone for the same reason.
+
+  This matters now in a way it did not before, because the thing on the other
+  end is becoming a browser rather than the Ezlo app.
+
+- **`ezlopi_core_api.c` now includes `esp_system.h` for the `esp_restart()` it
+  calls.** It did not, and the declaration arrived down a chain traced through
+  the ESP-IDF checkout rather than guessed at: `cjext.h` →
+  `EZLOPI_USER_CONFIG.h` → `driver/uart.h` → `freertos/task.h` →
+  `freertos/portmacro.h` → `esp_system.h`. Unconditional in both the xtensa and
+  the riscv port, so it held for all four targets — but both ports carry IDF's
+  own `required by esp_get_...() functions in portable.h. [refactor-todo] Update
+  portable.h` against that very include, at xtensa `portmacro.h:50` and riscv
+  `portmacro.h:45`. When `portable.h` is updated and the include goes,
+  `esp_restart()` here becomes an implicit declaration returning `int` rather
+  than a compile error — which is the quiet kind of breakage, since the real
+  `esp_restart()` returns `void` and is `noreturn`.
+
+  Noted because it is also what made the host test below possible: once the file
+  names the header it needs, the only ESP-IDF surface it has is one function.
+
+**Testing.** [`tests/host/test_api_envelope.c`](tests/host/test_api_envelope.c)
+compiles and links the real `ezlopi_core_api.c` against the real `cjext.c` — not
+a transcription of either — and exercises the envelope through twelve tests and
+58 checks. The Makefile rule asserts with `nm` that the subject symbol
+`EZPI_core_api_consume_cjson` is actually present in the object it just built,
+because a file that compiles to an empty object also links and also passes.
+Eight symbols are faked: the four method-list lookups, `rpc_method_notfound`
+(a copied-and-cited reproduction of
+[`ezlopi_core_api_methods.c:145-156`](ezlopi-core/ezlopi-core-api/ezlopi_core_api_methods.c#L145)),
+`broadcast_add_to_queue` (which serialises and frees, because the real queue
+takes ownership), `event_group_set_event`, and `esp_restart`. Everything else is
+the shipping code.
+
+Two of them carry the fix directly — exactly one `error` member on a failure, and
+an explicit `error: null` still present on a success, which is the pair that
+pins the fix between its two wrong neighbours. A third is deliberately broader
+than this defect: `assert_no_duplicate_members()` walks the entire reply tree,
+objects and arrays, and fails on any object with two children of the same name.
+It is written that way because the cause is a property of `cjext` rather than of
+this call site, so the next instance of it will be somewhere else.
+
+The harness was proved able to fail before its pass was trusted, by mutating the
+worktree file in both directions and restoring it under a sha256 comparison:
+
+```
+=== pre-fix (unconditional add) ===
+    exit 1  58 checks, 3 failures
+    FAIL: exactly one "error" member on a failure (two is the defect)
+    FAIL: first-wins and last-wins readers see the same "error"
+    FAIL: failing handler: member "error" appears twice in one object
+
+=== careless fix (never add) ===
+    exit 1  58 checks, 4 failures
+    FAIL: exactly one "error" member on a success
+    FAIL: a success still carries an explicit error: null
+    FAIL: the error member is still there exactly once
+    FAIL: the reply's own error member is not doubled
+
+restored byte-identical: True
+
+=== fixed tree (the committed state) ===
+    exit 0  58 checks, 0 failures
+```
+
+The three failures under the first mutation include the general invariant firing
+on its own, independently of the two checks written for this bug. The second
+mutation is the plausible wrong fix, and it fails differently — which is the
+point of running it.
+
+The changes to `tests/host/stubs/` (FreeRTOS `BIT0`–`BIT7`, `trace.h` including
+`FreeRTOS.h`, and the removal of a `CJSON_TRACE` definition the real header does
+not have) sit on the include path of twenty other host binaries, so the full
+suite was rebuilt from clean rather than just the new target: **21 binaries,
+4688 checks, 0 failures**, consistent with the previous 4630 plus these 58.
+
+The `esp_system.h` include is the part a host pass cannot speak to — on a host it
+resolves to a one-line stub, and the question is whether the real header is
+reachable from this component's include path in every target configuration. All
+four CI targets were built, and then built again from an export of `HEAD`, so the
+comparison is a set difference rather than a count. This project has been burned
+by counting warnings before.
+
+| Target | Image before | Image after | Δ | Warnings added | Removed |
+|---|---|---|---|---|---|
+| esp32 | 1 646 640 | 1 646 656 | +16 | 0 | 0 |
+| esp32s2 | 1 336 992 | 1 337 008 | +16 | 0 | 0 |
+| esp32s3 | 1 661 408 | 1 661 440 | +32 | 0 | 0 |
+| esp32c3 | 1 719 920 | 1 719 936 | +16 | 0 | 0 |
+
+`implicit declaration` appears zero times in all four logs, which is what
+confirms the explicit include resolves everywhere. The one warning the sweep
+reports in `ezlopi_core_api.c` on each target is present identically in the
+baseline: an unused `cj_method` at
+[`ezlopi_core_api.c:242`](ezlopi-core/ezlopi-core-api/ezlopi_core_api.c#L242),
+inside a `CONFIG_EZPI_UTIL_TRACE_EN` else-branch whose only use of the variable
+is commented out. The set difference lists it as both added and removed — same
+file, same variable, same `-Wunused-variable`, at a line number moved down by
+the comment this change adds above it. That is the entire difference between
+the two warning sets on all four targets. It is left alone: deciding between
+restoring the trace and deleting the dead branch is a logging question, not an
+envelope one.
+
 ### Device configuration — [bug]
 
 - **A device configuration that will not parse no longer bricks the hub.**
@@ -3068,8 +3248,8 @@ enumerators — so the live half of this component was never affected.
   — so the firmware and the host tests compile *the same source*, rather than
   the tests exercising a copy that can drift.
 
-- **New host test suite, [`tests/host/`](tests/host/)**: 4630 assertions across
-  twenty binaries, no framework, no hardware. `make -C tests/host` builds and runs
+- **New host test suite, [`tests/host/`](tests/host/)**: 4688 assertions across
+  twenty-one binaries, no framework, no hardware. `make -C tests/host` builds and runs
   the lot from scratch in about five seconds; running the already-built binaries
   takes a tenth of a second, so there is no reason not to run it on every edit. Built under
   AddressSanitizer and UndefinedBehaviorSanitizer, and under `-Wall -Wextra

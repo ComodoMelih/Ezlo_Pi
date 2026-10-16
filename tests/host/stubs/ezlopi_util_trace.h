@@ -41,6 +41,15 @@
 
 #include <string.h>
 
+/* Mirrors line 48 of the real header. Nothing in cjext needs it, but
+ * ezlopi_core_event_group.h spells its enumerators BIT0..BIT4 while including
+ * nothing that defines them -- on target they arrive through exactly this
+ * edge, FreeRTOS.h pulling in esp_bit_defs.h. A host test compiling a file
+ * that includes event_group.h needs the same edge, and reproducing the
+ * target's include graph beats defining the bits a second time somewhere they
+ * do not belong. */
+#include "freertos/FreeRTOS.h"
+
 /* Copied verbatim from the real header. Drivers pass this as their log tag, so
  * a source that compiles on target only because the real trace header defined
  * it must still compile here. */
@@ -64,6 +73,23 @@ static inline void ezpi_trace_noop(const char *fmt, ...)
 #define TRACE_S(...) EZPI_TRACE_NOOP(__VA_ARGS__)
 #define TRACE_W(...) EZPI_TRACE_NOOP(__VA_ARGS__)
 
-#define CJSON_TRACE(name, cj) ((void)(name), (void)(cj))
+/* CJSON_TRACE is deliberately NOT defined here, and that is a correction
+ * rather than an omission. This stub stands in for ezlopi_util_trace.h, and
+ * the real one does not define it: CJSON_TRACE belongs to
+ * ezlopi_core_cjson_macros.h, which forwards it to EZPI_core_cjson_trace().
+ *
+ * Defining it here broke as soon as a host-compiled file included both.
+ * ezlopi_core_api.c reaches this file first, through cjext.h, and
+ * ezlopi_core_cjson_macros.h four includes later -- so the real definition
+ * arrived second and -Werror rejected the redefinition. An #ifndef guard here
+ * would have compiled, by winning the race and leaving the file logging
+ * through a no-op while believing it called EZPI_core_cjson_trace(), which is
+ * worse than either.
+ *
+ * Nothing needs the fallback: of the 28 files in the tree that use
+ * CJSON_TRACE, the only one compiled on a host is ezlopi_core_api.c, and it
+ * includes the header that owns the macro. A host-compiled file that uses it
+ * without that include now fails to build, which is the right outcome -- on
+ * target it would fail the same way. */
 
 #endif // __EZLOPI_UTIL_TRACE_H__
