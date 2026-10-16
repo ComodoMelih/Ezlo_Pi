@@ -107,6 +107,26 @@ typedef struct
     uint32_t tick_count;
 } s_rx_message_t;
 
+/* CONFIG_EZPI_OPENTELEMETRY_ENABLE_LOGS and ..._ENABLE_TRACES are two
+** independent bools in Kconfig (ezlopi-main/Kconfig.projbuild), both default n,
+** each depending only on EZPI_ENABLE_OPENTELEMETRY. So all four combinations
+** are configurations a user can select, and all four have to compile.
+**
+** One did not. The method name pulled out of an incoming cloud message is read
+** by both features -- the LOGS branch reports a message that arrived with no
+** `method` at all, and the TRACES branch takes ownership of the string and
+** hands it to the telemetry queue -- but it was declared, fetched and freed
+** under ENABLE_TRACES alone while being *read* under ENABLE_LOGS. Selecting
+** logs without traces therefore failed to compile with "'method_str'
+** undeclared", which is a config nobody had built: the four CI targets all use
+** the default, where both are off and neither block exists.
+**
+** Named once here so the three sites that must agree -- declaration, fetch and
+** free -- cannot drift apart again. */
+#if defined(CONFIG_EZPI_OPENTELEMETRY_ENABLE_LOGS) || defined(CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES)
+#define EZPI_OTEL_WANTS_METHOD_STR 1
+#endif
+
 /*******************************************************************************
  *                          Static Function Prototypes
  *******************************************************************************/
@@ -270,11 +290,14 @@ static void __fetch_wss_endpoint(void *pv)
 #ifdef CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES
                     char *id_str = NULL;
                     char *error_str = NULL;
-                    char *method_str = NULL;
 
                     time_t time_stamp = rx_message->time_stamp;
                     uint32_t tick_count = rx_message->tick_count;
 #endif // CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES
+
+#ifdef EZPI_OTEL_WANTS_METHOD_STR
+                    char *method_str = NULL;
+#endif
 
                     if (rx_message->payload)
                     {
@@ -284,6 +307,9 @@ static void __fetch_wss_endpoint(void *pv)
 #ifdef CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES
                             id_str = ezlopi_service_otel_fetch_string_value_from_cjson(cj_request, ezlopi_id_str);
                             error_str = ezlopi_service_otel_fetch_string_value_from_cjson(cj_request, ezlopi_error_str);
+#endif
+
+#ifdef EZPI_OTEL_WANTS_METHOD_STR
                             method_str = ezlopi_service_otel_fetch_string_value_from_cjson(cj_request, ezlopi_method_str);
 #endif
 
@@ -354,6 +380,16 @@ static void __fetch_wss_endpoint(void *pv)
 
                     ezlopi_free(__FUNCTION__, id_str);
                     ezlopi_free(__FUNCTION__, error_str);
+#endif
+
+                    /* Freed out here rather than inside the TRACES block,
+                    ** because a logs-only build fetches this string too and
+                    ** nothing else would ever release it. With TRACES on, the
+                    ** pointer has by now either been handed to trace_obj and
+                    ** nulled, or reclaimed from trace_obj because the
+                    ** telemetry queue refused it -- so this is the single
+                    ** owner in all three configurations that reach it. */
+#ifdef EZPI_OTEL_WANTS_METHOD_STR
                     ezlopi_free(__FUNCTION__, method_str);
 #endif
                 }

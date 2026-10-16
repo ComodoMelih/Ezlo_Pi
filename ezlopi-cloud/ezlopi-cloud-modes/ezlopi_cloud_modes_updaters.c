@@ -80,11 +80,29 @@
 /*******************************************************************************
  *                          Extern Function Definitions
  *******************************************************************************/
+
+/* Every updater below writes `id` and `msg_subclass` into cj_response without
+** first clearing them. That is safe because cj_response is always empty on
+** entry: updaters are reached only through __execute_method()
+** (ezlopi_core_api.c:261), which hands over a freshly created object, and the
+** one updater that calls another -- EZPI_cloud_modes_changed_alarmed() --
+** allocates a new object for the inner call too. The NULL-cj_response branch
+** at ezlopi_core_api.c:268 is unreachable from here: it is taken only when
+** EZPI_core_ezlopi_methods_check_method_register() matches, and that compares
+** against the single pointer EZPI_registered.
+**
+** Twenty-two functions here write `id` into cj_response. Fourteen used to open
+** with a DeleteItemFromObject() pair for `id` and `method` -- 28 calls that
+** could never find anything to delete. The other eight never had them, which
+** settles it: if cj_response could arrive populated, cjext's
+** add_item_to_object() appends without replacing, so those eight would emit two
+** `id` members and clients would disagree about which is real -- the same defect
+** fixed in ezlopi_core_api.c:190. A guard covering 14 of 22 writers is not
+** insurance, it is a reader believing the input might be dirty when it cannot
+** be. Either all need it or none do, and the call graph above says none. */
+
 void EZPI_cloud_modes_switched(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_changed_str);
 
@@ -111,9 +129,6 @@ void EZPI_cloud_modes_switched(cJSON *cj_request, cJSON *cj_response)
 
 void EZPI_cloud_modes_alarmed(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_alarmed_str);
 
@@ -411,9 +426,6 @@ void EZPI_cloud_modes_changed(cJSON *cj_request, cJSON *cj_response)
 {
     // cJSON_AddNumberToObject(__FUNCTION__, cj_response, ezlopi_startTime_str, EZPI_core_sntp_get_current_time_sec());
 
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_changed_str);
 
@@ -440,9 +452,6 @@ void EZPI_cloud_modes_changed(cJSON *cj_request, cJSON *cj_response)
 
 void EZPI_cloud_modes_protect_buttons_added(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_protect_button_added);
 
@@ -464,9 +473,6 @@ void EZPI_cloud_modes_protect_buttons_added(cJSON *cj_request, cJSON *cj_respons
 
 void EZPI_cloud_modes_protect_buttons_updated(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_protect_button_updated);
 
@@ -488,9 +494,6 @@ void EZPI_cloud_modes_protect_buttons_updated(cJSON *cj_request, cJSON *cj_respo
 
 void EZPI_cloud_modes_protect_buttons_removed(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_protect_button_removed);
 
@@ -544,9 +547,6 @@ void EZPI_cloud_modes_protect_button_set_broadcast(cJSON *cj_request, cJSON *cj_
 
 void EZPI_cloud_modes_protect_devices_added(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_protect_devices_added);
     cJSON *cj_params = cJSON_GetObjectItem(__FUNCTION__, cj_request, ezlopi_params_str);
@@ -558,9 +558,6 @@ void EZPI_cloud_modes_protect_devices_added(cJSON *cj_request, cJSON *cj_respons
 
 void EZPI_cloud_modes_protect_devices_removed(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_protect_devices_removed);
     cJSON *cj_params = cJSON_GetObjectItem(__FUNCTION__, cj_request, ezlopi_params_str);
@@ -572,9 +569,6 @@ void EZPI_cloud_modes_protect_devices_removed(cJSON *cj_request, cJSON *cj_respo
 
 void EZPI_cloud_modes_entry_delay_changed(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_entry_delay_changed);
 
@@ -605,9 +599,6 @@ void EZPI_cloud_modes_entry_delay_changed(cJSON *cj_request, cJSON *cj_response)
 
 void EZPI_cloud_modes_swinger_shutdown_reset_done(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__func__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__func__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__func__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__func__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_swinger_shutdown_reset_done);
 
@@ -624,9 +615,6 @@ void EZPI_cloud_modes_swinger_shutdown_reset_done(cJSON *cj_request, cJSON *cj_r
 
 void EZPI_cloud_modes_swinger_shutdown_disable_added(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__func__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__func__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__func__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__func__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_swinger_shutdown_disable_added);
 
@@ -643,9 +631,6 @@ void EZPI_cloud_modes_swinger_shutdown_disable_added(cJSON *cj_request, cJSON *c
 
 void EZPI_cloud_modes_swinger_shutdown_disable_removed(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__func__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__func__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__func__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__func__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_swinger_shutdown_disable_removed);
 
@@ -663,9 +648,6 @@ void EZPI_cloud_modes_swinger_shutdown_disable_removed(cJSON *cj_request, cJSON 
 
 void EZPI_cloud_modes_swinger_shutdown_limit_changed(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__func__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__func__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__func__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__func__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_swinger_shutdown_limit_changed);
 
@@ -686,9 +668,6 @@ void EZPI_cloud_modes_swinger_shutdown_limit_changed(cJSON *cj_request, cJSON *c
 
 void EZPI_cloud_modes_local_alarmed_turned_off(cJSON *cj_request, cJSON *cj_response)
 {
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_id_str);
-    cJSON_DeleteItemFromObject(__FUNCTION__, cj_response, ezlopi_method_str);
-
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_id_str, ezlopi_ui_broadcast_str);
     cJSON_AddStringToObject(__FUNCTION__, cj_response, ezlopi_msg_subclass_str, ezlopi_hub_modes_local_alarmed_turned_off);
     cJSON *cj_result = cJSON_AddObjectToObject(__FUNCTION__, cj_response, ezlopi_result_str);

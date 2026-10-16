@@ -236,13 +236,20 @@ cJSON *EZPI_core_api_consume_cjson(const char *who, cJSON *cj_request, time_t ti
             }
         }
 
-#ifdef CONFIG_EZPI_UTIL_TRACE_EN
-        else
-        {
-            cJSON *cj_method = cJSON_GetObjectItem(__FUNCTION__, cj_request, ezlopi_method_str);
-            // TRACE_E("## WS Rx <<<<<<<<<< '%s' \n %.*s", (NULL != cj_method) ? (cj_method->valuestring ? cj_method->valuestring : ezlopi__str) : ezlopi__str, len, payload);
-        }
-#endif
+        /* No else. A request that arrived carrying its own `error` member is
+        ** dropped without a reply, which is what __check_for_no_error() is for.
+        **
+        ** There was a TRACE_EN-only else here whose entire body was a
+        ** cJSON_GetObjectItem() feeding a commented-out TRACE_E -- so with
+        ** tracing on it computed a lookup it never read, and with tracing off
+        ** it was an empty branch. The commented-out line could not be revived
+        ** either: it referenced `len` and `payload`, which are parameters of
+        ** EZPI_core_api_consume (above), not of this function, so uncommenting
+        ** it would not compile. Plumbing them in to make it compile is the
+        ** wrong fix twice over -- it would print the whole request body, which
+        ** is the credential-logging class check_no_secret_logging.py exists to
+        ** reject. If this branch ever needs a diagnostic, log the method name
+        ** and the id, both of which are already in scope above. */
     }
 
     return cj_response;
@@ -271,7 +278,15 @@ static cJSON *__execute_method(cJSON *cj_request, f_method_func_t method_func)
 #ifdef CONFIG_EZPI_UTIL_TRACE_EN
             else
             {
-                TRACE_E("Error - cj_response: %d", (uint32_t)cj_response);
+                /* This branch is the `else` of `if (NULL != cj_response)`, so
+                ** cj_response is NULL by construction and the old message --
+                ** TRACE_E("Error - cj_response: %d", (uint32_t)cj_response) --
+                ** could only ever print 0. It was also %d against a uint32_t
+                ** cast of a pointer, the invalidPrintfArgType_sint pattern;
+                ** cppcheck does not see it because TRACE_E is an unexpanded
+                ** macro to it. The fact worth logging is which allocation
+                ** failed, and there are no arguments to get wrong. */
+                TRACE_E("cJSON_CreateObject failed; dropping request without a reply");
             }
 #endif
         }

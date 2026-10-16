@@ -274,7 +274,7 @@ int readDHT11(float *temperature_dht11, float *humidity_dht11, int DHT11gpio)
  *                         Static Function Definitions
  *******************************************************************************/
 
-#endif // CONFIG_IDF_TARGET_ESP32C3
+#endif // CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2
        /*******************************************************************************
         *                          End of File
         *******************************************************************************/

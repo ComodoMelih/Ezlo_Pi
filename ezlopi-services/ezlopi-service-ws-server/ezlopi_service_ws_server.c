@@ -433,9 +433,41 @@ static void ezpi_ws_session_close(httpd_handle_t hd, int sockfd)
     (void)hd;
 }
 
+/* Three regions in this file -- the bodies of ezpi_ws_async_send(),
+** ezpi_msg_handler() and ezpi_start_server() -- used to open with
+**
+**     #if 1 // def CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
+**
+** and close with an #endif whose comment named that CONFIG. They have been
+** that way since the file was added in f2a74e5; the guard was commented out,
+** not designed out. An #if 1 with no #else cannot change the preprocessed
+** output, so the pairs are gone rather than converted, and the behaviour of
+** every shipped configuration is byte-for-byte unchanged.
+**
+** Do not "finish the job" by restoring them to real #ifdefs. That was tried
+** and measured. With esp32 defaults and only CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
+** turned off -- the websocket client left on -- converting the three guards
+** takes the link from clean to 127 undefined references, among them
+** EZPI_items_list_v3, EZPI_hub_cloud_log_set and most of EZPI_cloud_modes_*,
+** all reached from method_list_v2 in ezlopi_core_api_methods.c. That
+** configuration links today and carries a complete method table, so the
+** conversion breaks something that works. Removing code cannot create
+** undefined symbols by itself; what changes is which members the linker
+** extracts from the ezlopi-cloud archives, and that rule is ESP-IDF's. It was
+** not chased further, because the useful answer was already in hand.
+**
+** What the option does control is real but narrower than the old labels
+** suggested: ezpi_respond_cjson() and ezpi_ws_server_send() are genuinely
+** #ifdef'd, and ezlopi_main.c:202 calls EZPI_service_ws_server_dummy() instead
+** of EZPI_service_ws_server_start() when the option is off, so nothing here
+** ever runs. Dead at runtime, not absent from the binary -- the measured cost
+** of these three regions is 672 bytes of image in the MQTT-only configuration
+** CI builds. The 36 KB embedded config page is not part of that: its symbol
+** _binary_config_ui_html_start is present in server-on images and absent in
+** server-off ones, so --gc-sections already drops it. */
+
 static void ezpi_ws_async_send(void *arg)
 {
-#if 1 // def CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
     static const char *data = "Async data";
     s_async_resp_arg_t *resp_arg = (s_async_resp_arg_t *)arg;
 
@@ -455,7 +487,6 @@ static void ezpi_ws_async_send(void *arg)
 
         ezlopi_free(__FUNCTION__, resp_arg);
     }
-#endif // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
 }
 
 static esp_err_t ezpi_trigger_async_send(httpd_req_t *req)
@@ -529,7 +560,6 @@ static esp_err_t ezpi_serve_config_page(httpd_req_t *req)
 static esp_err_t ezpi_msg_handler(httpd_req_t *req)
 {
     esp_err_t ret = ESP_FAIL;
-#if 1 // def CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
 
     /* A GET reaching this handler does NOT prove a websocket was negotiated.
     ** esp_http_server only performs the handshake when the request carried the
@@ -715,13 +745,11 @@ static esp_err_t ezpi_msg_handler(httpd_req_t *req)
     {
         TRACE_E("WSL: -----------------------------> acquire send-lock failed!");
     }
-#endif // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
     return ret;
 }
 
 static void ezpi_start_server(void)
 {
-#if 1 // def CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
     __ws_status = WS_STATUS_STARTED;
 
     static const httpd_uri_t ws = {
@@ -785,7 +813,6 @@ static void ezpi_start_server(void)
     {
         TRACE_E("WSL: Error starting server!, err: %d", err);
     }
-#endif // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
 }
 
 static void ezpi_stop_server(void)

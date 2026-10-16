@@ -1201,6 +1201,39 @@ three BLE-capable targets the image grew 16, 32 and 32 bytes.
   `CONFIG_EZPI_ENABLE_OPENTELEMETRY=y` is committed into any
   `sdkconfig.defaults*`.
 
+- **Telemetry with logs on and traces off did not compile.**
+  `CONFIG_EZPI_OPENTELEMETRY_ENABLE_LOGS` and
+  `CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES` are two independent `bool`s, both
+  `default n`, so Kconfig permits all four combinations — but one of the four
+  was never built. `ezlopi_service_otel_fetch_string_value_from_cjson()` was
+  declared *and* defined under `ENABLE_TRACES` alone, and
+  `ezlopi_service_webprov.c` declared, filled and freed its `method_str` under
+  the same guard while the logs path also read it. Selecting logs without traces
+  failed the build.
+
+  The helper is not trace-specific despite living in the otel service: it copies
+  one string member out of a cJSON object. Its declaration and definition moved
+  out to the enclosing `CONFIG_EZPI_ENABLE_OPENTELEMETRY` guard, which is the
+  honest scope — both features depend on that symbol and neither is more
+  entitled to the helper than the other. In `webprov.c` the three `method_str`
+  sites are now behind one `EZPI_OTEL_WANTS_METHOD_STR` macro defined as
+  `LOGS || TRACES`, so the variable exists exactly when something reads it
+  rather than when one of its two readers happens to be enabled.
+
+  All four combinations now build, and the three that already worked produce
+  **byte-identical images before and after the fix** — 1 683 184, 1 687 024 and
+  1 689 824 bytes on esp32 for logs-off/traces-off, logs-off/traces-on and
+  logs-on/traces-on respectively. That is what establishes the broken
+  combination was unblocked without paying for it anywhere else: a fix in this
+  shape could easily have pulled the helper into builds that do not want it, and
+  three unchanged byte counts are the evidence that it did not.
+
+  Those three figures were measured against the tree as it stood when this fix
+  landed. They no longer reproduce as absolute numbers, because the dead-code
+  removals recorded below later took 284 bytes of content out of every
+  configuration — the *equality* between the three before-and-after pairs is the
+  claim here, not the specific totals.
+
 ### Local discovery — [bug]
 
 - **The hub advertised a service on a port with nothing listening on it.** The
@@ -1652,8 +1685,9 @@ of reading the serial console would have revealed it.
   and then **`#undef`d 57 lines later** at
   [`:210`](ezlopi-user-config/EZLOPI_USER_CONFIG.h#L210), under a
   `/////// Disable user configs here ///////` banner. So reading either site
-  alone gives the wrong answer, and the `#endif` comments in the provisioning
-  file are mislabelled against the actual nesting, which does not help.
+  alone gives the wrong answer. The `#endif` comments in the provisioning file
+  were mislabelled against the actual nesting too, which did not help; they are
+  corrected under **Build and configuration** below.
 
   I did not find this by reading. The CHANGELOG at this point claimed the key
   "went to the console every time anything read the characteristic", and the
@@ -2171,16 +2205,20 @@ by counting warnings before.
 
 `implicit declaration` appears zero times in all four logs, which is what
 confirms the explicit include resolves everywhere. The one warning the sweep
-reports in `ezlopi_core_api.c` on each target is present identically in the
-baseline: an unused `cj_method` at
-[`ezlopi_core_api.c:242`](ezlopi-core/ezlopi-core-api/ezlopi_core_api.c#L242),
-inside a `CONFIG_EZPI_UTIL_TRACE_EN` else-branch whose only use of the variable
-is commented out. The set difference lists it as both added and removed — same
-file, same variable, same `-Wunused-variable`, at a line number moved down by
-the comment this change adds above it. That is the entire difference between
-the two warning sets on all four targets. It is left alone: deciding between
-restoring the trace and deleting the dead branch is a logging question, not an
-envelope one.
+reported in `ezlopi_core_api.c` on each target was present identically in the
+baseline: an unused `cj_method` inside a `CONFIG_EZPI_UTIL_TRACE_EN`
+else-branch whose only use of the variable was commented out. The set
+difference listed it as both added and removed — same file, same variable, same
+`-Wunused-variable`, at a line number moved down by the comment this change
+adds above it. That was the entire difference between the two warning sets on
+all four targets.
+
+It was left alone at the time, on the grounds that choosing between restoring
+the trace and deleting the dead branch is a logging question rather than an
+envelope one. That question has since been answered under **Dead code —
+[bug]** below: the branch and the variable are both gone, and with them the
+warning, so `ezlopi_core_api.c` now compiles without diagnostics on all four
+targets.
 
 ### Device configuration — [bug]
 
@@ -3597,7 +3635,200 @@ enumerators — so the live half of this component was never affected.
     across `.flash.rodata`, `.dram0.data` and `.iram0.text` by exactly −12.
     Of 12,581 symbols, exactly one changed size and none were added or removed.
 
+### Dead code — [bug]
+
+- **28 `cJSON_DeleteItemFromObject()` calls that could never find anything to
+  delete.** Fourteen of the mode updaters in
+  [`ezlopi_cloud_modes_updaters.c`](ezlopi-cloud/ezlopi-cloud-modes/ezlopi_cloud_modes_updaters.c)
+  opened by deleting `id` and `method` from `cj_response` before writing them.
+  `cj_response` is always empty on entry: updaters are reached only through
+  `__execute_method()` in `ezlopi_core_api.c`, which hands over a freshly
+  created object, and the one updater that calls another —
+  `EZPI_cloud_modes_changed_alarmed()` — allocates a new object for the inner
+  call too.
+
+  What settles it is not that the calls are no-ops but that the file disagrees
+  with itself. Twenty-two functions in that file write `id` into `cj_response`,
+  and only 14 of them had the pair — **eight never did**. If `cj_response`
+  really could arrive populated, those eight would be the bug: cjext's
+  `add_item_to_object()` appends without replacing, so they would emit two `id`
+  members and clients would be left to guess which one is real — the same defect
+  already fixed in `ezlopi_core_api.c` and recorded under **Local API replies**
+  above. A guard covering 14 of 22 writers is not insurance; it is a reader being
+  told the input might be dirty when it cannot be. Either all of them need it or
+  none do, and the call graph says none. The call graph is written into the file
+  so the next person does not have to re-derive it.
+
+- **Three `#if 1` blocks that had been pretending to be configuration guards
+  since the file was added.** In
+  [`ezlopi_service_ws_server.c`](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c)
+  the bodies of `ezpi_ws_async_send()`, `ezpi_msg_handler()` and
+  `ezpi_start_server()` each opened with `#if 1 // def
+  CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER` and closed with an `#endif` whose comment
+  named that option. The guard was commented out, not designed out, and it has
+  been that way since `f2a74e5`. An `#if 1` with no `#else` cannot change which
+  code is compiled, so the pairs are **removed rather than converted**: no
+  configuration gains or loses a single statement.
+
+  Being precise about "unchanged", since it is the whole basis for doing this at
+  all: the token stream the compiler sees is identical, but the image is *not*
+  byte-identical, because removing six lines and adding a comment block shifts
+  `__LINE__` for every `TRACE_*` below them in the file. Those macros pass
+  `__LINE__` as an `int` argument rather than stringifying it, so what changes is
+  the line number printed on a console diagnostic — not behaviour, and not the
+  size of anything.
+
+  Converting them to real `#ifdef`s was the obvious reading of the comment and
+  it is wrong. Measured: with esp32 defaults and only
+  `CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER` turned off — the websocket *client* left
+  on — converting the three guards takes the link from clean to **127 undefined
+  references**, among them `EZPI_items_list_v3`, `EZPI_hub_cloud_log_set` and
+  most of `EZPI_cloud_modes_*`, all reached from `method_list_v2` in
+  `ezlopi_core_api_methods.c`. That configuration links today and carries a
+  complete method table, so the conversion breaks something that works.
+  Removing code cannot create undefined symbols by itself; what changes is
+  which archive members the linker extracts, and that rule is ESP-IDF's. It was
+  not chased further because the useful answer was already in hand, and the
+  measurement is recorded in the file so nobody repeats the experiment.
+
+  What the option actually controls is real but narrower than the old labels
+  suggested. `ezpi_respond_cjson()` and `ezpi_ws_server_send()` are genuinely
+  `#ifdef`'d, and `ezlopi_main.c` calls `EZPI_service_ws_server_dummy()`
+  instead of `EZPI_service_ws_server_start()` when the option is off, so nothing
+  in these three regions ever runs in that build. Dead at runtime, not absent
+  from the binary: the measured cost is **672 bytes** of image in the MQTT-only
+  configuration CI builds. The 36 KB embedded config page is not part of that —
+  `_binary_config_ui_html_start` is present in server-on images and absent in
+  server-off ones, so `--gc-sections` already drops it.
+
+  One probe used along the way was worthless and is called out because the
+  result looked convincing: an `nm` check for `ezpi_serve_config_page` returned
+  zero in server-off builds, which proves nothing, because it returns zero in
+  server-**on** builds too. It was caught by deliberately running every probe
+  against a known-positive build first. The two that do discriminate are
+  `_binary_config_ui_html_start` (1 → 0) and `httpd_ws_send_frame` (2 → 0).
+
+- **A trace branch that could not be revived.** The `else` of
+  `if (NULL != cj_response)` in `ezlopi_core_api.c` was compiled only under
+  `CONFIG_EZPI_UTIL_TRACE_EN` and contained a `cj_method` lookup whose only use
+  was commented out, plus `TRACE_E("Error - cj_response: %d",
+  (uint32_t)cj_response)`. In that branch `cj_response` is NULL by
+  construction, so the message could only ever print `0` — and it was `%d`
+  against a `uint32_t` cast of a pointer, the same class as the format-string
+  entries below, invisible to `cppcheck` because `TRACE_E` is an unexpanded
+  macro to it. The branch now logs which allocation failed and takes no
+  arguments at all: `cJSON_CreateObject failed; dropping request without a
+  reply`.
+
+- **What this change set costs, measured on all four targets rather than
+  assumed.** Each target was built twice in the same directory, with the same
+  `managed_components` and a freshly regenerated `sdkconfig`, differing only in
+  whether the twelve touched files sat at `HEAD` or at this change set — so
+  nothing from how an earlier baseline happened to be captured can leak in. The
+  builds reproduce byte-exactly on repeat.
+
+  | Target | `.flash.text` | `.flash.rodata` | `.iram0.text` / `.dram0.data` / `.dram0.bss` | Image |
+  |---|---|---|---|---|
+  | esp32 | −356 | +32 | unchanged | 1 683 216 → 1 682 880 (−336) |
+  | esp32s2 | −316 | +32 | unchanged | 1 375 552 → 1 373 264 (**−2 288**) |
+  | esp32s3 | −336 | +32 | unchanged | 1 697 984 → 1 697 680 (−304) |
+  | esp32c3 | −422 | +32 | unchanged | 1 756 496 → 1 756 096 (−400) |
+
+  Three things in that table are worth saying out loud:
+
+  - **No RAM moves anywhere.** `.dram0.data`, `.dram0.bss` and `.iram0.text` are
+    identical on every target. This change set is flash-only.
+  - **`.flash.rodata` grows by exactly 32 bytes on all four**, which is the one
+    thing here that *adds* anything: the replacement `TRACE_E` string in
+    `ezlopi_core_api.c` is 35 characters longer than the one it replaced, and 32
+    is what that costs after alignment. The rest is removal.
+  - **esp32s2's −2 288 is not code**, and it was taken apart rather than
+    reported, because −2 288 for 28 call sites would be a sign that something
+    else had gone missing. Content there accounts for −284 bytes. The other
+    −2 004 is a `[PADDING]` segment: `esptool image_info` shows `HEAD` carrying
+    a 2 004-byte `[PADDING]` entry that the new image does not have at all, and
+    `IROM` moving from file offset `0x60018` to `0x50018`. Shrinking
+    `.flash.text` let ESP-IDF reorder the segments so the pad that aligns `IROM`
+    to its 64 KB MMU page is no longer needed. Segment count is 5 either way,
+    and both checksums and validation hashes verify. The other three targets
+    land within 12 bytes of their content delta, which is ordinary end-of-image
+    alignment.
+
+  One plausible explanation turned out to be false, and is recorded because it
+  is the one a reader will reach for: `--gc-sections` dropping cjext's
+  delete/detach chain once the 28 callers went away. It does not —
+  `cJSON_DeleteItemFromObject` has nine other callers across the cloud and core
+  components, is still present in the post-change image, and the entire
+  delete/detach family is 187 bytes, so it could not have been the answer even
+  if it had been dropped.
+
+### Format strings — [bug]
+
+- **Five format strings that disagreed with their arguments — nine `cppcheck`
+  findings between them**, since one line can carry several bad conversions and
+  the uptime line carries four. All are `%d` against a `uint32_t`, or a
+  signed/unsigned mismatch on a 64-bit serial, reported as
+  `invalidPrintfArgType`. Fixed where the output leaves the device:
+
+  | Site | Was | Now | Why it matters |
+  |---|---|---|---|
+  | `ezlopi_core_mdns.c` | `"%lld"` | `"%llu"` | the Serial TXT record every discovery client reads |
+  | `ezlopi_core_mdns.c` | `"%s_%d"` | `"%s_%u"` | the mDNS hostname, from a `uint32_t serial_last4` |
+  | `ezlopi_main.c` | `free_heap":%d` | `free_heap":%u` | JSON a provisioning client parses |
+  | `ezlopi_core_info.c` | `"%dd %dh %dm %ds"` | `"%ud %uh %um %us"` | uptime, all four operands `uint32_t` |
+  | `ezlopi_cloud_scenes.c` | `"%s_cloned(%d)"` | `"%s_cloned(%u)"` | the generated name of a cloned scene |
+
+  No real device ever misprinted any of these — the widths were already right
+  and the values are far below the signed limits — so this is a correctness and
+  future-proofing change, not a bug report.
+
+- **One `cppcheck` finding that is a false positive and must stay as it is.**
+  `ezlopi_service_otel.c` formats a serial with `%llu`, and `cppcheck` reports
+  it needs `unsigned long long` where the argument is `unsigned long`. The tool
+  is modelling a 64-bit host. Xtensa is ILP32: `uint64_t` *is* `unsigned long
+  long`, and `EZPI_core_factory_info_v3_get_id()` is declared exactly that.
+  Re-running with `--platform=unix32` drops this finding and keeps the other
+  15, which is how it was identified as a host-model artefact rather than
+  asserted to be one. Changing it to `%lu` would be the bug, so the site now
+  carries a comment saying so — the single most useful line in this entry,
+  because it is the one that prevents a future "fix".
+
+- **The denominator, which is the part worth knowing.** The whole
+  `--platform=unix32` run found 15 of these, and all 15 sit inside a much larger
+  class that `cppcheck` cannot see: **558 `TRACE_*` call
+  sites pass a `%d` a `uint32_t`**, and none are reported, because the `TRACE_*`
+  macros are never expanded for the analyser. `ezlopi_main.c` is the clean
+  illustration — two `TRACE_W` lines were missed while a `snprintf` three lines
+  later was caught. The 558 are **deliberately not changed**: they are console
+  diagnostics, editing them touches almost every file in the tree for no
+  behavioural gain, and that churn is exactly what risks disturbing working
+  Ezlo behaviour. Six further findings in `ezlopi_core_heap.c` are left for the
+  same reason — a debug heap dump, on the console only.
+
+  After the fixes a clean `--platform=unix32` run reports **6 findings, all in
+  `ezlopi_core_heap.c`** — 15 minus the 9 fixed, with nothing new appearing.
+
 ### Build and configuration — [infra]
+
+- **Four `#endif` comments that named the wrong macro.** Comments on a closing
+  `#endif` are the only navigation aid in long conditional blocks, and when they
+  are wrong they are worse than absent — they send a reader to the wrong
+  opening. Three were in
+  [`ezlopi_service_ble_provisioning.c`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c),
+  the file whose mis-nesting already cost real time while tracking down the
+  `EZPI_SERV_BLE_ENABLE_READ_PROV` question recorded above: one `#endif` labelled
+  `EZPI_SERV_BLE_ENABLE_READ_PROV` was in fact closing
+  `EZPI_SERV_BLE_ENABLE_STAT_PROV`. The fourth was in
+  [`dht11.c`](ezlopi-sensors-devices/sensor-0015-oneWire-DHT11/dht11.c), where
+  an `#endif` closing a three-way target test was labelled
+  `CONFIG_IDF_TARGET_ESP32C3` — naming the one target the block *excludes*. It
+  now names all three it includes.
+
+  Comment-only, and each edit rewrites the text of an existing line without
+  adding or removing one, so no `__LINE__` shifts and the preprocessed output
+  cannot differ. Four further mismatches found by the same scan are left alone:
+  they are include-guard `#endif`s whose comment spells the guard macro slightly
+  differently, which misleads nobody.
 
 - **The enum-to-`int *` assumption under `CJSON_GET_VALUE_INT` is now
   compile-time enforced.** The build emits 87 `-Wincompatible-pointer-types`

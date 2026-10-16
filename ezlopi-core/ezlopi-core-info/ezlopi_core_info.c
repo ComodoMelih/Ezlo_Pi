@@ -293,7 +293,7 @@ void EZPI_core_info_get_tick_to_time_name(char *time_buff, uint32_t buff_len, ui
     if (time_buff && buff_len)
     {
         memset(time_buff, 0, buff_len);
-        snprintf(time_buff, buff_len, "%dd %dh %dm %ds", days, hours, minutes, seconds);
+        snprintf(time_buff, buff_len, "%ud %uh %um %us", days, hours, minutes, seconds);
     }
 }
 

@@ -68,9 +68,19 @@ typedef struct s_otel_trace
 } s_otel_trace_t;
 
 void ezlopi_service_otel_init(void);
+
+/* Not trace-specific despite the name of the file: it copies one string member
+** out of a cJSON object, and the logs side needs it too. It was declared --
+** and defined -- under ENABLE_TRACES only, so a logs-without-traces build,
+** which Kconfig allows, failed with an implicit-declaration error. The outer
+** CONFIG_EZPI_ENABLE_OPENTELEMETRY guard is the correct scope: both features
+** depend on it.
+**
+** Returns a newly allocated copy the caller must free, or NULL. */
+char *ezlopi_service_otel_fetch_string_value_from_cjson(cJSON *cj_root, const char *key);
+
 #ifdef CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES
 int ezlopi_service_otel_add_trace_to_telemetry_queue(s_otel_trace_t *trace_obj);
-char *ezlopi_service_otel_fetch_string_value_from_cjson(cJSON *cj_root, const char *key);
 #endif // CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES
 
 #endif // CONFIG_EZPI_ENABLE_OPENTELEMETRY

@@ -339,7 +339,7 @@ static void ezpi_provisioning_status_read_func(esp_gatt_value_t *value, esp_ble_
     }
 }
 
-#endif // EZPI_SERV_BLE_ENABLE_READ_PROV
+#endif // EZPI_SERV_BLE_ENABLE_STAT_PROV
 
 static void ezpi_provisioning_info_write_func(esp_gatt_value_t *value, esp_ble_gatts_cb_param_t *param)
 {
@@ -962,9 +962,9 @@ static char *ezpi_provisioning_info_base64(void)
     return base64_data;
 }
 
-#endif // CONFIG_EZPI_BLE_ENABLE
-
 #endif // EZPI_SERV_BLE_ENABLE_READ_PROV
+
+#endif // CONFIG_EZPI_BLE_ENABLE
 
 /*******************************************************************************
  *                          End of File

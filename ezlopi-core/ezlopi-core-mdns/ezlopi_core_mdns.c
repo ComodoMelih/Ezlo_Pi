@@ -203,7 +203,13 @@ static ezlopi_error_t __ezlopi_mdns_init_service_context()
                     service_cntx_device_id->key = "Serial";
 
                     memset(id_val_str, 0, EZPI_MDNS_SERIAL_SIZE);
-                    snprintf(id_val_str, EZPI_MDNS_SERIAL_SIZE, "%lld", id_val);
+                    /* %llu, not %lld: id_val is uint64_t, and
+                    ** EZPI_core_factory_info_v3_get_id() is declared
+                    ** `unsigned long long`. The width was already right, so no
+                    ** real serial ever misprinted -- they are far below 2^63 --
+                    ** but this string is the Serial TXT record every discovery
+                    ** client reads. */
+                    snprintf(id_val_str, EZPI_MDNS_SERIAL_SIZE, "%llu", id_val);
                     service_cntx_device_id->value = (NULL == id_val_str ? "null" : id_val_str);
 
                     ezlopi_mdns_service_cntx_device_id->mdns_context = service_cntx_device_id;
@@ -445,7 +451,7 @@ static void __mdns_init(void *pv)
         }
 
         char hostname[EZPI_MDNS_HOSTNAME_SIZE];
-        snprintf(hostname, EZPI_MDNS_HOSTNAME_SIZE, "%s_%d", ezlopi_ezlopi_str, serial_last4);
+        snprintf(hostname, EZPI_MDNS_HOSTNAME_SIZE, "%s_%u", ezlopi_ezlopi_str, serial_last4);
 
         err = mdns_hostname_set(hostname);
         if (ESP_OK != err)

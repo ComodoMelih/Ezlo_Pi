@@ -259,7 +259,10 @@ static void __blinky(void *pv)
 #ifdef CONFIG_EZPI_ENABLE_UART_PROVISIONING
         {
             char cmd99_str[100] = {0};
-            snprintf(cmd99_str, 100, "{\"cmd\":99,\"free_heap\":%d,\"heap_watermark\":%d}", free_heap, watermark_heap);
+            /* %u: both are uint32_t. This one is JSON a provisioning client
+            ** parses, not a log line, so the format should match the type
+            ** even though ESP32 heap sizes cannot reach INT32_MAX. */
+            snprintf(cmd99_str, 100, "{\"cmd\":99,\"free_heap\":%u,\"heap_watermark\":%u}", free_heap, watermark_heap);
             EZPI_SERV_uart_tx_data(strlen(cmd99_str), (uint8_t *)cmd99_str);
             TRACE_OTEL(ENUM_EZLOPI_TRACE_SEVERITY_DEBUG, cmd99_str);
         }

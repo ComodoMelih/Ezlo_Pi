@@ -756,7 +756,7 @@ void EZPI_scenes_clone(cJSON *cj_request, cJSON *cj_response)
                                     do
                                     { // generate "XX_cloned(N)" and add to the duplicate scene.
                                         dupli_flag = false;
-                                        snprintf(name_buf, sizeof(name_buf), "%s_cloned(%d)", cj_get_name->valuestring, ++idx);
+                                        snprintf(name_buf, sizeof(name_buf), "%s_cloned(%u)", cj_get_name->valuestring, ++idx);
 
                                         scene_node = EZPI_core_scenes_get_scene_head_v2();
                                         while (scene_node)

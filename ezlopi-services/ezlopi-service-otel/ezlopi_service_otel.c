@@ -87,7 +87,9 @@ static int __otel_add_log_to_queue(uint8_t severity, const char *file, uint32_t 
 static void __free_attributes(s_otel_attr_t *attr);
 static void __free_telemetry_queue_data(s_otel_queue_data_t *otel_data);
 
-#ifdef CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES
+/* Outside the ENABLE_TRACES guard below: the logs path reads this too, and
+** having it traces-only broke the logs-without-traces build. See the comment
+** on the declaration in ezlopi_service_otel.h. */
 char *ezlopi_service_otel_fetch_string_value_from_cjson(cJSON *cj_root, const char *key)
 {
     char *ret = NULL;
@@ -108,6 +110,7 @@ char *ezlopi_service_otel_fetch_string_value_from_cjson(cJSON *cj_root, const ch
     return ret;
 }
 
+#ifdef CONFIG_EZPI_OPENTELEMETRY_ENABLE_TRACES
 int ezlopi_service_otel_add_trace_to_telemetry_queue(s_otel_trace_t *trace_obj)
 {
     int ret = 0;
@@ -773,6 +776,16 @@ static void __otel_add_resource(cJSON *cj_resourceLog)
             __otel_add_resource_attr(cj_attributes, ezlopI_service___name_str, ezlopi_EzloPI_str, true);
 
             {
+                /* %llu is correct here; do not "fix" it. cppcheck reports
+                ** invalidPrintfArgType_uint on this line -- "requires
+                ** 'unsigned long long' but the argument type is 'unsigned
+                ** long'" -- but only when run with a 64-bit platform model.
+                ** Xtensa is ILP32, where uint64_t is unsigned long long, and
+                ** EZPI_core_factory_info_v3_get_id() is declared exactly that
+                ** (ezlopi_core_factory_info.h:355). Re-running with
+                ** --platform=unix32 drops this finding and keeps the other 15,
+                ** which is how it was identified as a host-model artifact
+                ** rather than a defect. Changing it to %lu would be the bug. */
                 uint64_t serial = EZPI_core_factory_info_v3_get_id();
                 snprintf(tmp_buffer, sizeof(tmp_buffer), "%llu", serial);
                 __otel_add_resource_attr(cj_attributes, ezlopi_serial_str, tmp_buffer, false);
