@@ -240,7 +240,10 @@ int EZPI_core_scenes_when_is_interval(l_scenes_list_v2_t *scene_node, void *arg)
 
             if (((xTaskGetTickCount() - last_update) / 1000) > interval)
             {
+                /* A tick count, not an address: the slot has to stay tagged
+                 * NONE so the field destructor does not try to free it. */
                 scene_node->when_block->fields->user_arg = (void *)xTaskGetTickCount();
+                scene_node->when_block->fields->user_arg_type = FIELD_USER_ARG_NONE;
                 ret = 1;
             }
         }
@@ -248,6 +251,7 @@ int EZPI_core_scenes_when_is_interval(l_scenes_list_v2_t *scene_node, void *arg)
         {
             ret = 1;
             scene_node->when_block->fields->user_arg = (void *)xTaskGetTickCount();
+            scene_node->when_block->fields->user_arg_type = FIELD_USER_ARG_NONE;
         }
     }
     return ret;
@@ -841,6 +845,7 @@ int EZPI_core_scenes_when_is_house_mode_changed_to(l_scenes_list_v2_t *scene_nod
                         ret = 1;
                     }
                     house_mode_id_array->user_arg = (void *)house_mode_id; // updates every evaluation
+                    house_mode_id_array->user_arg_type = FIELD_USER_ARG_NONE; /* a mode id, not an address */
                     // TRACE_E("house-mode-changed-to: %d", house_mode_id);
                 }
             }
@@ -902,11 +907,13 @@ int EZPI_core_scenes_when_is_house_mode_changed_from(l_scenes_list_v2_t *scene_n
                     {
                         ret = 1;
                         house_mode_id_array->user_arg = (void *)house_mode_id; // updates every evaluation
+                        house_mode_id_array->user_arg_type = FIELD_USER_ARG_NONE; /* a mode id, not an address */
                         break;
                     }
                     else
                     {
                         house_mode_id_array->user_arg = (void *)house_mode_id; // updates every evaluation
+                        house_mode_id_array->user_arg_type = FIELD_USER_ARG_NONE; /* a mode id, not an address */
                     }
                     // TRACE_E("house-mode-changed-to: %d", house_mode_id);
                 }
@@ -1298,7 +1305,9 @@ int EZPI_core_scenes_when_is_group_state(l_scenes_list_v2_t *scene_node, void *a
                     {
                         ret = ((uint32_t)scene_node->when_block->fields->user_arg == (uint32_t)curr_grp_block->when_grp->grp_state);
                     }
+                    /* A bool, not an address -- tagged NONE so it is never freed. */
                     scene_node->when_block->fields->user_arg = (void *)curr_grp_block->when_grp->grp_state; // new state
+                    scene_node->when_block->fields->user_arg_type = FIELD_USER_ARG_NONE;
                 }
                 // TRACE_S("isgroupState__ret :%d", ret);
             }
@@ -2166,11 +2175,15 @@ int EZPI_core_scene_when_function(l_scenes_list_v2_t *scene_node, void *arg)
                     /*fill the 'fields->user-arg' with 'function_state_info'*/
                     if (NULL == scene_node->when_block->fields->user_arg)
                     {
-                        s_when_function_t *function_state_info = (s_when_function_t *)malloc(sizeof(s_when_function_t));
+                        /* ezlopi_malloc rather than malloc, so that a build with
+                         * CONFIG_EZPI_HEAP_ENABLE accounts for this block and
+                         * pairs it with the ezlopi_free the destructor now uses. */
+                        s_when_function_t *function_state_info = (s_when_function_t *)ezlopi_malloc(__FUNCTION__, sizeof(s_when_function_t));
                         if (function_state_info)
                         {
                             memset(function_state_info, 0, sizeof(s_when_function_t));
                             scene_node->when_block->fields->user_arg = (void *)function_state_info;
+                            scene_node->when_block->fields->user_arg_type = FIELD_USER_ARG_HEAP;
                         }
                     }
 

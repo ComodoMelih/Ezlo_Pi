@@ -141,13 +141,32 @@ extern "C"
 #undef EZLOPI_VALUE_TYPE
     } e_scene_value_type_v2_t;
 
+    /* What `l_fields_v2_t::user_arg` is pointing at.
+     *
+     * The slot is shared by every when-method that needs to remember something
+     * between evaluations, and they do not all put the same kind of thing in
+     * it: some store an integer directly in the pointer, some an owned struct,
+     * some an owned cJSON tree. The destructor has no way to tell those apart
+     * by inspection, so whoever fills the slot has to say which it is.
+     *
+     * NONE is deliberately 0, so a field that was zeroed at allocation and
+     * never written is never released -- the safe default.
+     */
+    typedef enum e_field_user_arg_type
+    {
+        FIELD_USER_ARG_NONE = 0, /* unset, or an integer held in the pointer */
+        FIELD_USER_ARG_HEAP,     /* a flat block from ezlopi_malloc          */
+        FIELD_USER_ARG_CJSON,    /* a cJSON tree this field owns             */
+    } e_field_user_arg_type_t;
+
     typedef struct l_fields_v2
     {
         char name[32];
         s_field_value_t field_value;
         e_scene_value_type_v2_t value_type; // 0: double, 1: string
         char *scale;
-        void *user_arg; // used by when-methods
+        void *user_arg;                          // used by when-methods
+        e_field_user_arg_type_t user_arg_type;   // how to release user_arg
         struct l_fields_v2 *next;
 
     } l_fields_v2_t;

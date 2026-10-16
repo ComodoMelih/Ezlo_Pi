@@ -54,6 +54,7 @@
 #include "ezlopi_core_scenes_value.h"
 #include "ezlopi_core_scenes_operators.h"
 #include "ezlopi_core_scenes_expressions.h"
+#include "ezlopi_core_scenes_delete.h"
 
 #include "ezlopi_cloud_constants.h"
 
@@ -1153,7 +1154,16 @@ int EZPI_scenes_operators_is_dictionary_changed_operations(l_scenes_list_v2_t *s
                         cJSON *cj_value = cJSON_GetObjectItem(__FUNCTION__, cj_item_value, ezlopi_value_str); // item_value -> dictionary ; [array or object]
                         if (cj_value && cJSON_IsObject(cj_value))
                         {
-                            item_value = cj_value;
+                            /* A copy, because cj_value is a child of
+                             * cj_item_value and does not outlive the delete
+                             * below. Aliasing it was a use-after-free: every
+                             * read past this point walked freed nodes, and the
+                             * dangling pointer was then stored in user_arg for
+                             * the next evaluation to compare against and for
+                             * scene teardown to free a second time. The copy is
+                             * owned here, and ownership passes to user_arg at
+                             * the end of the function. */
+                            item_value = cJSON_Duplicate(__FUNCTION__, cj_value, true);
                         }
                     }
                 }
@@ -1163,6 +1173,8 @@ int EZPI_scenes_operators_is_dictionary_changed_operations(l_scenes_list_v2_t *s
 
         if (NULL != item_value)
         {
+            /* item_value is an owned copy from here down; every exit below has
+             * to either hand it to user_arg or delete it. */
             if (cJSON_IsObject(item_value)) // c
             {
                 char *tmp_str = operation_field->field_value.u_value.value_string;
@@ -1197,7 +1209,15 @@ int EZPI_scenes_operators_is_dictionary_changed_operations(l_scenes_list_v2_t *s
                 }
 
                 // if the item exists ; Store current item_value into 'scene_node->when_block->fields->user_arg'
+                /* Release the copy kept from the previous evaluation first --
+                 * the comparison above has already read it. */
+                EZPI_core_scenes_delete_field_user_arg(scene_node->when_block->fields);
                 scene_node->when_block->fields->user_arg = (void *)item_value;
+                scene_node->when_block->fields->user_arg_type = FIELD_USER_ARG_CJSON;
+            }
+            else
+            {
+                cJSON_Delete(__FUNCTION__, item_value);
             }
         }
     }

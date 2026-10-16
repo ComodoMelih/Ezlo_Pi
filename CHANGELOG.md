@@ -391,6 +391,154 @@ None of these have been exercised on physical hardware; see Known gaps.
   attribute itself gets deleted; the build would go green again and silently
   stop checking.
 
+- **`free()` on a FreeRTOS tick count: one untagged `void *` holding four
+  different kinds of thing, with one type-blind destructor.**
+  `l_fields_v2_t::user_arg` in
+  [`ezlopi_core_scenes_v2_type_declaration.h`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_v2_type_declaration.h)
+  is scratch space that each when-method uses to remember its own state between
+  evaluations. There are eleven stores into it across the scenes component, and
+  they do not put the same kind of thing there:
+
+  | what is stored | sites | is it an address? |
+  |---|---|---|
+  | `xTaskGetTickCount()` (`isInterval`) | 2 | no — a small integer |
+  | a house-mode id (`isHouseModeChangedTo`/`From`) | 3 | no — a small integer |
+  | `grp_state`, a `bool` (`isGroupState`) | 1 | no — 0 or 1 |
+  | an owned struct from `ezlopi_malloc` | 3 | yes, and it owns it |
+  | an owned `cJSON` tree | 2 | yes, and it owns the whole tree |
+
+  `EZPI_scenes_delete_fields()` released all eleven the same way:
+  `if (fields->user_arg) { free(fields->user_arg); }`. That is correct for
+  exactly one of the five rows.
+
+  The six integer stores are the serious half. A tick count is not an address,
+  so the guard `if (user_arg)` passes — a non-zero integer is non-NULL — and
+  then `free()` is handed a value the allocator never returned. On the host,
+  under ASan, this aborts; on the device it corrupts the heap. Reaching it does
+  not require anything exotic, because it is the ordinary teardown path:
+  `hub.scenes.delete` → `EZPI_core_scenes_depopulate_by_id_v2()` →
+  `EZPI_core_scenes_delete()` → `EZPI_core_scenes_delete_when_blocks()` →
+  `EZPI_scenes_delete_fields()`. So deleting a scene whose `when` block used
+  `isInterval`, `isGroupState` or either house-mode method called `free()` on an
+  integer. `CONFIG_EZPI_SERV_ENABLE_MESHBOTS` is on in all four shipped
+  configurations — confirmed by finding
+  `EZPI_core_scenes_delete_field_user_arg` in all four linked ELFs, not by
+  reading Kconfig — so this was in every image.
+
+  The two `cJSON` stores are the quieter half: `free()` on a `cJSON *` releases
+  the root node and nothing else, so every child node and every key string
+  stayed allocated. A scene created and deleted repeatedly leaked a little each
+  time.
+
+  Release is now driven by a tag the writer sets. `user_arg` gained a companion
+  `user_arg_type`, and the new `EZPI_core_scenes_delete_field_user_arg()`
+  switches on it: `FIELD_USER_ARG_HEAP` → `ezlopi_free`,
+  `FIELD_USER_ARG_CJSON` → `cJSON_Delete`, `FIELD_USER_ARG_NONE` → nothing.
+  `NONE` is deliberately `0`, so a field that was zeroed at allocation and
+  never written is never released; the unsafe behaviour now requires someone to
+  ask for it explicitly. All eleven stores set the tag, including the six that
+  store integers and therefore only need `NONE` — the slot is already zeroed
+  there, so those six lines change no behaviour, but the point of a tag is that
+  the writer states what it wrote locally instead of making the reader
+  reconstruct a whole-program argument.
+
+  The helper is exported rather than kept `static` because a when-method that
+  wants to discard its own remembered state mid-evaluation needs the same
+  release the destructor uses, and doing that by hand is how two of the three
+  defects below arose.
+
+- **Use-after-free: a `cJSON` child kept as remembered state after its parent
+  was deleted.**
+  `EZPI_scenes_operators_is_dictionary_changed_operations()` in
+  [`ezlopi_core_scenes_operators.c`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_operators.c)
+  stored `cj_value` into `user_arg` to compare against on the next evaluation.
+  But `cj_value` is a *child* of `cj_item_value`, which the same function
+  deletes before returning. The remembered pointer therefore aliased freed
+  memory from the moment it was stored, and the next evaluation of the scene
+  read through it. Now stores a `cJSON_Duplicate()` of the value, which the
+  field owns, tagged `FIELD_USER_ARG_CJSON`; and when the store does not
+  happen, the duplicate is deleted rather than leaked.
+
+- **`free()` without clearing the pointer, so the next pass used it and the
+  teardown freed it twice.**
+  The sunstate when-method in
+  [`ezlopi_core_scenes_when_methods_helper_functions.c`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c)
+  discards its own state mid-evaluation. It called `free()` on `user_arg` and
+  left the pointer in place, which is two defects in one line: the next
+  evaluation found a non-NULL `user_arg` and read the freed struct through it,
+  and the eventual `hub.scenes.delete` freed the same block a second time. Now
+  calls `EZPI_core_scenes_delete_field_user_arg()`, which clears both the
+  pointer and the tag, so a second release is a no-op.
+
+- **A shadowed declaration that leaked a `cJSON` tree on every call and made
+  the function it was in a no-op.**
+  In `IS_deviceitem_group_value_check()` in the same file, a block built its
+  object with `cJSON *cj_device_items_data = cJSON_CreateObject(...)` — a *new*
+  declaration shadowing the function-scope variable of the same name. So the
+  tree was unreachable the moment the block ended, and the outer variable it
+  was meant to initialise stayed `NULL`. Every value comparison below it is
+  guarded on that outer pointer, so the entire rest of the function was
+  unreachable: the leak was the visible symptom, and the when-method silently
+  evaluating nothing was the real cost. Now assigns to the outer variable.
+
+  This one was found by building with `-Wshadow`, which is not otherwise
+  enabled. The sweep found nine unique shadowed declarations; this is the only
+  one so far shown to change behaviour. The other eight are listed under Known
+  gaps as untriaged.
+
+  Found by the same reading pass: the tree is now also deleted on the path
+  where it was built but not adopted into `user_arg`, which previously leaked
+  it.
+
+  **Evidence.** All four are covered by
+  [`tests/host/test_scenefields.c`](tests/host/test_scenefields.c), which
+  compiles the real `ezlopi_core_scenes_delete.c` — not a copy — against two
+  small stubs, under `-fsanitize=address,undefined`. It is the first host test
+  to reach into the scenes component.
+
+  These tests are adjudicated mostly by the sanitizers rather than by
+  assertions, which is the point: a `free()` of a non-heap value and a leak of
+  `cJSON` children are both invisible to `assert`, so a version of this file
+  that only asserted would have passed against the broken code. That is a claim
+  about the tests, so it was checked rather than asserted — each of the eight
+  tests was run individually against the pre-fix destructor spliced back in,
+  and each behaved as its comment claims:
+
+  | test | pre-fix | adjudicated by |
+  |---|---|---|
+  | scalar (tick count) not freed | fails | ASan, on the wild `free` |
+  | bool not freed | fails | ASan, on the wild `free` |
+  | heap block *is* freed | **passes** | — the one case the old code got right |
+  | `cJSON` tree fully deleted | fails | LeakSanitizer at exit |
+  | releasing twice is safe | fails | double free |
+  | mixed list | fails | ASan, on the wild `free` |
+  | `NULL` is a no-op | **passes** | — no-op either way |
+  | via `delete_when_blocks()` | fails | ASan, on the wild `free` |
+
+  Running them one at a time was necessary rather than tidy: run together, the
+  first test aborts the process and the remaining seven never execute, so a
+  single run proves only that *one* of them can fail. In particular the
+  LeakSanitizer claim for the `cJSON` test is only visible in isolation.
+
+  The last row matters most. The seven tests above it call the field destructor
+  directly, so they would all still pass if the when-block destructor had been
+  changed to call something else; that one joins the real `hub.scenes.delete`
+  chain at `EZPI_core_scenes_delete_when_blocks()`, the last link that is
+  reachable on a host — the two above it need the scene list and the meshbot
+  task.
+
+  The Makefile rule for this test asserts with `nm` that
+  `ezlopi_core_scenes_delete.c` produced a non-empty object. That guard is
+  there because the first attempt at this test reported a clean compile while
+  having compiled nothing at all: every scenes header is wrapped end-to-end in
+  `#ifdef CONFIG_EZPI_SERV_ENABLE_MESHBOTS`, so without that macro the
+  translation unit preprocesses away and both the compile and the link succeed.
+  The test now has its own stub directory so that a shared `sdkconfig.h` cannot
+  switch that branch for unrelated tests.
+
+  All four targets build clean, with the fixed destructor present in each ELF.
+  Not exercised on physical hardware; see Known gaps.
+
 ### UART sensor dispatch — [sec]
 
 - **The UART receive task invoked its callback with a NULL buffer on every
@@ -3252,6 +3400,73 @@ Listed because a changelog that only mentions what was finished is misleading.
   `cj_device_items_data` cannot collide, because every id is rendered `%08x`
   and so every key is exactly 8 characters, and no fixed-width set can contain
   a strict prefix pair.
+
+- **A type tag stored in a union with the value it describes, so storing the
+  value destroys the tag.** `s_item_expn_data_t` in
+  [`ezlopi_core_scenes_when_methods_helper_functions.h:111`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.h#L111)
+  is declared `typedef union` over exactly two members: `e_value_type_t e_type`
+  — commented "the data's nature" — and `u_field_value_v2_t u_value`,
+  commented "reutilizing the field structure to store extracted data". The
+  field structure it means to reuse is `s_field_value_t`, which holds the same
+  two members as a **struct**. One keyword apart, and the two shapes are not
+  remotely equivalent: in the struct the tag and the value have separate
+  storage, in the union they are the same bytes.
+
+  Every one of the nine writers does `sample_data.e_type = VALUE_TYPE_x;` and
+  then immediately stores `sample_data.u_value.<member>` — which, being a
+  union, overwrites the tag it just set. Measured rather than reasoned about,
+  by compiling the real headers and reproducing that two-line sequence:
+
+  | written as | reads back as |
+  |---|---|
+  | `VALUE_TYPE_STRING` | not a valid tag (the pointer's low bytes) |
+  | `VALUE_TYPE_BOOL`, value `true` | `VALUE_TYPE_NUMBER` |
+  | `VALUE_TYPE_BOOL`, value `false` | `VALUE_TYPE_UNDEFINED` |
+  | `VALUE_TYPE_NUMBER`, value `23.0` | `VALUE_TYPE_UNDEFINED` |
+  | `VALUE_TYPE_NUMBER`, value `0.1` | not a valid tag |
+
+  The tag never survives. `sizeof` confirms the cause: `s_item_expn_data_t` is
+  8 bytes where the equivalent struct is 16, and `s_field_value_t` puts
+  `u_value` at offset 8 while the union puts it at 0, on top of `e_type`.
+
+  There are three reads of that tag — `ezlopi_core_scenes_when_methods.c:471`
+  and the two `switch` statements at `…helper_functions.c:1976` and `:2020` —
+  and none of them can take the arm it was written for. The `0.1` and `true`
+  rows are the sharper half: those do not merely fall through to `default`,
+  they select the *wrong* arm, so a stored `bool` is read back out of
+  `u_value.value_double`. The practical effect inside
+  `__replace_old_with_new_data_val()` is that the new value is never copied
+  over the remembered one, which makes the comparison beneath it meaningless.
+
+  Not fixed in this commit, and not because the change is hard — it is the word
+  `union` — but because it is a different defect from the `user_arg` work it
+  was found during, and because flipping it switches on three `switch`
+  statements' worth of code that has demonstrably never executed. That wants
+  its own commit and its own test. The measurement above is reproducible from
+  the header alone, so the diagnosis does not depend on a board; what does need
+  a board is which scenes start behaving differently afterwards, and that has
+  not been traced.
+
+  A consequence left in place meanwhile: the `VALUE_TYPE_STRING` arm at
+  `…helper_functions.c:1996`, the only code that frees the previously
+  remembered string, is unreachable for the same reason, so each new string is
+  allocated and never released. That leak is real today and is not fixed here;
+  fixing the union fixes it.
+
+- **Eight shadowed declarations found by `-Wshadow` are untriaged.** The sweep
+  that found the `cj_device_items_data` defect above found nine; one was shown
+  to change behaviour and fixed. The remaining eight have been looked at only
+  far enough to know they exist: `ezlopi_cloud_items.c:124` (`device_id`),
+  `ezlopi_cloud_scenes.c:875` (`new_scene_id`), `ezlopi_core_broadcast.c:241`
+  (`curr_node`), `ezlopi_core_scenes_cjson.c:797` (`value_type_name`),
+  `ezlopi_core_scenes_operators.c:1058` (`item_id`), `gxhtc3.c:224` (`i`),
+  `sensor_0037_pms5003_sensor.c:138` (`pms_object`) and
+  `ezlopi_service_ws_server.c:337` (`cj_method`). Most shadowing is harmless;
+  the one that was not had the same shape as several of these — an inner
+  declaration initialised from a call whose result the outer variable was
+  supposed to receive — so they are worth reading individually rather than
+  dismissing as a class. `-Wshadow` is not enabled in the build, so nothing
+  stops a tenth from appearing.
 
 - **The seven functions in `ezlopi_cloud_devcfg_port.c` have no automated
   coverage of any kind.** They are the only part of the device-configuration

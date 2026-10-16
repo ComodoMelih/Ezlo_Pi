@@ -52,6 +52,7 @@
 #include "ezlopi_core_scenes_edit.h"
 #include "ezlopi_core_scenes_expressions.h"
 #include "ezlopi_core_scenes_when_methods_helper_functions.h"
+#include "ezlopi_core_scenes_delete.h"
 
 #include "ezlopi_cloud_constants.h"
 #include "EZLOPI_USER_CONFIG.h"
@@ -492,6 +493,7 @@ uint8_t ISSUNSTATE_get_suntime(l_scenes_list_v2_t *scene_node, l_fields_v2_t *cu
             {
                 memset(data, 0, sizeof(s_sunstate_data_t));
                 scene_node->when_block->fields->user_arg = (void *)data;
+                scene_node->when_block->fields->user_arg_type = FIELD_USER_ARG_HEAP;
             }
             else
             {
@@ -518,7 +520,11 @@ uint8_t ISSUNSTATE_get_suntime(l_scenes_list_v2_t *scene_node, l_fields_v2_t *cu
                 (ISSUNSTATE_UNDEFINED == user_data->tmoffs_type)) // if the curr_day or sunstate or offset is not set properly;
             {
                 TRACE_E(" API extraction unsuccesful... Reseting user_args");
-                ezlopi_free(__FUNCTION__, scene_node->when_block->fields->user_arg); // reset the day
+                /* This used to free the block and leave the pointer in place,
+                 * so the next evaluation dereferenced freed memory and scene
+                 * teardown freed it a second time. Release through the tagged
+                 * helper, which also clears the slot. */
+                EZPI_core_scenes_delete_field_user_arg(scene_node->when_block->fields);
                 return 0;
             }
             TRACE_W("update_day = [%d][%dth] , offset[%d] : intime=0,before=1,after=2,undefined=3 , SunState[%d] : sunrise=1,sunset=2", info->tm_mday, user_data->curr_tm_day, user_data->tmoffs_type, user_data->sunstate_mode);
@@ -1159,7 +1165,11 @@ int IS_deviceitem_group_value_check(l_scenes_list_v2_t *scene_node, uint32_t dev
         bool save_flag = false;
         if (NULL == scene_node->when_block->fields->user_arg)
         {
-            cJSON *cj_device_items_data = cJSON_CreateObject(__FUNCTION__);
+            /* This assigned to an inner declaration that shadowed the outer
+             * one, so the object was leaked the moment the block ended and the
+             * outer pointer stayed NULL -- which made every value comparison
+             * below unreachable and the whole function a no-op. */
+            cj_device_items_data = cJSON_CreateObject(__FUNCTION__);
             if (cj_device_items_data)
             {
                 save_flag = true;
@@ -1326,7 +1336,13 @@ int IS_deviceitem_group_value_check(l_scenes_list_v2_t *scene_node, uint32_t dev
             CJSON_TRACE("first_device_item_data", cj_device_items_data);
 #endif
             scene_node->when_block->fields->user_arg = (void *)cj_device_items_data;
+            scene_node->when_block->fields->user_arg_type = FIELD_USER_ARG_CJSON;
             ret = 1;
+        }
+        else if (cj_device_items_data && (true == save_flag))
+        {
+            /* Built this pass but not adopted, so this function still owns it. */
+            cJSON_Delete(__FUNCTION__, cj_device_items_data);
         }
     }
     return ret;
@@ -1457,6 +1473,7 @@ int IS_itemstate_changed(s_item_exp_data_t *new_extract_data, l_fields_v2_t *sta
                 memset(tmp_struct, 0, sizeof(s_item_exp_data_t));
                 __replace_old_with_new_data_val(new_extract_data, tmp_struct);
                 scene_node->when_block->fields->user_arg = (void *)tmp_struct;
+                scene_node->when_block->fields->user_arg_type = FIELD_USER_ARG_HEAP;
             }
             else
             {

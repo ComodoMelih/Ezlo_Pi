@@ -77,6 +77,28 @@ extern "C"
    */
   void EZPI_core_scenes_delete_field_value(l_fields_v2_t *field);
   /**
+   * @brief Releases 'field->user_arg' according to 'field->user_arg_type', and
+   *        clears both.
+   *
+   * Exposed rather than static because a when-method that wants to discard its
+   * own remembered state needs the same tag-driven release the destructor uses;
+   * doing it by hand is how the slot ended up being freed with the wrong call
+   * in the first place.
+   *
+   * @param field Pointer to the 'field_block' of a scene-node. NULL is a no-op.
+   */
+  void EZPI_core_scenes_delete_field_user_arg(l_fields_v2_t *field);
+  /**
+   * @brief Deletes a 'field_block' list: every field, its value, and its
+   *        'user_arg'.
+   *
+   * Has always had external linkage; it simply had no declaration, so it could
+   * only be called from within ezlopi_core_scenes_delete.c.
+   *
+   * @param fields Head of the 'field_block' list. NULL is a no-op.
+   */
+  void EZPI_scenes_delete_fields(l_fields_v2_t *fields);
+  /**
    * @brief This function deletes 'when_blocks' from the scene_node.
    *
    * @param when_blocks Pointer to the 'when_blocks' of a scene-node.

@@ -100,10 +100,7 @@ void EZPI_scenes_delete_fields(l_fields_v2_t *fields)
     if (fields)
     {
         EZPI_scenes_delete_fields(fields->next);
-        if (fields->user_arg)
-        {
-            free(fields->user_arg);
-        }
+        EZPI_core_scenes_delete_field_user_arg(fields);
         fields->next = NULL;
         EZPI_core_scenes_delete_field_value(fields);
         ezlopi_free(__FUNCTION__, fields);
@@ -177,6 +174,51 @@ void EZPI_core_scenes_delete(l_scenes_list_v2_t *scenes_list)
         scenes_list->next = NULL;
         ezlopi_free(__FUNCTION__, scenes_list);
     }
+}
+
+void EZPI_core_scenes_delete_field_user_arg(l_fields_v2_t *field)
+{
+    if (NULL == field)
+    {
+        return;
+    }
+
+    /* This used to be an unconditional free(field->user_arg), which was wrong
+     * for three of the four things that slot can hold. isInterval stores a
+     * FreeRTOS tick count straight in the pointer and isGroupState stores a
+     * bool, so the free was handed a value that was never an address; the
+     * when-method that stores a cJSON tree got only its root node released,
+     * leaving every child and key string behind. Release is now driven by the
+     * tag the writer set, and NONE -- the zeroed default -- releases nothing.
+     */
+    switch (field->user_arg_type)
+    {
+    case FIELD_USER_ARG_HEAP:
+    {
+        if (field->user_arg)
+        {
+            ezlopi_free(__FUNCTION__, field->user_arg);
+        }
+        break;
+    }
+    case FIELD_USER_ARG_CJSON:
+    {
+        if (field->user_arg)
+        {
+            cJSON_Delete(__FUNCTION__, (cJSON *)field->user_arg);
+        }
+        break;
+    }
+    case FIELD_USER_ARG_NONE:
+    default:
+    {
+        /* An integer living in the pointer, or nothing at all. */
+        break;
+    }
+    }
+
+    field->user_arg = NULL;
+    field->user_arg_type = FIELD_USER_ARG_NONE;
 }
 
 void EZPI_core_scenes_delete_field_value(l_fields_v2_t *field)

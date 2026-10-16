@@ -25,6 +25,7 @@ DEVCFG_DIR   := ../../ezlopi-util/ezlopi-util-devcfg
 DEVCFGVAL_DIR := ../../ezlopi-util/ezlopi-util-devcfgval
 DEVCFGAPI_DIR := ../../ezlopi-cloud/ezlopi-cloud-devcfg
 WSSESSION_DIR := ../../ezlopi-util/ezlopi-util-wssession
+SCENES_DIR   := ../../ezlopi-core/ezlopi-core-scenes
 MQTTCFG_DIR  := ../../ezlopi-util/ezlopi-util-mqttcfg
 MQTTAPI_DIR  := ../../ezlopi-cloud/ezlopi-cloud-mqtt-config
 MQTTCORE_DIR := ../../ezlopi-core/ezlopi-core-mqtt-config
@@ -63,7 +64,7 @@ BUILD   := build
 TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
-           test_devcfg_api test_wssession
+           test_devcfg_api test_wssession test_scenefields
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -460,6 +461,41 @@ $(BUILD)/test_wssession: WSSESSION_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werr
                                              $(SANITIZERS)
 $(BUILD)/test_wssession: test_wssession.c $(WSSESSION_DIR)/ezlopi_util_wssession.c | $(BUILD)
 	$(CC) $(WSSESSION_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# The scene field destructor. `l_fields_v2_t::user_arg` is a void* shared by
+# several when-methods that store different kinds of thing in it, and it used
+# to be released with an unconditional free() -- which, for the when-method
+# that stores a FreeRTOS tick count directly in the pointer, meant free() on a
+# value that was never an address.
+#
+# Two things about this rule are deliberate:
+#
+# The include path puts stubs-scenes/ before stubs/ so that
+# CONFIG_EZPI_SERV_ENABLE_MESHBOTS is defined for this rule only -- see the
+# note in stubs-scenes/sdkconfig.h.
+#
+# The nm check is not decoration. ezlopi_core_scenes_delete.c is wrapped
+# end to end in that same #ifdef, so without the macro the object file is empty
+# and the link still succeeds as long as the test does not reference anything
+# from it -- which is exactly how the first attempt at this rule "passed".
+# Requiring the symbol to be present turns that silent pass into a build
+# failure.
+#
+# cjext.c gets the relaxed flags for the same reason as everywhere else here.
+$(BUILD)/test_scenefields: SCENEFIELDS_CFLAGS := -std=c99 -O1 -g \
+                                                 -I$(SCENES_DIR) -I$(ERRORS_DIR) \
+                                                 -I$(CJEXT_DIR) \
+                                                 -I stubs-scenes -I$(STUBS_DIR) \
+                                                 $(SANITIZERS)
+$(BUILD)/test_scenefields: test_scenefields.c $(SCENES_DIR)/ezlopi_core_scenes_delete.c \
+                           $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(SCENEFIELDS_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_scenefields_main.o test_scenefields.c
+	$(CC) $(SCENEFIELDS_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/scenefields_subject.o $(SCENES_DIR)/ezlopi_core_scenes_delete.c
+	@nm $(BUILD)/scenefields_subject.o | grep -q ' T EZPI_scenes_delete_fields' \
+	  || { echo "ezlopi_core_scenes_delete.c compiled to an empty object -- CONFIG_EZPI_SERV_ENABLE_MESHBOTS is not reaching it"; exit 1; }
+	$(CC) $(SCENEFIELDS_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/scenefields_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_scenefields_main.o $(BUILD)/scenefields_subject.o \
+	      $(BUILD)/scenefields_cjext.o $(LDFLAGS) -lm
 
 $(BUILD):
 	mkdir -p $(BUILD)
