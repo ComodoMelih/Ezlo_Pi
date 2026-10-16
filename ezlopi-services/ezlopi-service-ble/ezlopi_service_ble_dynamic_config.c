@@ -67,6 +67,7 @@
 
 #include "ezlopi_util_trace.h"
 #include "ezlopi_util_sanitize.h"
+#include "ezlopi_util_devcfgval.h"
 #include "cjext.h"
 #include "EZLOPI_USER_CONFIG.h"
 
@@ -346,7 +347,36 @@ static void ezpi_dynamic_config_write_func(esp_gatt_value_t *value, esp_ble_gatt
                             cJSON *cjson_config = cJSON_Parse(__FUNCTION__, decoded_data);
                             if (cjson_config)
                             {
-                                if (EZPI_core_factory_info_v3_set_ezlopi_config(cjson_config))
+                                /* Refuse a document that cannot produce a
+                                ** device list before it reaches flash, and
+                                ** before the reboot below applies it. Until
+                                ** this check "cJSON parsed it" was the only
+                                ** requirement on the most exposed path in the
+                                ** firmware -- this characteristic takes writes
+                                ** from anyone in radio range, with no pairing.
+                                ** Storing `{"hello":"world"}` here costs the
+                                ** user every configured sensor: the next boot
+                                ** finds no "chipset", the recovery rule stamps
+                                ** one and restarts, and the boot after that
+                                ** reports success with an empty device list.
+                                **
+                                ** Size arguments are 0 deliberately; see the
+                                ** matching comment in ezlopi_service_uart.c.
+                                **
+                                ** reboot_to_apply is left false, so a refused
+                                ** configuration does not restart the hub. */
+                                int bad_index = -1;
+                                const e_ezpi_devcfgval_t reason =
+                                    EZPI_util_devcfgval_check(cjson_config,
+                                                              EZPI_core_device_expected_chipset_name(),
+                                                              0, 0, &bad_index);
+
+                                if (EZPI_DEVCFGVAL_OK != reason)
+                                {
+                                    TRACE_E("refusing device config from BLE (%s), entry %d",
+                                            EZPI_util_devcfgval_token(reason), bad_index);
+                                }
+                                else if (EZPI_core_factory_info_v3_set_ezlopi_config(cjson_config))
                                 {
                                     reboot_to_apply = true;
                                 }

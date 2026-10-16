@@ -63,6 +63,7 @@
 #include "ezlopi_util_trace.h"
 #include "ezlopi_util_version.h"
 #include "ezlopi_util_sanitize.h"
+#include "ezlopi_util_devcfgval.h"
 
 #include "ezlopi_hal_uart.h"
 #include "ezlopi_hal_system_info.h"
@@ -76,6 +77,10 @@
 #include "ezlopi_core_event_group.h"
 #include "ezlopi_core_factory_info.h"
 #include "ezlopi_core_cjson_macros.h"
+/* For EZPI_core_device_expected_chipset_name(), so a configuration naming
+** another chip is refused rather than stored: its pin numbers were chosen for
+** different hardware. */
+#include "ezlopi_core_devices.h"
 
 #include "ezlopi_core_event_group.h"
 #include "ezlopi_core_sntp.h"
@@ -1397,6 +1402,37 @@ static void ezpi_service_uart_set_config(const char *data)
     cJSON *cjson_config = cJSON_Parse(__FUNCTION__, data);
     if (cjson_config)
     {
+        /* Refuse a document that cannot produce a device list before it reaches
+        ** flash. Until this check, "cJSON parsed it" was the only requirement
+        ** on this path, so `{"hello":"world"}` was stored: the next boot fails
+        ** to find a "chipset", the recovery rule stamps one and restarts, and
+        ** the boot after that reports success with an empty device list. The
+        ** user sees a hub that works and has forgotten every sensor, minutes
+        ** after sending a configuration that was acknowledged.
+        **
+        ** The size arguments are 0 so the size check is skipped. The storer is
+        ** authoritative on whether a document fits -- it serialises into its own
+        ** 4 KB buffer and reports a failed write, which is already surfaced as
+        ** EZPI_UART_CMD_STATUS_FAIL below. Measuring here would mean serialising
+        ** a second time, and measuring the *received* text instead would be
+        ** wrong in the dangerous direction: received bytes may carry whitespace
+        ** the printer drops, so a document that would have fitted could be
+        ** refused. */
+        int bad_index = -1;
+        const e_ezpi_devcfgval_t reason =
+            EZPI_util_devcfgval_check(cjson_config,
+                                      EZPI_core_device_expected_chipset_name(),
+                                      0, 0, &bad_index);
+
+        if (EZPI_DEVCFGVAL_OK != reason)
+        {
+            TRACE_E("refusing device config from UART (%s), entry %d",
+                    EZPI_util_devcfgval_token(reason), bad_index);
+            ezpi_service_uart_response(EZPI_UART_CMD_SET_CONFIG, EZPI_UART_CMD_STATUS_FAIL, 0);
+            cJSON_Delete(__FUNCTION__, cjson_config);
+            return;
+        }
+
         uint8_t ret = EZPI_core_factory_info_v3_set_ezlopi_config(cjson_config);
         if (ret)
         {

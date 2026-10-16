@@ -1719,14 +1719,15 @@ would change that, and it is listed under Known gaps rather than claimed here.
   and a reason enum, with
   [`tests/host/test_devcfgval.c`](tests/host/test_devcfgval.c) — 211 checks.
 
-  The two paths that write a device configuration today — the BLE
+  The two paths that already wrote a device configuration — the BLE
   *dynamic-config* characteristic and the UART command channel, not the BLE
   provisioning characteristic, which writes connection data and never touches
-  the device config — check nothing about what they were handed beyond "cJSON
-  parsed it". From
-  [`ezlopi_service_ble_dynamic_config.c:243`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_dynamic_config.c#L243),
-  and the same shape at
-  [`ezlopi_service_uart.c:1397`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1397):
+  the device config — checked nothing about what they were handed beyond "cJSON
+  parsed it". (They now call this component; that came later and is its own
+  entry below.) From
+  [`ezpi_dynamic_config_write_func()`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_dynamic_config.c#L265),
+  and the same shape in
+  [`ezpi_service_uart_set_config()`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1399):
 
   ```c
   cJSON *cjson_config = cJSON_Parse(__FUNCTION__, decoded_data);
@@ -1831,9 +1832,56 @@ would change that, and it is listed under Known gaps rather than claimed here.
   symbol in the ELF. That is no longer true as of the next entry, which is
   where the size this component actually costs is recorded.
 
-- **Not checked, and listed under Known gaps rather than half-done:** whether
-  the GPIOs a configuration names are valid for the target, free, or claimed
-  twice. That needs the HAL and is a larger piece of work than this.
+- **The two unauthenticated paths still bypassed it, and now do not — [sec].**
+  The component was written because of what the BLE dynamic-config
+  characteristic and the UART command channel accept, and then wired only into
+  the websocket `.set` method that came with it. The two paths it was written
+  for kept calling
+  `EZPI_core_factory_info_v3_set_ezlopi_config()` directly, so the check
+  existed, was tested, was linked into the image — and the most exposed writer
+  in the firmware went straight past it. `{"hello":"world"}` over BLE still cost
+  the user every configured sensor, by the sequence described further up this
+  entry.
+
+  Both now call `EZPI_util_devcfgval_check()` before the store and refuse on a
+  non-`OK` reason: the UART path answers `EZPI_UART_CMD_STATUS_FAIL`, and the
+  BLE path logs the reason token and leaves `reboot_to_apply` false, so a
+  refused configuration no longer restarts the hub. This is marked **[sec]**
+  rather than [bug] for the reason the rest of the BLE items are: that
+  characteristic is `ESP_GATT_PERM_WRITE` and is reached with no pairing, so the
+  write that wiped the device list needed only radio range.
+
+  The check is deliberately **not** pushed down into
+  `EZPI_core_factory_info_v3_set_ezlopi_config()` itself, which would have
+  covered every caller at once and been the obvious move. Two of its callers are
+  in the boot path —
+  [`ezlopi_core_devices.c:666`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.c#L666)
+  and [line 720](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.c#L720) —
+  and the first is the chipset-stamping migration, which by construction writes
+  back a configuration that has *just failed to parse*. A validator there would
+  refuse the repair. That code runs from inside `EZPI_init()` before BLE, UART
+  and the websocket start, where its own comment notes that restarting on a
+  cause the stamp cannot fix "loops forever with no interface left to recover
+  through" — so the blast radius of being wrong at that spot is an unrecoverable
+  device, not a refused write. Validation belongs at the three entry points that
+  accept a configuration from outside; the boot path's job is repair, and it
+  keeps the ability to store a document a strict reader would reject.
+
+  No new test. What changed is two call sites in files that cannot be
+  host-compiled — the BLE service needs the GATT profile and the factory
+  partition, the UART service needs the USB/driver headers — and the behaviour
+  being invoked is already covered by `test_devcfgval.c`, which asserts
+  `{"hello":"world"}` is refused with `EZPI_DEVCFGVAL_CHIPSET_MISSING`. The
+  wiring itself is evidenced by a four-target build plus an `nm` check that
+  `EZPI_util_devcfgval_check` is present in each ELF, since a call that failed
+  to link against the component would otherwise leave both services writing
+  unvalidated configurations while the build stayed green.
+
+- **Not checked, and still listed under Known gaps:** whether the GPIOs a
+  configuration names are valid for the target, free, or claimed twice. Looking
+  into it turned up evidence that one of those three is the wrong thing to
+  check; the Known gap now records what the pin keys and sentinels actually are
+  rather than what it assumed.
 
 - **The device configuration can now be read and replaced over the websocket
   API.** Two new methods, `hub.ezlopi.config.get` and
@@ -3684,7 +3732,8 @@ Listed because a changelog that only mentions what was finished is misleading.
   pin that does not exist on the target is caught at init by most drivers,
   which fail with `EZPI_ERR_INIT_DEVICE_FAILED`.
 
-  Two real holes are left, and they are the ones a pre-store check would close:
+  One real hole is left, and a second one this entry used to claim turned out
+  not to exist:
 
   - **Pins that are "valid" but already in use by the system.** On esp32
     `SOC_GPIO_VALID_GPIO_MASK` excludes only 24 and 28–31
@@ -3694,10 +3743,54 @@ Listed because a changelog that only mentions what was finished is misleading.
     UART, or a configured I²C or SPI bus, and the last two depend on
     `sdkconfig`.
 
-  - **Two devices claiming the same pin.** There is no registry of claimed
-    pins, so the second driver reconfigures the first one's GPIO and both
-    devices then appear in the device list, one of them reporting someone
-    else's pin.
+  - **"Two devices claiming the same pin" was the wrong check, and an earlier
+    version of this entry had it as a hole to close.** Two devices sharing a pin
+    is how I²C works: every sensor on a bus shares `gpio_sda` and `gpio_scl` and
+    is distinguished by `slave_addr`. The in-tree example configuration at
+    [`ezlopi_core_factory_info.h:225`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.h#L225)
+    is exactly that — a BME280 and a TSL2561 both on `gpio_sda:21, gpio_scl:22`,
+    `slave_addr` 118 and 57 — though that one is commented out, so the stronger
+    evidence is the live HAL:
+    [`EZPI_hal_i2c_master_init()`](ezlopi-hal/ezlopi-hal-i2c/ezlopi_hal_i2c_master.c#L91)
+    guards installation on `NULL == i2c_master_conf_ptr[channel]` precisely so
+    that the second device on a channel reuses the bus the first one brought up,
+    and reads and writes then select the device by `->address`. Sharing is
+    designed in. A pre-store check that refused repeated pin numbers would
+    reject that document, so it would have broken the most ordinary
+    multi-sensor setup there is while reporting that it was protecting the user.
+    What is left of the original concern is narrower and needs per-bus
+    knowledge, not a uniqueness test: two devices claiming the same pin *in
+    incompatible modes*, or on the same I²C channel with *different* SDA/SCL
+    pins, which that guard would silently resolve in favour of whichever device
+    initialised first.
+
+  Two things a future attempt needs, both of which cost more than they look:
+
+  - **The pin keys are not one key.** The parser reads fifteen:
+    `gpio`, `gpio_in`, `gpio_out`, `gpio_scl`, `gpio_sda`, `gpio_tx`, `gpio_rx`
+    and `gpio1`–`gpio8`
+    ([`ezlopi_cloud_keywords.c:254`](ezlopi-cloud/ezlopi-cloud-constants/ezlopi_cloud_keywords.c#L254)
+    onward). A checker that handles `gpio` and stops has covered a minority of
+    the device types.
+
+  - **"Unused pin" has at least four encodings, and they disagree.** `-1`,
+    `255`, `""` — an empty *string* where a number is expected — and `0`
+    alongside `"is_ip":false`. The first two appear together as separate tests
+    in the same driver
+    ([`device_0001_digitalOut_generic.c:272`](ezlopi-sensors-devices/device-0001-digitalOut-generic/device_0001_digitalOut_generic.c#L272)
+    onward, which checks `255` for the output pin and then `-1` *and* `255` for
+    the input pin); the last two appear in the in-tree example configurations at
+    `ezlopi_core_factory_info.h:226` and `:247`. So a validator cannot ask "is
+    this a real pin number" without first deciding which of the four spellings
+    of absent it accepts, and refusing any of them breaks configurations that
+    work today.
+
+  For the reserved-pin half, the sources exist and are build-derived rather
+  than remembered: `soc/spi_pins.h` per target, and
+  `esp_rom_efuse_get_flash_gpio_info()` from `esp_rom_efuse.h`, which reports
+  the flash pins the running chip was actually strapped for. Both were confirmed
+  present in this IDF. That is the shape a correct check would take — read the
+  pins out of the build and the efuses, never from a table typed from memory.
 
   The intent to check at the HAL level is visible and disabled: the
   `GPIO_IS_VALID_OUTPUT_GPIO` and `GPIO_IS_VALID_GPIO` tests at
@@ -3705,11 +3798,13 @@ Listed because a changelog that only mentions what was finished is misleading.
   and [line 96](ezlopi-hal/ezlopi-hal-gpio/ezlopi_hal_gpio.c#L96) are commented
   out.
 
-  Not done here because a reserved-pin table written from memory would refuse
-  valid configurations, which is the failure mode this whole area is trying to
-  avoid, and because the answer differs per target and per `sdkconfig`. It is a
-  piece of work in its own right rather than a few lines on the end of this
-  one.
+  Still deferred, and the correction above is the reason rather than an aside:
+  the first attempt at this gap named three things to check and one of them
+  would have refused a normal two-sensor I²C configuration. The cost of being
+  wrong here is refusing setups that work today, which is worse than the gap
+  itself, and getting it right means per-target and per-`sdkconfig` answers plus
+  a decision on four spellings of "no pin". That is a piece of work in its own
+  right rather than a few lines on the end of this one.
 
 - **The BLE accumulator bounds are not tested, and nothing is freed on
   disconnect.** The accumulator itself is now bounded and freed iteratively (see
