@@ -396,6 +396,18 @@ jobs:
       - name: No pointer dereferenced above its own NULL test
         run: python3 tests/ci/check_check_after_use.py
 
+      # The CHANGELOG is this fork's main deliverable and carries 230-odd
+      # links into the source, most with a #L<n> fragment. Line numbers move
+      # whenever anything above them is edited, and a link to a renamed file
+      # or a line past the end of one renders as ordinary text while reading
+      # as evidence. This catches the three mechanical failures -- path gone,
+      # file shorter than the cited line, and link text disagreeing with its
+      # own fragment, which is how it found `factory_info.c:140` pointing at
+      # #L135. It cannot tell whether a resolving line is the *right* line;
+      # that is a person's job, and the docstring says so.
+      - name: Documentation citations resolve
+        run: python3 tests/ci/check_doc_citations.py
+
   firmware:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest

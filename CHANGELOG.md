@@ -6499,7 +6499,7 @@ enumerators — so the live half of this component was never affected.
   | Job | What it does |
   | --- | --- |
   | `host-tests` | `make -C tests/host` under ASan + UBSan |
-  | `hygiene` | the static checks, 16 of them, each a `tests/ci/check_*.py` named in the job rather than a glob — so a check that exists and is never invoked shows up as an orphan. Started as five subjects (no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes) and every entry added since is described where its fix is, not here, so that this row cannot drift out of date again |
+  | `hygiene` | the static checks, 17 of them, each a `tests/ci/check_*.py` named in the job rather than a glob — so a check that exists and is never invoked shows up as an orphan. Started as five subjects (no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes) and every entry added since is described where its fix is, not here, so that this row cannot drift out of date again |
   | `firmware` | builds all four targets in `espressif/idf:v4.4.6`, asserts the generated config was actually inherited from the per-target defaults, merges and verifies a flashable image, uploads `bin`/`elf`/`map`/`sdkconfig` |
   | `firmware-outdir` | builds esp32 with `idf.py -B /tmp/...`, outside the workspace, and asserts the image landed there and that **no `./build` was created at all** — so the tree cannot regress to a build directory it only builds in by default |
   | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled, that the pinned header is still the default CA source, and that `ca_mios` reached the ELF |
@@ -6779,6 +6779,39 @@ enumerators — so the live half of this component was never affected.
   either version, which is the one class of breakage a compiler cannot catch;
   and the pin is v4.4.6 while the branch ended at v4.4.8, so two patch releases
   of fixes are available without touching a line of source.
+- **The citations in these documents are now checked**, by
+  [`check_doc_citations.py`](tests/ci/check_doc_citations.py) — the twentieth
+  check and the seventeenth the `hygiene` job invokes. This file is the main
+  thing this fork produces, and these documents carry 249 markdown links,
+  most of them with a `#L<n>` fragment. Line numbers move whenever anything
+  above them is edited, and nothing in the toolchain notices: a link to a
+  renamed file, or to a line past the end of one, renders as ordinary text and
+  reads as evidence. Entries here turn on specific lines — "returns `NULL` on
+  three paths", "the guard is the next block down" — so a citation that points
+  nowhere is worse than no citation at all.
+
+  It found one, which is why it exists rather than being deferred a fifth time:
+  `ezlopi_core_factory_info.c:140` linked to `#L135`. The prose meant the
+  `arg = NULL;` statement and the link pointed at the function signature five
+  lines above it. Each number was right about something; the pair was wrong,
+  and that is the one shape a reader has no way to spot. The link now says
+  `#L140`.
+
+  Three mechanical failures are caught — the path is gone, the file is shorter
+  than the cited line, or the link text ends `foo.c:123` while its own fragment
+  says `#L456`. What it cannot do is tell whether a line that resolves is the
+  *right* line; nothing short of re-reading each citation can, and that is a
+  person's job. The docstring says so, so that a green run is not read as more
+  than it is. Links to directories are skipped, because `tests/host/` is linked
+  that way deliberately.
+
+  Proved able to fail three ways before being trusted: against the committed
+  `CHANGELOG.md` it exits 1 on that mismatch; against a shadow tree where one
+  cited source file has been renamed away it reports the three links that cited
+  it; and a copy with its `return problems` replaced by `return []` exits 1
+  with `SELF-TEST FAILED` rather than passing silently. Nine fixtures run
+  first, six of them correct links — including an external URL and a bare
+  `#anchor`, neither of which is this check's business.
 - Added this file and [SECURITY.md](SECURITY.md).
 
 ---
@@ -6915,7 +6948,7 @@ Listed because a changelog that only mentions what was finished is misleading.
   (`invalidscanf`) and the dead `NULL` assignment in the websocket kill
   (`uselessAssignmentPtrArg`), both above. A second
   `uselessAssignmentPtrArg`, at
-  [`ezlopi_core_factory_info.c:140`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L135),
+  [`ezlopi_core_factory_info.c:140`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L140),
   is recorded with that fix as unobservable across its 39 call sites. The
   remaining 18 break into three groups, and none is worth a change:
 
