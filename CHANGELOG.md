@@ -338,6 +338,128 @@ None of these have been exercised on physical hardware; see Known gaps.
   unrecognised `sub_cmd` hit it, which is exactly what a fuzzer or a mistyped
   command sends.
 
+- **Four drivers asked for one allocation to be freed up to six times, and
+  neither build could say so.** `l_ezlopi_item_t` carries a `void *user_arg`
+  and a `bool is_user_arg_unique`
+  ([`ezlopi_core_devices.h:110-129`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.h#L110-L129)).
+  The bool means *this item frees `user_arg`*, and it is read in exactly one
+  place — `ezlopi_device_free_item()`, which recurses over **every** item of a
+  device:
+
+  ```c
+  if (NULL != (items->user_arg) && (true == items->is_user_arg_unique))
+  {
+      ezlopi_free(__FUNCTION__, items->user_arg);
+      items->user_arg = NULL;
+  }
+  ```
+
+  The `= NULL` afterwards protects nothing, because the duplicate is a
+  *different* item still holding the same address.
+
+  Nothing documented the field, and its name reads as "`user_arg` belongs to
+  one device". Four drivers were written to that reading — they handed a single
+  `ezlopi_malloc` to every item of one device and flagged all of them:
+
+  | driver | items on the device | allocations | items flagged as owner |
+  |---|---|---|---|
+  | [`device_0009_other_RMT_SK6812.c`](ezlopi-sensors-devices/device-0009-other-RMT-SK6812/device_0009_other_RMT_SK6812.c) | 6 | 1 | 6 |
+  | [`device_0022_PWM_dimmable_lamp.c`](ezlopi-sensors-devices/device-0022-PWM-dimmable-lamp/device_0022_PWM_dimmable_lamp.c) | 5 | 1 | 5 |
+  | [`device_0038_other_RGB.c`](ezlopi-sensors-devices/device-0038-other-RGB/device_0038_other_RGB.c) | 3 | 1 | 3 |
+  | [`sensor_0012_I2C_BME280.c`](ezlopi-sensors-devices/sensor-0012-I2C-BME280/sensor_0012_I2C_BME280.c) | 2 (+1 on a child) | 1 | 2 |
+
+  SK6812 said so in a comment: `/*linked to only one device so 'TRUE'*/`.
+  BME280 is the one that shows the misreading cleanly — its *pressure* item
+  sits on a separate child device and was correctly `false`, so the rule was
+  understood across devices and simply not applied within one.
+
+  **Neither of the two heap configurations reports it, in opposite ways.**
+  `CONFIG_EZPI_HEAP_ENABLE` is unset in `sdkconfig` and in all four
+  `sdkconfig.defaults.*`, which makes `ezlopi_free` a `NULL`-checked `free()`
+  ([`EZLOPI_USER_CONFIG.h:108`](ezlopi-user-config/EZLOPI_USER_CONFIG.h#L108))
+  — so the shipped image performs a real double free. Switch heap tracing on
+  and `EZPI_core_util_heap_free` walks its node list for a match with
+  `freed == 0`, finds none for the second call, and returns having done nothing
+  ([`ezlopi_core_heap.c`](ezlopi-core/ezlopi-core-heap/ezlopi_core_heap.c)) — so
+  the instrumented build absorbs it silently. It corrupted the configuration
+  that ships and hid in the one you would debug with.
+
+  Reaching it needs no cloud traffic and no attacker.
+  `__EZPI_initialize_devices_v3()` frees any device whose item fails to
+  initialise — see *A device that fails to initialise no longer disappears
+  without saying so* below — so a dimmable lamp configured on a pin the
+  hardware refuses is enough. `hub.device.remove` and a factory reset reach the
+  same free.
+
+  Three things changed:
+
+  - **The five drivers now name exactly one owner.** A fifth,
+    [`sensor_0029_I2C_GXHTC3.c`](ezlopi-sensors-devices/sensor-0029-I2C-GXHTC3/sensor_0029_I2C_GXHTC3.c#L361),
+    had the mirror-image bug: `item_temperature->is_user_arg_unique = false`
+    where `item_humdity` was meant. That cleared the only owner and left the
+    humidity item at its `memset` default, so on the normal path — both items
+    present — *nothing* freed the allocation. The same line also dereferenced
+    `item_temperature` from outside the `if` that had tested it for `NULL`. The
+    old code carried the author's own uncertainty on that line as a comment:
+    `// affected if 'value_pts' is already freed?`
+
+    For RGB and GXHTC3 the owner is now picked where the code knows which items
+    it actually got, rather than asserted in a per-item helper that cannot see
+    its siblings. The 2-axis joystick had two owner assignments naming the
+    *same* item, which was redundant rather than wrong; the uninformative one is
+    gone, so that no driver in the tree has two.
+
+    One hole in GXHTC3 is **left open deliberately**: its explicit cleanup tests
+    `(NULL == item_temperature) && (NULL == child_device_hum)`, so if the child
+    *device* is created but its item is not, neither item exists to own the
+    allocation and nothing frees it. That needs `add_item_to_device` to fail,
+    which is an out-of-memory path, and the condition cannot be tightened to
+    name the humidity item without restructuring the function — the item
+    variable is scoped inside the block that creates it. It is a leak on a path
+    that is already failing to allocate, which is a worse trade to fix badly
+    than to leave recorded.
+
+  - **`is_user_arg_unique` is now documented at its declaration**, including
+    where the flag belongs when the arg is shared between a parent device and
+    its children: on the parent's item, because the child can be removed on its
+    own.
+
+  - **`ezlopi_device_free_single()` collapses duplicate ownership before
+    freeing anything.** This is containment, not the fix: it turns a future
+    miscount into a leak instead of heap corruption. It deliberately does not
+    invent an owner where there is none, so flagging *none* still leaks — which
+    is the half a static check cannot enforce, see below.
+
+  [`tests/ci/check_user_arg_owner.py`](tests/ci/check_user_arg_owner.py) keeps
+  it fixed: at most one owner per driver `.c`. That is a proxy, and the check
+  says so — it cannot see which device an item belongs to, so it cannot
+  distinguish two owners of two allocations (fine) from two owners of one (a
+  double free), and it requires the stronger property. No file needs two.
+
+  **The check was verified failing before it was trusted.** Run against the
+  tree as committed *before* these fixes, with nothing changed but the check
+  dropped in, it names exactly the four drivers above (plus the joystick's
+  redundant pair) and exits 1. It also fails if `ezlopi_device_free_item()`
+  stops honouring the flag — which would leave every driver compiling and every
+  shared arg leaking — or if the collapse loop is removed.
+
+  The leak half is **not** enforced, and that is deliberate: 12 driver files
+  assign `user_arg` and name no owner, and they are mostly right to.
+  [`sensor_0026_ADC_LDR.c:268`](ezlopi-sensors-devices/sensor-0026-ADC-LDR/sensor_0026_ADC_LDR.c#L268)
+  and
+  [`sensor_0061_digitalIn_reed_switch.c:292`](ezlopi-sensors-devices/sensor-0061-digitalIn-reed-switch/sensor_0061_digitalIn_reed_switch.c#L292)
+  store a **string literal** there as a last-reported-value slot, where
+  flagging an owner would hand a literal to `free()`; and
+  `l_ezlopi_device_settings_v3_t` has its own `user_arg` with no ownership flag
+  at all, which is what the `*_settings.c` files in that set are using. So
+  "assigns `user_arg`, therefore must name an owner" is false 12 times over,
+  and a check asserting it would be wrong rather than strict. Whether any of
+  those 12 is a genuine leak is not yet established either way.
+
+  **Not verified:** that a device whose item fails on real hardware takes the
+  fixed path on a board. The repair is on the free path, and nothing has been
+  flashed.
+
 - **Plaintext Wi-Fi PSK written to the serial console.**
   `hub.network.get` reports the Wi-Fi password as `key`
   ([`ezlopi_cloud_network.c:174`](ezlopi-cloud/ezlopi-cloud-network/ezlopi_cloud_network.c#L174)),
@@ -4730,6 +4852,33 @@ enumerators — so the live half of this component was never affected.
   `GPIO_NUM_MAX` is 40 on esp32 and 22 on esp32c3, so a hard-coded 40 would be
   wrong on three targets out of four.
 
+- **New CI check that one item `user_arg` has one owner,
+  [`tests/ci/check_user_arg_owner.py`](tests/ci/check_user_arg_owner.py).** The
+  bug, the four drivers and the reason neither heap configuration could report
+  it are under *Four drivers asked for one allocation to be freed up to six
+  times* above; what belongs here is how the check was validated.
+
+  It was run against the tree **as committed before the fix**, with nothing
+  altered but the check dropped into `tests/ci/`, and it named exactly the four
+  offending drivers with their owner counts — 6, 5, 3 and 2 — plus the 2-axis
+  joystick's redundant pair. That is the test that decides whether a green run
+  on the fixed tree means anything, and it is stronger than a self-test,
+  because a self-test only shows the scanner matches text its author chose.
+
+  Three more mutations, each breaking one invariant on the fixed tree: putting
+  a second owner back into BME280 is reported at the right line; making
+  `ezlopi_device_free_item()` stop honouring the flag is reported, which matters
+  because that deletion leaves every driver compiling while every shared
+  `user_arg` leaks; and removing the duplicate-ownership collapse from
+  `ezlopi_device_free_single()` is reported, which nothing else would notice
+  since no driver can see that loop. Restored, it passes again.
+
+  The scanner strips comments and string literals before counting, and the
+  self-test covers that specifically — the fixes landed with explanatory
+  comments that quote the literal text `is_user_arg_unique = true` while
+  describing what used to be there, so a naive counter would have failed on the
+  very files it had just corrected.
+
 - **[`tests/ci/check_ui_frame_redaction.py`](tests/ci/check_ui_frame_redaction.py)
   was written, committed, and never wired into a workflow.** It ran nowhere. It
   is in `ci.yml` now. Found by asking, for each of the 13 `tests/ci/check_*.py`,
@@ -5185,7 +5334,7 @@ enumerators — so the live half of this component was never affected.
   | Job | What it does |
   | --- | --- |
   | `host-tests` | `make -C tests/host` under ASan + UBSan |
-  | `hygiene` | no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes |
+  | `hygiene` | the static checks, 13 of them, each a `tests/ci/check_*.py` named in the job rather than a glob — so a check that exists and is never invoked shows up as an orphan. Started as five subjects (no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes) and every entry added since is described where its fix is, not here, so that this row cannot drift out of date again |
   | `firmware` | builds all four targets in `espressif/idf:v4.4.6`, asserts the generated config was actually inherited from the per-target defaults, merges and verifies a flashable image, uploads `bin`/`elf`/`map`/`sdkconfig` |
   | `firmware-outdir` | builds esp32 with `idf.py -B /tmp/...`, outside the workspace, and asserts the image landed there and that **no `./build` was created at all** — so the tree cannot regress to a build directory it only builds in by default |
   | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled, that the pinned header is still the default CA source, and that `ca_mios` reached the ELF |
@@ -5938,11 +6087,30 @@ Listed because a changelog that only mentions what was finished is misleading.
     nothing reverses that, so the pins stay configured with no device owning
     them. No deinit action is dispatched on this path.
 
-    This is not a leak of memory; `EZPI_core_device_free_device()` handles the
-    structures. It is a leak of *hardware state*, and the reason it has not
-    caused visible trouble is that an unowned pin left as an input or a
-    driven output is inert until something else claims it — which is the
-    mode-conflict gap above, from the other direction.
+    What remains is a leak of *hardware state* — `EZPI_core_device_free_device()`
+    handles the structures. The reason it has not caused visible trouble is that
+    an unowned pin left as an input or a driven output is inert until something
+    else claims it, which is the mode-conflict gap above from the other
+    direction.
+
+    **How reachable this is has now been measured, and it is narrower than the
+    bullet above implies.** The gap needs a device with two or more items,
+    because the loop `break`s on the first failure: with one item per device
+    there is nothing to undo. Of 127 `EZPI_core_device_add_item_to_device()`
+    call sites across the drivers, 104 give a device exactly one item. Six
+    drivers build multi-item devices — SK6812 (6 items), the dimmable lamp (5),
+    RGB (3), BME680 and BME280 (2 each on their parent device), and R307, which
+    adds its items in a loop. Those six are the whole exposure, and all six are
+    `PREPARE`-time shapes rather than anything a configuration can vary, so the
+    list does not grow with the device catalogue — only with new drivers.
+
+    That measurement is also what turned up the double free fixed in *Four
+    drivers asked for one allocation to be freed up to six times* above: four of
+    those same multi-item drivers shared one `user_arg` between all the items
+    and flagged every one of them as its owner. So the memory half of this path
+    was **not** sound when this bullet first claimed it was, and the claim has
+    been corrected rather than left standing. The hardware-state half below is
+    what is still open.
 
   Two things a future attempt needs, both of which looked expensive and are now
   paid for:

@@ -1032,6 +1032,41 @@ static void ezlopi_device_free_single(l_ezlopi_device_t *device)
         TRACE_E("free single Device-ID: %08x", device->cloud_properties.device_id);
         if (device->items)
         {
+            /* Collapse duplicate ownership of a shared user_arg before anything
+            ** is freed. is_user_arg_unique means "this item frees user_arg" (see
+            ** the comment on the field), and a driver that hands one allocation
+            ** to several items must flag exactly one of them. Four did not --
+            ** SK6812 flagged six, the dimmable lamp five, RGB three, BME280 two
+            ** -- so ezlopi_device_free_item() below, which walks the whole item
+            ** list, passed one pointer to free() that many times. With
+            ** CONFIG_EZPI_HEAP_ENABLE off, which is how all four targets ship,
+            ** ezlopi_free is a NULL-checked free() and that is heap corruption;
+            ** with it on, EZPI_core_util_heap_free skips an already-freed node
+            ** and the bug is invisible. So it corrupted the shipped build and
+            ** hid in the instrumented one.
+            **
+            ** Those drivers are fixed and check_user_arg_owner.py keeps them
+            ** fixed. This loop is here so that the next driver to misread the
+            ** field leaks its arg instead of corrupting the heap: it is a
+            ** containment measure, not the fix, and it deliberately does not
+            ** invent an owner where there is none. */
+            for (l_ezlopi_item_t *owner = device->items; NULL != owner; owner = owner->next)
+            {
+                if ((NULL == owner->user_arg) || (false == owner->is_user_arg_unique))
+                {
+                    continue;
+                }
+
+                for (l_ezlopi_item_t *dup = owner->next; NULL != dup; dup = dup->next)
+                {
+                    if (dup->user_arg == owner->user_arg)
+                    {
+                        dup->user_arg = NULL;
+                        dup->is_user_arg_unique = false;
+                    }
+                }
+            }
+
             ezlopi_device_free_item(device->items);
             device->items = NULL;
         }

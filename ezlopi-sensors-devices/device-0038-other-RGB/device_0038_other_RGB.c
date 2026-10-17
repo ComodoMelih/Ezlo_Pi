@@ -403,7 +403,9 @@ static void __prepare_RGB_LED_item(l_ezlopi_item_t *item, cJSON *cj_device, void
     item->interface.pwm.freq_hz = 5000;
     item->interface.pwm.pwm_resln = 8;
 
-    item->is_user_arg_unique = true;
+    /* One rgb_args is shared by all three items, so none of these three
+    ** functions claims it; __prepare() flags exactly one owner once it knows
+    ** which items it actually got. */
     item->user_arg = user_arg;
 }
 
@@ -426,7 +428,6 @@ static void __prepare_RGB_LED_onoff_switch_item(l_ezlopi_item_t *item, cJSON *cj
     item->interface.gpio.gpio_out.value = false;
     item->interface.gpio.gpio_in.enable = false;
 
-    item->is_user_arg_unique = true;
     item->user_arg = user_arg;
 }
 
@@ -447,7 +448,6 @@ static void __prepare_RGB_LED_dimmer_item(l_ezlopi_item_t *item, cJSON *cj_devic
     item->interface.pwm.freq_hz = 5000;
     item->interface.pwm.pwm_resln = 8;
 
-    item->is_user_arg_unique = true;
     item->user_arg = user_arg;
 }
 
@@ -495,6 +495,22 @@ static ezlopi_error_t __prepare(void *arg)
                 }
                 else
                 {
+                    /* All three items point at this one rgb_args, so exactly one
+                    ** of them owns it. ezlopi_device_free_item() frees user_arg
+                    ** for every item carrying the flag and walks the whole item
+                    ** list, so flagging more than one asked for the same pointer
+                    ** to be freed more than once. Which item is the owner only
+                    ** matters in that there must be one: the branch above has
+                    ** already established that at least one is non-NULL, and all
+                    ** three die together. */
+                    l_ezlopi_item_t *arg_owner =
+                        (NULL != rgb_args->RGB_LED_item)
+                            ? rgb_args->RGB_LED_item
+                            : ((NULL != rgb_args->RGB_LED_onoff_switch_item)
+                                   ? rgb_args->RGB_LED_onoff_switch_item
+                                   : rgb_args->RGB_LED_dimmer_item);
+                    arg_owner->is_user_arg_unique = true;
+
                     ret = EZPI_SUCCESS;
                 }
             }

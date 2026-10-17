@@ -387,7 +387,13 @@ static void __prepare_item_humidity_properties(l_ezlopi_item_t *item, cJSON *cj_
     CJSON_GET_VALUE_GPIO(cj_device, ezlopi_gpio_sda_str, item->interface.i2c_master.sda);
     CJSON_GET_VALUE_UINT32(cj_device, ezlopi_slave_addr_str, item->interface.i2c_master.address);
 
-    item->is_user_arg_unique = true;
+    /* The temperature item already owns this bme280_sensor_params; all three
+    ** items share the one allocation and only one may free it. The pressure
+    ** item below has always been false, which is the same rule applied across
+    ** devices -- it just was not applied to this item, which sits on the same
+    ** device as the temperature item and so is reached by the same walk in
+    ** ezlopi_device_free_item(). */
+    item->is_user_arg_unique = false;
     item->user_arg = user_arg;
 }
 

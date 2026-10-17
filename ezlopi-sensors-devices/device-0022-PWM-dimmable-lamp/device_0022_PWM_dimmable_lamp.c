@@ -409,6 +409,12 @@ static ezlopi_error_t __prepare(void *arg)
                 dimmable_bulb_arg->previous_brightness_value = 4095;
                 dimmable_bulb_arg->dimmable_bulb_initialized = false;
 
+                /* The five items below share this one dimmable_bulb_arg, so only
+                ** the first is flagged as its owner. is_user_arg_unique is read
+                ** by ezlopi_device_free_item() as "free user_arg when freeing
+                ** this item", and that walks every item in the device, so
+                ** flagging all five asked for one pointer to be freed five
+                ** times. */
                 dimmable_bulb_arg->item_dimmer = EZPI_core_device_add_item_to_device(device, DEVICE_0022_pwm_dimmable_lamp);
                 if (dimmable_bulb_arg->item_dimmer)
                 {
@@ -421,7 +427,7 @@ static ezlopi_error_t __prepare(void *arg)
                 if (dimmable_bulb_arg->item_dimmer_up)
                 {
                     dimmable_bulb_arg->item_dimmer_up->user_arg = dimmable_bulb_arg;
-                    dimmable_bulb_arg->item_dimmer_up->is_user_arg_unique = true;
+                    dimmable_bulb_arg->item_dimmer_up->is_user_arg_unique = false;
                     __prepare_dimmer_up_item_properties(dimmable_bulb_arg->item_dimmer_up, prep_arg->cjson_device);
                 }
 
@@ -429,7 +435,7 @@ static ezlopi_error_t __prepare(void *arg)
                 if (dimmable_bulb_arg->item_dimmer_down)
                 {
                     dimmable_bulb_arg->item_dimmer_down->user_arg = dimmable_bulb_arg;
-                    dimmable_bulb_arg->item_dimmer_down->is_user_arg_unique = true;
+                    dimmable_bulb_arg->item_dimmer_down->is_user_arg_unique = false;
                     __prepare_dimmer_down_item_properties(dimmable_bulb_arg->item_dimmer_down, prep_arg->cjson_device);
                 }
 
@@ -437,7 +443,7 @@ static ezlopi_error_t __prepare(void *arg)
                 if (dimmable_bulb_arg->item_dimmer_stop)
                 {
                     dimmable_bulb_arg->item_dimmer_stop->user_arg = dimmable_bulb_arg;
-                    dimmable_bulb_arg->item_dimmer_stop->is_user_arg_unique = true;
+                    dimmable_bulb_arg->item_dimmer_stop->is_user_arg_unique = false;
                     __prepare_dimmer_stop_item_properties(dimmable_bulb_arg->item_dimmer_stop, prep_arg->cjson_device);
                 }
 
@@ -445,7 +451,7 @@ static ezlopi_error_t __prepare(void *arg)
                 if (dimmable_bulb_arg->item_dimmer_switch)
                 {
                     dimmable_bulb_arg->item_dimmer_switch->user_arg = dimmable_bulb_arg;
-                    dimmable_bulb_arg->item_dimmer_switch->is_user_arg_unique = true;
+                    dimmable_bulb_arg->item_dimmer_switch->is_user_arg_unique = false;
                     __prepare_dimmer_switch_item_properties(dimmable_bulb_arg->item_dimmer_switch, prep_arg->cjson_device);
                 }
 
@@ -455,6 +461,16 @@ static ezlopi_error_t __prepare(void *arg)
                     (NULL == dimmable_bulb_arg->item_dimmer_stop) ||
                     (NULL == dimmable_bulb_arg->item_dimmer_switch))
                 {
+                    /* Any one item missing and the whole device goes, so take
+                    ** ownership of dimmable_bulb_arg back before freeing the
+                    ** device: the condition above is an OR, so item_dimmer can
+                    ** exist while a later item does not, and it would then free
+                    ** the arg on the way out and the explicit free below would
+                    ** free it a second time. */
+                    if (dimmable_bulb_arg->item_dimmer)
+                    {
+                        dimmable_bulb_arg->item_dimmer->is_user_arg_unique = false;
+                    }
                     EZPI_core_device_free_device(device);
                     ezlopi_free(__FUNCTION__, dimmable_bulb_arg);
                 }

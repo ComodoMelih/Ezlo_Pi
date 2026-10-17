@@ -341,8 +341,24 @@ static ezlopi_error_t __prepare(void *arg)
                     {
                         __prepare_humidity_item_properties(item_humdity, prep_arg->cjson_device);
                         value_ptr->humidity = 65536.0f;
-                        item_temperature->is_user_arg_unique = false;
-                        item_humdity->user_arg = (void *)value_ptr; // affected if 'value_pts' is already freed?
+                        item_humdity->user_arg = (void *)value_ptr;
+                        /* The left-hand side here used to be item_temperature,
+                        ** which did two things wrong. It cleared the only owner
+                        ** of value_ptr while leaving this item at its memset
+                        ** default of false, so on the normal path -- both items
+                        ** present -- nothing freed value_ptr at all. And it
+                        ** dereferenced item_temperature, which the block above
+                        ** has already tested for NULL, from a place where that
+                        ** test no longer holds.
+                        **
+                        ** The trailing question in the comment that used to sit
+                        ** on this line ("affected if value_ptr is already
+                        ** freed?") is answered by ezlopi_device_free_item(): it
+                        ** frees user_arg only for the item carrying the flag, so
+                        ** one item owns the allocation and the other borrows it.
+                        ** The two are on different devices, so the borrower must
+                        ** be the one that can be removed on its own. */
+                        item_humdity->is_user_arg_unique = (NULL == item_temperature);
                     }
                     else
                     {

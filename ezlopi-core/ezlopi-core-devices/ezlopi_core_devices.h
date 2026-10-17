@@ -108,6 +108,24 @@ extern "C"
         } interface;
 
         void *user_arg;
+
+        /* "This item owns user_arg and must free it." Not "user_arg belongs to
+         * one device" -- that reading is what produced four drivers in which
+         * one allocation was flagged as owned by every item sharing it, and
+         * ezlopi_device_free_item() walks every item in the device, so the same
+         * pointer was handed to free() two, three, five and six times.
+         *
+         * A driver that hands one allocation to N items must therefore flag
+         * exactly one of them, and the flag belongs on an item that cannot be
+         * removed while the others remain -- for a shared arg spanning a parent
+         * and its children, that means the parent's item. Flagging none is a
+         * leak; flagging more than one is a double free.
+         *
+         * tests/ci/check_user_arg_owner.py enforces the "at most one" half.
+         * ezlopi_device_free_single() additionally collapses duplicate
+         * ownership at runtime, so a driver that gets this wrong in future
+         * leaks rather than corrupting the heap -- but it still gets it wrong,
+         * and the CI check is what says so. */
         bool is_user_arg_unique;
         ezlopi_error_t (*func)(e_ezlopi_actions_t action, struct l_ezlopi_item *item, void *arg, void *user_arg);
 

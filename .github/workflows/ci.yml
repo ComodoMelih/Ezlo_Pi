@@ -193,6 +193,35 @@ jobs:
       - name: No printf "*" width or precision is given a size_t
         run: python3 tests/ci/check_printf_star_int.py
 
+      # l_ezlopi_item_t.is_user_arg_unique means "this item frees user_arg",
+      # and it is read in one place: ezlopi_device_free_item(), which recurses
+      # over every item of a device. Four drivers handed one allocation to all
+      # the items of one device and flagged every one of them -- SK6812 six,
+      # the dimmable lamp five, RGB three, BME280 two -- so removing such a
+      # device passed one pointer to free() that many times. Nothing documented
+      # the field, and its name reads as "belongs to one device", which is what
+      # SK6812's own comment said: "linked to only one device so 'TRUE'".
+      #
+      # Neither build reports it. CONFIG_EZPI_HEAP_ENABLE is unset in
+      # sdkconfig.defaults for all four targets, which makes ezlopi_free a
+      # NULL-checked free() -- a real double free; and with heap tracing on,
+      # EZPI_core_util_heap_free looks for a node with freed == 0, finds none
+      # and returns silently. So it corrupted the shipped build and hid in the
+      # instrumented one.
+      #
+      # Reaching it needs no cloud traffic: __EZPI_initialize_devices_v3 frees
+      # any device whose item fails to initialise, so a dimmable lamp on a pin
+      # the hardware refuses is enough.
+      #
+      # Verified failing, not just passing: run against the tree as committed
+      # before the fix, this check names exactly those four drivers. It also
+      # fails if ezlopi_device_free_item() stops honouring the flag (every
+      # shared arg would leak, silently) or if ezlopi_device_free_single()
+      # stops collapsing duplicate ownership (which is what keeps a future
+      # miscount to a leak rather than heap corruption).
+      - name: No item user_arg has two owners
+        run: python3 tests/ci/check_user_arg_owner.py
+
       # Eight lines across seven files printed a credential: the local API key
       # twice, the Wi-Fi PSK twice, the cloud provisioning token, the device's
       # SSL private key, and two whole request-body dumps -- one of which

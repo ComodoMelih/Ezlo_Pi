@@ -237,8 +237,17 @@ static ezlopi_error_t __prepare(void *arg)
                     if (joystick_x_item)
                     {
                         joystick_x_item->cloud_properties.item_id = user_data->sensor_0020_joystick_item_ids[JOYSTICK_ITEM_ID_X];
-                        joystick_x_item->is_user_arg_unique = true; // allow to clear in 'parent_device->item_x'
 
+                        /* Ownership of user_data is decided by
+                        ** __setup_item_cloud_properties below, which keys off
+                        ** the item_id assigned on the line above and is the one
+                        ** place the true/false/false split across x, y and the
+                        ** switch is made. A second "is_user_arg_unique = true"
+                        ** used to sit here; it named the same item, so it was
+                        ** redundant rather than wrong, but two owner assignments
+                        ** in one driver is the shape of the double free that
+                        ** check_user_arg_owner.py exists to catch, and this one
+                        ** carried no information the helper did not. */
                         __setup_item_cloud_properties(joystick_x_item, user_data);
                         __setup_item_interface_properties(joystick_x_item, cj_device);
                     }

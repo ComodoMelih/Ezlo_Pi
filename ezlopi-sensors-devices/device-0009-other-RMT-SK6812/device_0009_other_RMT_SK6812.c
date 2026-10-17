@@ -447,12 +447,19 @@ static ezlopi_error_t __prepare(void *arg)
 
                 if (dimmer_args->switch_item && dimmer_args->dimmer_item && dimmer_args->dimmer_up_item && dimmer_args->dimmer_down_item && dimmer_args->dimmer_stop_item && dimmer_args->rgb_color_item)
                 {
-                    dimmer_args->rgb_color_item->is_user_arg_unique = true; /*linked to only one device so 'TRUE'*/
-                    dimmer_args->dimmer_item->is_user_arg_unique = true;
-                    dimmer_args->dimmer_up_item->is_user_arg_unique = true;
-                    dimmer_args->dimmer_down_item->is_user_arg_unique = true;
-                    dimmer_args->dimmer_stop_item->is_user_arg_unique = true;
-                    dimmer_args->switch_item->is_user_arg_unique = true;
+                    /* All six items share the one dimmer_args allocation, so
+                    ** exactly one of them may be flagged. is_user_arg_unique
+                    ** does not mean "this arg belongs to one device" -- it is
+                    ** read by ezlopi_device_free_item() as "free user_arg when
+                    ** freeing this item", and that function walks every item in
+                    ** the device. Flagging all six asked for the same pointer to
+                    ** be freed six times. */
+                    dimmer_args->rgb_color_item->is_user_arg_unique = true;
+                    dimmer_args->dimmer_item->is_user_arg_unique = false;
+                    dimmer_args->dimmer_up_item->is_user_arg_unique = false;
+                    dimmer_args->dimmer_down_item->is_user_arg_unique = false;
+                    dimmer_args->dimmer_stop_item->is_user_arg_unique = false;
+                    dimmer_args->switch_item->is_user_arg_unique = false;
 
                     dimmer_args->rgb_color_item->user_arg = dimmer_args;
                     dimmer_args->dimmer_item->user_arg = dimmer_args;
