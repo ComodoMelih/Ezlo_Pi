@@ -225,13 +225,52 @@ static void __EZPI_initialize_devices_v3(void)
             }
             else
             {
-                TRACE_E("Function is not defined!");
+                /* The (unsigned) casts are not redundant, even though most of
+                ** this tree prints a uint32_t with a bare %x. uint32_t is
+                ** `unsigned int` on xtensa-esp32-elf-gcc and `unsigned long` on
+                ** riscv32-esp-elf-gcc (probed on both), so %x is a mismatch on
+                ** esp32c3 -- and esp32c3 is the one target that cannot report
+                ** it, because components/esp32c3/project_include.cmake appends
+                ** -Wno-format to COMPILE_OPTIONS for the whole build while the
+                ** three xtensa targets have no such file. Both widths are 32
+                ** bits so the bare form happens to work; the cast means it does
+                ** not have to. */
+                TRACE_E("device '%s' [0x%x] item '%s' [0x%x]: no action function; item left uninitialised",
+                        curr_device->cloud_properties.device_name,
+                        (unsigned)curr_device->cloud_properties.device_id,
+                        (NULL != curr_item->cloud_properties.item_name)
+                            ? curr_item->cloud_properties.item_name
+                            : "<unnamed>",
+                        (unsigned)curr_item->cloud_properties.item_id);
             }
             curr_item = curr_item->next;
         }
         // TRACE_D("ret = %d", device_init_ret);
         if (0 > device_init_ret)
         {
+            /* The device is about to be dropped, and nothing used to say so.
+            ** Not quite silently: EZPI_core_device_free_device() prints a bare
+            ** device id, at one of three severities depending on where in the
+            ** list the device sits, and prints the same line when a device is
+            ** removed for any other reason. So the id appeared and the *reason*
+            ** did not, while the driver logged the reason in its own words with
+            ** no id on it. For anyone holding the board the two halves never
+            ** met, and a device dropped here is indistinguishable from a
+            ** configuration that was never stored.
+            **
+            ** curr_item is the item that failed rather than NULL, because the
+            ** loop above `break`s on failure and only runs off the end on
+            ** success. The items before it in the list were already initialised
+            ** and are NOT undone here -- see Known gaps in CHANGELOG.md. */
+            TRACE_E("device '%s' [0x%x] dropped: item '%s' [0x%x] failed to initialise (ret=%d)",
+                    curr_device->cloud_properties.device_name,
+                    (unsigned)curr_device->cloud_properties.device_id,
+                    ((NULL != curr_item) && (NULL != curr_item->cloud_properties.item_name))
+                        ? curr_item->cloud_properties.item_name
+                        : "<unnamed>",
+                    (NULL != curr_item) ? (unsigned)curr_item->cloud_properties.item_id : 0u,
+                    device_init_ret);
+
             device_init_ret = 0;
             l_ezlopi_device_t *device_to_free = curr_device;
 

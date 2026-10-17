@@ -2489,6 +2489,76 @@ targets.
   pins of a configured I²C or SPI bus are still unprotected, and those depend on
   `sdkconfig` rather than on efuse.
 
+- **A device that fails to initialise no longer disappears without saying so.**
+  `__EZPI_initialize_devices_v3()` walks the prepared device list, calls each
+  item's `EZLOPI_ACTION_INITIALIZE`, and on a negative return unlinks and frees
+  the whole device
+  ([`ezlopi_core_ezlopi.c`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c)).
+  Nothing on that path said a device had been dropped, or why.
+
+  **It is worth being exact about this, because the first draft of this entry
+  said "the free was silent" and that is not true.** The free path does print —
+  `EZPI_core_device_free_device()` emits one of `TRACE_W("PARENT_TREE_ID: …")`,
+  `TRACE_D("Head Device-ID: …")` or `TRACE_E("To free Device-ID: …")` depending
+  on where in the list the device sits, and `ezlopi_device_free_single()` adds
+  `TRACE_E("free single Device-ID: …")`. What those lines carry is a bare
+  device id at three different severities. They do not carry the device's
+  name, they do not carry a reason, and they are the same lines that print when
+  a device is removed for any other reason, so seeing one does not tell you an
+  initialisation failed. Meanwhile the driver logs whatever upset it in its own
+  words — "I2C init failed", or nothing at all — with no device id on it.
+
+  For anyone holding the board those two halves never meet. A device configured
+  through the app, stored correctly, parsed correctly and then dropped at
+  initialisation looks the same as one that was never stored: the thing you are
+  looking for is absent, and nothing names it. That is close to the worst
+  failure mode a plug-and-play product can have, because the only move it leaves
+  is to configure it again.
+
+  There are now two messages, and between them they name the device, the item
+  and the cause:
+
+  | situation | message |
+  |---|---|
+  | an item returned `< 0` | `device '<name>' [0x<id>] dropped: item '<name>' [0x<id>] failed to initialise (ret=<n>)` |
+  | an item has no `func` | `device '<name>' [0x<id>] item '<name>' [0x<id>]: no action function; item left uninitialised` |
+
+  The second replaces `TRACE_E("Function is not defined!")`, which was true and
+  unactionable. Neither changes behaviour: the device is dropped in exactly the
+  same cases as before.
+
+  `curr_item` is the failing item rather than `NULL` at the point the message is
+  built, because the inner loop `break`s on failure and only runs off the end on
+  success. It is still NULL-guarded, since reading a pointer because of a
+  control-flow argument is how the NULL-dereference entries elsewhere in this
+  file came about.
+
+  **The `(unsigned)` casts on the two id arguments are not redundant**, though
+  they look it next to the `TRACE_S` directly above them that prints the same
+  `uint32_t` with a bare `%x`. `uint32_t` is `unsigned int` on
+  `xtensa-esp32-elf-gcc` and `unsigned long` on `riscv32-esp-elf-gcc`, so the
+  bare form is a mismatch on esp32c3 — and esp32c3 is the one target that cannot
+  report it, because IDF appends `-Wno-format` to the whole build there. Both
+  are 32 bits wide so the bare form happens to work; the cast means it does not
+  have to. The measurement behind that, and why it makes a clean esp32c3 log
+  weaker evidence than it appears, is under *Format strings*.
+
+  Verified on all four targets: `rc=0`, no warnings in the file, no format
+  warnings, and the image grows on every one of them.
+
+  | target | before | after | delta |
+  |---|---|---|---|
+  | esp32 | 1683616 | 1683824 | +208 |
+  | esp32s2 | 1373952 | 1374160 | +208 |
+  | esp32s3 | 1698464 | 1698688 | +224 |
+  | esp32c3 | 1756848 | 1757088 | +240 |
+
+  The size has to move, because a log line that is not linked is a log line that
+  does not exist, and an unchanged size is how two probes earlier in this work
+  reported success while proving nothing. What is **not** verified is the text
+  appearing on a real console: that needs a device that fails to initialise on
+  hardware, and nothing here has been flashed.
+
 - **A device configuration that will not parse no longer bricks the hub.**
   `EZPI_device_prepare()` reads the stored configuration once per boot, and when
   the parse failed it stamped this chip's name into the config, wrote it back
@@ -4107,6 +4177,40 @@ enumerators — so the live half of this component was never affected.
   wider, which is a 64-bit host build — and that is exactly how the two sites
   in `ezlopi_core_cjson_macros.c` were found earlier. The other sixteen were
   found by nothing.
+
+  **"0 format warnings on all four targets" is sound evidence on three of them
+  and no evidence at all on the fourth.** That sentence above stays because it
+  is what the logs say, but on esp32c3 a clean log is not the same as a clean
+  file, and this was measured rather than reasoned:
+
+  | target | deliberate `TRACE_E("%s", 12345)` | why |
+  |---|---|---|
+  | esp32 | **caught**, `error: format '%s' expects argument of type 'char *' … [-Werror=format=]` | `-Wall` implies `-Wformat`, `-Werror=all` promotes it |
+  | esp32c3 | **not caught**, rc=0, 0 diagnostics | `-Wno-format` is on the command line |
+
+  `-Wno-format` is not ours and is not in any `CMakeLists.txt` in this
+  repository. It comes from
+  `$IDF_PATH/components/esp32c3/project_include.cmake`, whose entire contents
+  are three flags — `-Wno-error=format=`, `-nostartfiles`, `-Wno-format` —
+  appended with `idf_build_set_property(COMPILE_OPTIONS … APPEND)`. Because that
+  is a *build* property rather than a component one, it lands on every component
+  in the project and not just on `esp32c3`: **1444 of the 1445 translation
+  units** in an esp32c3 build carry it. There is no equivalent file under
+  `components/esp32`, `components/esp32s2` or `components/esp32s3`, so the three
+  xtensa targets are checked normally.
+
+  Which matters more than it looks, because esp32c3 is the **only** target whose
+  `uint32_t` differs. Probed with `_Generic` on both compilers:
+  `__UINT32_TYPE__` and `uint32_t` are `unsigned int` on
+  `xtensa-esp32-elf-gcc` and `unsigned long` on `riscv32-esp-elf-gcc`. So the
+  558 `%d`-against-`uint32_t` `TRACE_*` sites above are invisible for two
+  *different* reasons: on xtensa `%d` against `unsigned int` is a pure
+  signedness mismatch, which GCC reports only under `-Wformat-signedness`, and
+  on riscv32 — where it is a genuine type mismatch and would be reported — the
+  diagnostic is switched off. IDF presumably switched it off for exactly that
+  reason. Either way, the compiler is not the thing protecting format strings in
+  this tree on any target; `check_trace_format_attr.py` keeping the attribute
+  alive is, and on esp32c3 even the attribute has nothing to act on.
 
   So **no device has ever misprinted any of these**, and they will not until
   someone builds for a 64-bit target. What they do break today is host
@@ -5729,8 +5833,10 @@ Listed because a changelog that only mentions what was finished is misleading.
   lines. The type confusion is equally real on all four targets; only one
   toolchain is in a position to say so.
 
-  Beyond those sixteen, one real hole is left, and a second one this entry used
-  to claim turned out not to exist:
+  Beyond those sixteen, three real holes are left, and a fourth one this entry
+  used to claim turned out not to exist. The third was found while costing out
+  the second and belongs here rather than in its own entry, because it is the
+  same list walk from the other end:
 
   - **Pins that are "valid" but already in use by the system — the half that
     depends on `sdkconfig` rather than on efuse.** On esp32
@@ -5775,6 +5881,68 @@ Listed because a changelog that only mentions what was finished is misleading.
     *different* SDA/SCL — is no longer part of this gap; it is caught in the HAL
     now, and investigating it turned up the reason the second sensor on a bus
     never worked at all (see *I²C sensor bus* above).
+
+    **That narrower check was costed out rather than left vague, and it is a
+    project rather than an addition.** The flash-pin fix above took one function
+    because the question had a chip-wide answer and one place to ask it. This one
+    has neither, and the measurements say so:
+
+    | what a mode check needs | what is actually there |
+    |---|---|
+    | one place that sees every pin claim | **38 `gpio_config()` call lines in 30 files** — 37 in `ezlopi-sensors-devices`, 1 in `ezlopi_core_ethernet.c`, **0 in the HAL** |
+    | a GPIO HAL to put it in | `ezlopi_hal_gpio.c`'s two `GPIO_IS_VALID_*` tests are commented out at lines 76 and 96, and the init body with them |
+    | every claimed pin visible in `item->interface` | **16 pin reads in 5 drivers** store the pin in a driver-private struct instead |
+    | a mode vocabulary | this part exists: `e_ezlopi_device_interface_type_t` has 10 values and `l_ezlopi_item_t` carries `interface_type` beside the union |
+
+    The third row is the one that decides it. A check at the top of
+    `__EZPI_initialize_devices_v3()` would be the clean design — every device is
+    *prepared* before any is *initialised*, so the whole list and its
+    `interface_type` values are in memory before the first `gpio_config()`, and
+    no driver cooperation is needed. But TCS230 (6 pins), pms5003 (4), RGB (3),
+    HX711 (2) and R307's interrupt pin (1) put theirs in `user_arg` structs, so
+    such a check would be **blind to 16 real claims while looking complete** —
+    and a conflict checker with holes in it is worse than none, because it
+    licenses the belief that the configuration was checked. Those reads are all
+    bounded, since they go through the accessor like everything else; it is their
+    *destination* that is private, not their value.
+
+    Two further traps, both found by looking rather than by reasoning:
+
+    - **The sentinels have to be excluded first or everything collides.** Most
+      devices leave unused pins at `-1` or `255`, so a naive pass over the list
+      would report every device as conflicting with every other on pin 255. This
+      is the four-spellings-of-absent problem again, and the answer is the same
+      one the flash-pin check used — test the pin only after it is known to be a
+      real index.
+    - **1-Wire is a bus in the protocol and not in this tree.** Two DS18B20 on
+      one pin is the textbook use of 1-Wire, which would make it look like
+      another designed-in sharing case. It is not: the driver defines
+      `DS18B20_ROM_COMMAND_MATCH_ROM` and `…_SEARCH_ROM` and uses **neither** —
+      the only ROM command it ever issues is `SKIP_ROM`, at
+      `sensor_0030_oneWire_DS18B20.c:277` and `:343`, which addresses the whole
+      bus at once and therefore only works with exactly one device on it. So two
+      onewire items on one pin *is* a conflict here, for a protocol reason rather
+      than a mode reason.
+
+    Until this is done, the mitigation is that the consequence is at least
+    visible: a device dropped at initialisation now says which device, which
+    item and why (see *A device that fails to initialise no longer disappears
+    without saying so* above). That does not detect the conflict, it just stops
+    the result from being a silent absence.
+
+  - **Items that were already initialised are not undone when their device is
+    dropped.** `__EZPI_initialize_devices_v3()` initialises a device's items in
+    order and `break`s on the first failure, then frees the device. The items
+    *before* the failing one have already run their
+    `EZLOPI_ACTION_INITIALIZE` — `gpio_config()`, a LEDC channel, a UART — and
+    nothing reverses that, so the pins stay configured with no device owning
+    them. No deinit action is dispatched on this path.
+
+    This is not a leak of memory; `EZPI_core_device_free_device()` handles the
+    structures. It is a leak of *hardware state*, and the reason it has not
+    caused visible trouble is that an unowned pin left as an input or a
+    driven output is inert until something else claims it — which is the
+    mode-conflict gap above, from the other direction.
 
   Two things a future attempt needs, both of which looked expensive and are now
   paid for:
