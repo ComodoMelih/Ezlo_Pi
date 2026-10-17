@@ -110,6 +110,16 @@ factory-info one is found both ways. A header-aware scan of all 159 first-party
 translation units reports zero findings of this class anywhere. So the
 compilation database buys no recall; it only buys a dependency on a build.
 
+No --platform is passed either, and that was tested rather than assumed for
+the same reason. cppcheck defaults to the host model, which is wrong for this
+tree -- on a 64-bit host uint64_t is unsigned long, and that alone invents a
+bogus %llu finding elsewhere in the tree. It makes no difference to this
+class: under --platform=unix32 the two recall subjects still score 0 and 1,
+the same-block fixture is still reported, the sibling-block one is still
+missed, and the tree still reports none. Worth knowing before anyone adds the
+flag expecting it to help here -- it belongs on a format-string sweep, not on
+this check.
+
 WHAT IT IS ACTUALLY BLIND TO
 
 A guard sitting in a SIBLING block of the one that holds the dereference.

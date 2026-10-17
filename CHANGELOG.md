@@ -6774,6 +6774,84 @@ Listed because a changelog that only mentions what was finished is misleading.
   alone is called from 116 places, and most of those getters return a freshly
   allocated string that is `NULL` on four separate paths.
 
+- **The sweep's other 18 findings were read and deliberately not acted on, and
+  one more category appears only once the platform model is right.** The sweep
+  that answered the include-path question above ran over all 159 first-party
+  translation units and reported 21 findings, every one of them outside the
+  null class. Two were real and are fixed — the unbounded `sscanf` conversions
+  (`invalidscanf`) and the dead `NULL` assignment in the websocket kill
+  (`uselessAssignmentPtrArg`), both above. A second
+  `uselessAssignmentPtrArg`, at
+  [`ezlopi_core_factory_info.c:140`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L135),
+  is recorded with that fix as unobservable across its 39 call sites. The
+  remaining 18 break into three groups, and none is worth a change:
+
+  Sixteen `literalWithCharPtrCompare`, all of them
+  [`EZPI_STRNCMP_IF_EQUAL`](ezlopi-cloud/ezlopi-cloud-constants/ezlopi_cloud_constants.h#L73)
+  invoked with a string literal as one of its two arguments — four in
+  `scenes_then_methods.c`, eight in `scenes_operators.c`, three in
+  `scenes_when_methods.c`, one in `scenes_when_methods_helper_functions.c`.
+  The macro opens with `(NULL == STR1) ? false : (NULL == STR2) ? false : ...`,
+  so a literal argument expands to `NULL == "length"`, which cppcheck reads as
+  a string comparison written with `==`. It is a tautology, not a mistake: the
+  guard exists for the call sites that pass a variable, and the arm it creates
+  for a literal is constant-folded. Removing it would mean either dropping the
+  NULL guard the variable call sites rely on, or keeping two macros that differ
+  only in whether they trust their arguments. Suppressing it would mean sixteen
+  inline comments on correct code.
+
+  One `comparePointers` at
+  [`ezlopi_service_ws_server.c:554`](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L554),
+  `config_ui_html_end - config_ui_html_start`. cppcheck is right about the
+  language and wrong about the program: those are two separately declared
+  `extern const uint8_t[]` objects, so by ISO C the subtraction is undefined,
+  but they are the linker-provided bounds of one embedded blob and ESP-IDF
+  offers no other way to ask how long it is. There is no rewrite that keeps the
+  idiom and loses the finding. The arithmetic was checked rather than assumed
+  while reading it: the component embeds the page with `EMBED_TXTFILES`, which
+  appends a NUL, so the `- 1` is load-bearing, and `config_ui.html` is 36554
+  bytes — exactly the length the handler computes.
+
+  One `invalidPrintfArgType_uint` at
+  [`ezlopi_core_mdns.c:226`](ezlopi-core/ezlopi-core-mdns/ezlopi_core_mdns.c#L226),
+  `"%llu"` given `id_val`, reported as needing `unsigned long long` while the
+  argument is `unsigned long`. That one is the sweep's own fault, not the
+  code's: cppcheck was left on its default platform, which here is a 64-bit
+  host, and on a 64-bit host `uint64_t` *is* `unsigned long`. Re-run with
+  `--platform=unix32` the finding disappears, and so does it on `win32A` and
+  `avr8`, while `native` and `unix64` both report it. The targets agree with
+  the source: a `_Static_assert` on
+  `__builtin_types_compatible_p(uint64_t, unsigned long long)` compiles clean
+  under both `xtensa-esp32-elf-gcc` and `riscv32-esp-elf-gcc`, and
+  `EZPI_core_factory_info_v3_get_id()` is declared `unsigned long long`. So
+  `%llu` is right for every target this builds for.
+
+  That artefact is worth more than the finding, because it means the sweep as
+  run had a systematic bias, and the fix was to re-run it under
+  `--platform=unix32`. Doing so changes nothing for the null class — the two
+  recall subjects still score 0 and 1, the same-block fixture is still found,
+  the sibling-block one still missed, and the tree still reports none, so the
+  conclusion above is platform-independent — but it does surface a category
+  the 64-bit run never showed: six `invalidPrintfArgType_sint`, all in
+  [`ezlopi_core_heap.c`](ezlopi-core/ezlopi-core-heap/ezlopi_core_heap.c#L214)
+  at lines 214, 215, 219, 223 and 231 (twice), each a `%d` given a `uint32_t`
+  — a node counter and a `line_number`. Left alone twice over. The widths
+  match on a 32-bit target, so the only possible effect is a value above
+  `INT_MAX` printing negative, which a line number and a list index do not
+  reach. And the code is not in any image: the whole file body sits inside
+  `#ifdef CONFIG_EZPI_HEAP_ENABLE`, which is `default n` in
+  `ezlopi-main/Kconfig.projbuild` and explicitly `is not set` in all four
+  committed `sdkconfig.defaults.*`, as is its one caller at
+  `ezlopi_main.c:296`. It is an opt-in leak tracer for a developer who turns
+  it on deliberately.
+
+  None of these categories is in CI. The committed check matches
+  `nullPointer*` only, so they do not gate anything today, and adding
+  suppressions for findings no gate reads would be noise. The platform model
+  is the part worth carrying forward: any future sweep should pass
+  `--platform=unix32`, or it will keep inventing `%llu` findings and hiding
+  `%d` ones.
+
 - **`EZPI_hal_i2c_master_deinit()` is dead code with two defects in it, and was
   left alone deliberately.** It is declared in
   [`ezlopi_hal_i2c_master.h`](ezlopi-hal/ezlopi-hal-i2c/ezlopi_hal_i2c_master.h#L100)
