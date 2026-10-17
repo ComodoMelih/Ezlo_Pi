@@ -1239,9 +1239,19 @@ void EZPI_core_modes_init(void)
 
         if (cj_custom_modes)
         {
-            _is_custom_mode_ok = 1;
             sg_custom_modes = EZPI_core_modes_cjson_parse_modes(cj_custom_modes);
-            EZPI_core_modes_set_current_house_mode(EZPI_core_modes_get_house_mode_by_id(sg_custom_modes->current_mode_id));
+
+            /* The parse returns NULL if its own allocation failed, and
+             * `_is_custom_mode_ok` used to be set before the call -- so that
+             * case both dereferenced NULL here and skipped the default-mode
+             * fallback below, which exists for exactly this situation. The
+             * flag is now set only once there is something to report. */
+            if (sg_custom_modes)
+            {
+                _is_custom_mode_ok = 1;
+                EZPI_core_modes_set_current_house_mode(EZPI_core_modes_get_house_mode_by_id(sg_custom_modes->current_mode_id));
+            }
+
             cJSON_Delete(__func__, cj_custom_modes);
         }
     }

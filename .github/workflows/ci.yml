@@ -371,6 +371,31 @@ jobs:
           sudo apt-get install -y -qq cppcheck
           python3 tests/ci/check_null_deref.py
 
+      # The same class as the check above, by a different route, because that
+      # one's recall is 1 of 2 on the known cases and the shape it misses is
+      # structural rather than a tuning problem: a guard sitting in a sibling
+      # block of the one holding the dereference. cppcheck does not report it
+      # with or without the real build's 244 include paths, at any check level.
+      #
+      # This scanner gets both, and found a live one neither had: in
+      # EZPI_core_modes_init(), sg_custom_modes was dereferenced on the line
+      # after the parse that can return NULL, and the flag saying "custom modes
+      # loaded" was set before the call -- so the default-mode fallback written
+      # for that exact case was skipped too.
+      #
+      # It is line-oriented, so it is wrong in both directions on code it does
+      # not parse. The first tree run gave 41 findings; all were read, 40 were
+      # false in five classes, and each is now handled and pinned by a fixture
+      # -- including assertion macros like PING_CHECK(ep, ...), which alone
+      # accounted for 26. Sixteen fixtures run before the tree is scanned, half
+      # of them correct code that must stay silent and half the same shape
+      # written the wrong way round, so a suppression broad enough to kill the
+      # noise is caught killing the signal. One class is vouched for inline
+      # instead of solved, where data flow rather than a NULL test does the
+      # guarding; the reason is required and a bare marker does not suppress.
+      - name: No pointer dereferenced above its own NULL test
+        run: python3 tests/ci/check_check_after_use.py
+
   firmware:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest

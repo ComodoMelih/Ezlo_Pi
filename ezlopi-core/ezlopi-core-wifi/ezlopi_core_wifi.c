@@ -778,7 +778,13 @@ static void __event_wifi_scan_done(void *event_data)
         {
             /* Also previously fatal, by the same route: the unchecked pointer
              * went straight into the IDF call. Out of memory is a reason to
-             * report nothing, not a reason to restart. */
+             * report nothing, not a reason to restart.
+             *
+             * check-after-use: records zeroing `found` here is what guards
+             * the dereferences below -- they are all inside
+             * `for (i = 0; i < found; i++)`, which cannot iterate once this
+             * branch has run, so the later `NULL != records` test is a free
+             * rather than a missing guard. */
             TRACE_E("scan-done: no memory for %u AP record(s)", (unsigned)found);
             found = 0;
         }

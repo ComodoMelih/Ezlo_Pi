@@ -4706,6 +4706,128 @@ enumerators — so the live half of this component was never affected.
   at a line the fix never went near — `ezlopi_service_uart.c:443` against an
   edit at `:1508`. A count over a file is the wrong unit.
 
+### A 35th null dereference, and the fallback written for it — [bug]
+
+- **`EZPI_core_modes_init()` dereferenced the parse result one line after the
+  parse, and set the flag meaning "it worked" one line before it.** Stored
+  house modes are read from NVS at boot, parsed, and then — as the code stood:
+
+  ```c
+  if (cj_custom_modes)
+  {
+      _is_custom_mode_ok = 1;
+      sg_custom_modes = EZPI_core_modes_cjson_parse_modes(cj_custom_modes);
+      EZPI_core_modes_set_current_house_mode(EZPI_core_modes_get_house_mode_by_id(sg_custom_modes->current_mode_id));
+      cJSON_Delete(__func__, cj_custom_modes);
+  }
+  ```
+
+  That the callee can return `NULL` was checked, not assumed:
+  `EZPI_core_modes_cjson_parse_modes()` allocates at
+  [`ezlopi_core_modes_cjson.c:158`](ezlopi-core/ezlopi-core-modes/ezlopi_core_modes_cjson.c#L158),
+  does every bit of its work inside `if (parsed_mode)` at
+  [`:159`](ezlopi-core/ezlopi-core-modes/ezlopi_core_modes_cjson.c#L159), and
+  has one exit, `return parsed_mode;` at
+  [`:452`](ezlopi-core/ezlopi-core-modes/ezlopi_core_modes_cjson.c#L452) — so
+  an allocation failure returns `NULL` and the next line reads through it.
+
+  The flag is the worse half. Because `_is_custom_mode_ok = 1` was set *before*
+  the call, the same failure also made
+  [`:1259`](ezlopi-core/ezlopi-core-modes/ezlopi_core_modes.c#L1259) —
+  `if (0 == _is_custom_mode_ok) { EZPI_core_default_init(); … }`, the
+  default-mode fallback — unreachable in exactly the case it exists for. Had
+  the dereference somehow been survived, the device would have come up with no
+  modes at all. The flag is now set only once there is something to report, so
+  the failure routes into the fallback; that the fallback is itself safe was
+  also checked rather than assumed —
+  [`EZPI_core_default_mode_get()`](ezlopi-core/ezlopi-core-modes/ezlopi_core_default_modes.c#L138)
+  returns `&sg_default_mode`, the address of a static, and cannot be `NULL`.
+
+  Marked **[bug]** rather than **[sec]**, and the trigger is genuinely
+  unlikely: it needs the `sizeof(s_ezlopi_modes_t)` allocation to fail during
+  boot, which is when the heap is at its emptiest. What makes it worth an entry
+  is less the defect than where it was hiding. The 34 above were closed with a
+  check whose recall was known to be 1 of 2, recorded as such, and left there —
+  this is what the missing half looks like.
+
+  Found by [`tests/ci/check_check_after_use.py`](tests/ci/check_check_after_use.py),
+  the nineteenth check and the sixteenth the `hygiene` job invokes. It covers
+  the same class as `check_null_deref.py` by a different route, because the
+  shape cppcheck misses is structural rather than a matter of tuning: a guard
+  sitting in a *sibling* block of the one holding the dereference. Neither the
+  real build's 244 include paths, nor `--enable=all --check-level=exhaustive`,
+  nor the platform model changes that.
+
+  The scanner grew from a prototype written earlier in this branch and recorded
+  then as unverified, which turned out to be right in both directions —
+  measured against the two known check-after-use defects it **missed the one it
+  had been written for**, and it produced three findings against an
+  already-fixed file. Both were worth chasing rather than tuning around:
+
+  - The miss had nothing to do with sibling blocks. Instrumenting the scanner
+    rather than re-reading it showed the assignment being registered under the
+    wrong name: the optional leading type group, there to match the `char *` in
+    `char *p = f();`, required no separator before the name, and being greedy
+    it took as much of a bare assignment's own name as it could. Measured on
+    the provisioning defect's own line, `g_provisioning_info_base64 = f();`
+    registered as an assignment to **`e64`** — the group took everything up to
+    the last character a name could start with. Every later dereference of the
+    real identifier was then invisible. The other known case was found only
+    because it is written `char *ret = …`, a declaration, where the group has a
+    real type to match and leaves the name alone.
+  - The largest false class is correct short-circuits —
+    `if (p && strstr(p, …))`, `(NULL != s) && (s[0] …)`,
+    `(NULL == s) || strcmp(s, k)`, and the same thing written as a ternary or
+    a call argument rather than an `if`. Which polarity guards depends on the
+    operator and the order decides it, since `if (strlen(p) && p)` *is* a
+    defect. Handling this is not a detail: switching the rule off on the
+    current tree brings back **225** findings, every one of them correct code.
+    The first run showed only a handful, because the name-mangling bug above
+    was hiding most assignments at the time — which is why a first-run triage
+    total is no measure of a class's size.
+  - Two narrower ones. A dereferencing call's argument list was read past its
+    closing paren, so `strlen(buf), now` looked like `now` being handed to
+    `strlen`. And assertion macros that `goto` on failure are early-exit
+    guards: the one in this tree,
+    [`PING_CHECK`](ezlopi-core/ezlopi-core-ping/ezlopi-ping/ping_sock.c#L80),
+    accounts for 26 findings on its own. Those are detected by shape rather
+    than by name — the file's own `#define`s are scanned for a body that tests
+    `!first_arg` and then jumps — so the technique generalises instead of
+    hard-coding one macro.
+
+  Generalising the short-circuit rule once silenced a *genuine* defect in the
+  fixtures, which is the failure mode a check like this is supposed to be
+  protected against. One function was answering two different questions: which
+  pointer a condition proves non-`NULL` for the block it opens (`&&` conjuncts
+  only — `if (A || B)` proves nothing inside the block) and whether the author
+  tested the pointer at all anywhere in the condition, which is what makes the
+  later-guard anchor precise. They are now separate functions.
+
+  Recall after six fixes is **2 of 2** on the known cases, with both of the
+  fixed files silent, and the tree is at **0 findings over 159 files**. All 41
+  findings from the first run were read individually rather than filtered:
+  one real defect and 40 false, every one of them in a class named above or
+  the one below. That last class is vouched for inline rather than solved, in
+  [`ezlopi_core_wifi.c`](ezlopi-core/ezlopi-core-wifi/ezlopi_core_wifi.c#L783),
+  where `found = 0` in the failure branch is what makes the loop below
+  unenterable — data flow, which no line-oriented scanner can see. The
+  suppression comment must name the pointer *and* give a reason; the stated
+  cost is that those six dereferences are no longer watched by this check.
+
+  Evidence that a green run means something, all of it re-measured against the
+  file that CI actually runs rather than the prototype it was copied from:
+  it exits 1 on the pre-fix `ezlopi_core_modes.c` extracted from git and 0 on
+  the fixed one; it reports 6 findings on the pre-suppression `wifi.c` and 0
+  after; stripping only the *reason* out of that suppression brings all 6 back;
+  and a copy with the scanner's `return findings` replaced by `return []`
+  exits 1 with `SELF-TEST FAILED` instead of passing silently. Sixteen fixtures
+  run before the tree is scanned — eight correct shapes that must stay silent,
+  each paired with the same shape written the wrong way round, which must
+  fire. One of those fixtures immediately caught a hole in the escape hatch:
+  in `/* check-after-use: p */` the comment's own `*/` satisfied the
+  "reason is mandatory" pattern, so a bare marker did suppress. The reason now
+  has to contain at least three letters once `*/` is removed.
+
 ### Dead null checks — [bug]
 
 - **31 checks that compared an array's own address against NULL.** Across seven
@@ -6377,7 +6499,7 @@ enumerators — so the live half of this component was never affected.
   | Job | What it does |
   | --- | --- |
   | `host-tests` | `make -C tests/host` under ASan + UBSan |
-  | `hygiene` | the static checks, 15 of them, each a `tests/ci/check_*.py` named in the job rather than a glob — so a check that exists and is never invoked shows up as an orphan. Started as five subjects (no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes) and every entry added since is described where its fix is, not here, so that this row cannot drift out of date again |
+  | `hygiene` | the static checks, 16 of them, each a `tests/ci/check_*.py` named in the job rather than a glob — so a check that exists and is never invoked shows up as an orphan. Started as five subjects (no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes) and every entry added since is described where its fix is, not here, so that this row cannot drift out of date again |
   | `firmware` | builds all four targets in `espressif/idf:v4.4.6`, asserts the generated config was actually inherited from the per-target defaults, merges and verifies a flashable image, uploads `bin`/`elf`/`map`/`sdkconfig` |
   | `firmware-outdir` | builds esp32 with `idf.py -B /tmp/...`, outside the workspace, and asserts the image landed there and that **no `./build` was created at all** — so the tree cannot regress to a build directory it only builds in by default |
   | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled, that the pinned header is still the default CA source, and that `ca_mios` reached the ELF |
@@ -6689,11 +6811,15 @@ Listed because a changelog that only mentions what was finished is misleading.
   the arm is a small change; confirming the LED timing on an esp32s2 board is the
   part that is missing, so the arm is not written on guesswork.
 
-- **The check-after-use analyser is in CI now, but its recall is 1 of 2 on the
-  cases we can measure against.** `cppcheck` found 33 instances of the class
-  and they are fixed (see *Null dereferences* above), so this gap is much
-  smaller than it was — but it is not closed, and the size of the remainder is
-  unknown rather than small.
+- **`cppcheck`'s recall on this class is 1 of 2 on the cases we can measure
+  against; a second check now covers the half it misses, and combined recall is
+  2 of 2 — but the size of the remainder is still unknown rather than small.**
+  `cppcheck` found 33 instances of the class and they are fixed (see *Null
+  dereferences* above). The shape it is blind to is diagnosed at the foot of
+  this entry, and the check written for it is
+  [`tests/ci/check_check_after_use.py`](tests/ci/check_check_after_use.py),
+  described in *A 35th null dereference* above. Two measured checks agreeing on
+  two known cases is still two cases.
 
   What is known: of the two check-after-use defects fixed earlier in this
   branch, the analyser finds
@@ -6760,10 +6886,17 @@ Listed because a changelog that only mentions what was finished is misleading.
   block down. It is the only known instance in the tree, and the only measured
   cause of a miss.
 
-  The useful consequence is that this says what to search for by hand, which
-  "pass include paths" never did: a pointer tested in one block and used in its
-  sibling. Teaching the check that shape is the open work; `cppcheck` will not
-  do it, so it would mean a check of our own.
+  The useful consequence is that this says what to search for, which "pass
+  include paths" never did: a pointer tested in one block and used in its
+  sibling. `cppcheck` will not be taught that shape, so it meant a check of our
+  own, and that check is now written and in CI — it reports the provisioning
+  defect, stays silent on both fixed files, and brought the tree to zero
+  findings over the same 159 translation units. What it does not do is make the
+  remainder measurable: it is line-oriented, so a guard expressed through data
+  flow rather than a `NULL` test is invisible to it, and the one such site in
+  this tree is suppressed by hand with its reason stated. The honest position is
+  that two tools now agree on two known cases, and neither can bound what is
+  left.
 
   The alternatives remain worse. The compiler cannot see this class:
   `-Wnull-dereference` needs the `NULL` to be provable on a path, and here it
