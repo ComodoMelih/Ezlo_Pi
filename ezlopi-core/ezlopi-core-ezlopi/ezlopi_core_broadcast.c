@@ -238,14 +238,14 @@ l_broadcast_method_t *EZPI_core_broadcast_method_add(f_broadcast_method_t broadc
         {
             if (__method_head)
             {
-                l_broadcast_method_t *curr_node = __method_head;
+                l_broadcast_method_t *tail_node = __method_head;
 
-                while (curr_node->next)
+                while (tail_node->next)
                 {
-                    curr_node = curr_node->next;
+                    tail_node = tail_node->next;
                 }
 
-                curr_node->next = ret;
+                tail_node->next = ret;
             }
             else
             {

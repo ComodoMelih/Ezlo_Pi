@@ -135,7 +135,11 @@ static ezlopi_error_t __notify(l_ezlopi_item_t *item)
         }
         if ((pms_object->counter != 0) && (pms_object->counter <= 9))
         {
-            s_pms5003_sensor_object *pms_object = (s_pms5003_sensor_object *)item->user_arg;
+            /* Removed a redeclaration that re-read the same item->user_arg the
+            ** outer pms_object already holds. Nothing writes user_arg in
+            ** between, so it was the identical pointer -- but the inner copy
+            ** was used without the NULL check the outer had passed, so losing
+            ** it is a small improvement as well as a rename avoided. */
             pms_print_data(&pms_object->pms_data);
             EZPI_core_device_value_updated_from_device_broadcast(item);
             pms_object->counter++;

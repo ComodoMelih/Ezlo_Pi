@@ -221,7 +221,7 @@ static uint8_t gxhtc3_get_crc8(uint8_t *data, int len)
     {
         crc ^= data[i];
 
-        for (int i = 0; i < 8; i++)
+        for (int bit = 0; bit < 8; bit++)
         {
             bool xor = crc & 0x80;
             crc = crc << 1;

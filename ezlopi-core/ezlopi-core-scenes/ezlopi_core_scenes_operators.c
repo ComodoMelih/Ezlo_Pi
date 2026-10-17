@@ -1061,8 +1061,8 @@ int EZPI_scenes_operators_value_comparevalues_with_less_operations(l_fields_v2_t
                 }
                 else if (EZLOPI_VALUE_TYPE_ITEM == value_field->value_type)
                 { // 2. RHS = item_right
-                    uint32_t item_id = strtoul(value_field->field_value.u_value.value_string, NULL, 16);
-                    l_ezlopi_item_t *item_right = EZPI_core_device_get_item_by_id(item_id);
+                    uint32_t item_id_right = strtoul(value_field->field_value.u_value.value_string, NULL, 16);
+                    l_ezlopi_item_t *item_right = EZPI_core_device_get_item_by_id(item_id_right);
                     if (item_right)
                     {
                         if (__check_valuetypes(item_left->cloud_properties.value_type,

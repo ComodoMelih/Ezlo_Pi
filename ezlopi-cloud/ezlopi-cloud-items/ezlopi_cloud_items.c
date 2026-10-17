@@ -121,12 +121,12 @@ void EZPI_items_list_v3(cJSON *cj_request, cJSON *cj_response)
                                 if (cJSON_IsString(device_id))
                                 {
                                     char *device_id_str = device_id->valuestring;
-                                    uint32_t device_id = strtol(device_id_str, NULL, 16);
+                                    uint32_t device_id_num = strtol(device_id_str, NULL, 16);
 
                                     l_ezlopi_device_t *curr_device = EZPI_core_device_get_head();
                                     while (curr_device)
                                     {
-                                        if (curr_device->cloud_properties.device_id == device_id)
+                                        if (curr_device->cloud_properties.device_id == device_id_num)
                                         {
                                             l_ezlopi_item_t *curr_item = curr_device->items;
                                             while (curr_item)

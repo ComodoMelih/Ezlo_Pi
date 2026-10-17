@@ -46,7 +46,10 @@ static uint8_t moving_target_energy_ = 0;
 static uint16_t stationary_target_distance_ = 0;
 static uint8_t stationary_target_energy_ = 0;
 
-static size_t ld2410_uart_write_byte(uint8_t byte);
+/* Parameter named value, not byte: `byte` is a typedef in this component's own
+** header (ld2410_driver.h), used as a cast all through this file, and a
+** parameter of that name shadowed the type name inside the function. */
+static size_t ld2410_uart_write_byte(uint8_t value);
 static bool ld2410_read_frame_(uint8_t l_byte); // Try to read a frame from the UART
 static bool ld2410_parse_data_frame_();         // Is the current data frame valid?
 static bool ld2410_parse_command_frame_();      // Is the current command frame valid?
@@ -955,9 +958,9 @@ bool ld2410_set_gates_sensitivity_threshold(uint8_t *moving, uint8_t *stationary
     return ret;
 }
 
-static size_t ld2410_uart_write_byte(uint8_t byte)
+static size_t ld2410_uart_write_byte(uint8_t value)
 {
-    uart_write_bytes(ezlo_ld2410_uart_handle->ezlopi_uart.channel, &byte, 1); // returns true always if there is no parameter error
+    uart_write_bytes(ezlo_ld2410_uart_handle->ezlopi_uart.channel, &value, 1); // returns true always if there is no parameter error
     return 1;
 }
 

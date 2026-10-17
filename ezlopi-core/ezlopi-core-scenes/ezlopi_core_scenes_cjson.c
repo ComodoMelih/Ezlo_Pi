@@ -794,8 +794,8 @@ static void __cjson_add_fields(cJSON *cj_block, l_fields_v2_t *fields)
                     default:
                     {
 #if (1 == ENABLE_TRACE)
-                        const char *value_type_name = EZPI_core_scenes_get_scene_value_type_name(curr_field->value_type);
-                        TRACE_E("Value type not matched!, curr-type[%d]: %s ", curr_field->value_type, value_type_name ? value_type_name : ezlopi_null_str);
+                        const char *unmatched_type_name = EZPI_core_scenes_get_scene_value_type_name(curr_field->value_type);
+                        TRACE_E("Value type not matched!, curr-type[%d]: %s ", curr_field->value_type, unmatched_type_name ? unmatched_type_name : ezlopi_null_str);
 #endif
                         break;
                     }

@@ -798,11 +798,14 @@ None of these have been exercised on physical hardware; see Known gaps.
   unreachable: the leak was the visible symptom, and the when-method silently
   evaluating nothing was the real cost. Now assigns to the outer variable.
 
-  This one was found by building with `-Wshadow`, which is not otherwise
+  This one was found by building with `-Wshadow`, which at the time was not
   enabled. The sweep found nine unique shadowed declarations; the other eight
   were each read afterwards and none changes behaviour, so this is the only one
-  of the nine that was a defect. The per-site reasoning is under Known gaps,
-  with the residual gap being that the flag still is not enabled.
+  of the nine that was a defect. All nine have since been dealt with and the
+  flag is now on, as an error, under *Build and configuration* below — and
+  this defect is of the class the enabled spelling catches, a block-scope
+  declaration hiding a function-scope one, so the guard that now exists would
+  have stopped it.
 
   Found by the same reading pass: the tree is now also deleted on the path
   where it was built but not adopted into `user_arg`, which previously leaked
@@ -4567,6 +4570,207 @@ enumerators — so the live half of this component was never affected.
 
 ### Build and configuration — [infra]
 
+- **Shadowed locals are now a build error, in this project's components and
+  nowhere else.** [`CMakeLists.txt`](CMakeLists.txt) attaches
+  `-Wshadow=local -Werror=shadow` to each of our components, and every shadowed
+  declaration in our code is gone, so the project reports nothing under any of
+  the three spellings of the flag. One of them was a real defect — the
+  `cj_device_items_data` leak recorded under *Memory safety* above, which made
+  the function containing it a no-op — and it is of exactly the class the
+  enabled spelling reports, so the guard that now exists would have caught it.
+
+  **This was recorded as a gap whose blocker does not hold.** The old entry
+  said the flag "also fires inside ESP-IDF headers, so it cannot simply be
+  added with `-Werror`" — one sentence resting on two things that were never
+  checked. GCC has three spellings of the flag rather than one, and the ESP-IDF
+  noise is not in headers at all. Measuring both is what unblocked this: esp32
+  was built three times, once per spelling, each with the flag applied to
+  everything and `-Wno-error=shadow` so the build would not stop at the first
+  hit. The counts below are of distinct warning lines, which within a single
+  run is one per `(file, line, variable)`; the raw line count is the wrong
+  instrument because a warning from a header is re-emitted once per translation
+  unit that includes it, so it measures include fan-out rather than defects.
+
+  | spelling | distinct reports | ours | ESP-IDF and other |
+  |---|---|---|---|
+  | `-Wshadow=compatible-local` | 11 | 7 | 4 |
+  | `-Wshadow=local` | 14 | 8 | 6 |
+  | `-Wshadow` | 25 | 9 | 16 |
+
+  Every one of ESP-IDF's is in its own `.c` files — `bt/common/osi/config.c`,
+  `esp_https_ota.c`, `esp_ipc.c`, `essl_sdio.c`, `btm_ble_gap.c`, `esp_wps.c`
+  for `=local`, ten more under plain `-Wshadow`. That is the fact the gap entry
+  got backwards, and it is the fact that makes this fixable: our translation
+  units include ESP-IDF's headers but never compile its sources, so attaching
+  the flag per-target removes the upstream noise *completely* rather than
+  merely reducing it. A header-borne warning could not have been escaped this
+  way.
+
+  The three sets nest the way they should, checked rather than assumed: all 14
+  `=local` sites appear among plain `-Wshadow`'s 25, and the 11 it adds are 10
+  in ESP-IDF plus one of ours. Comparing the runs needs the `(file, line,
+  column)` key and not the warning text, because GCC tags each report with the
+  most specific sub-option it matches — the same site reads
+  `[-Wshadow=compatible-local]` in the `=local` run and `[-Wshadow]` in the
+  plain one, so a first attempt that diffed whole lines concluded every site
+  was unique to its run. Those tags also corroborate the triage below from a
+  second direction: of our eight `=local` sites, exactly one is tagged
+  `[-Wshadow=local]` rather than `[-Wshadow=compatible-local]`, and it is
+  `ezlopi_cloud_items.c:124` — the one whose types genuinely differ, a
+  `uint32_t` hiding a `cJSON *`.
+
+  `=local`, not plain `-Wshadow`, and the choice is not about the count.
+  `=local` fires only when a local or parameter is hidden by another local or
+  parameter in the same function, so whether our build passes is decided
+  entirely by code in our own function bodies. Plain `-Wshadow` additionally
+  fires when a local shares a name with any global, typedef or function that
+  anything we include happens to declare — so an upstream header gaining a
+  name would break our build for a non-defect. With the flag an error, that
+  distinction is the difference between a guard and a liability.
+
+  The scoping is a loop after `project()` over the component basenames in
+  `${ALL_COMPONENTS}`, calling `target_compile_options(__idf_<name> PRIVATE …)`.
+  Per-component editing was not an option: there are 178 of them. The loop
+  carries two guards, and they are not equivalent. The `INTERFACE_LIBRARY` one
+  is there because the first attempt without it failed to configure: ESP-IDF
+  registers a component that contributes no source file as an INTERFACE
+  library, and `PRIVATE` options on one of those are a hard error —
+  *"target_compile_options may only set INTERFACE properties on INTERFACE
+  targets"*. Four of ours are header-only that way — `pt`,
+  `ezlopi-core-boards`, `ezlopi-core-config`, `ezlopi-user-config` — and
+  skipping them excludes no code from the check: between them they hold five
+  headers, zero `.c` files, and no function bodies at all, and their headers
+  are still compiled, with the flag, inside every translation unit that
+  includes them. The `TARGET` guard is the weaker of the two and has never
+  fired: `ALL_COMPONENTS` is assembled by globbing directories, so it *can*
+  name something that is not a registered component, but today all 176
+  subdirectories it collects do have a `CMakeLists.txt`. It is kept because
+  adding a directory without one is an ordinary thing to do and the failure
+  mode is a fatal configure error rather than a missed component.
+
+  The nine sites fixed here — seven renames, one deletion, and one of the
+  plain-`-Wshadow` class that the enabled spelling does *not* report:
+
+  | site | was | now |
+  |---|---|---|
+  | `ezlopi_cloud_items.c:124` | `device_id` | `device_id_num` |
+  | `ezlopi_cloud_scenes.c:875` | `new_scene_id` | `cj_scene_id` |
+  | `ezlopi_core_broadcast.c:241` | `curr_node` | `tail_node` |
+  | `ezlopi_core_scenes_cjson.c:797` | `value_type_name` | `unmatched_type_name` |
+  | `ezlopi_core_scenes_operators.c:1064` | `item_id` | `item_id_right` |
+  | `gxhtc3.c:224` | `i` | `bit` |
+  | `sensor_0037_pms5003_sensor.c:138` | `pms_object` | declaration removed |
+  | `ezlopi_service_ws_server.c:337` | `cj_method` | `cj_requested_method` |
+  | `ld2410_driver.c:958` | parameter `byte` | `value` |
+
+  Each name was chosen to say what the variable is rather than to dodge the
+  warning. `tail_node` walks to the tail to append; `item_id_right` is the
+  right-hand operand, the left having already been resolved into `item_left`
+  above; `cj_requested_method` answers whether an unauthenticated caller is
+  allowed through, which is a different question from the outer `cj_method`
+  that is `NULL` at that point and is populated later for the error response.
+
+  `sensor_0037_pms5003_sensor.c` is a deletion rather than a rename, and that
+  is the one case where the shadow was hiding something worth removing. The
+  inner declaration re-read the same `item->user_arg` the enclosing
+  `pms_object` already held, and nothing in the function writes `user_arg` — so
+  it was the identical pointer, obtained a second time *without* the NULL check
+  the outer had already passed. Removing it is a small improvement as well as a
+  rename avoided. The compiler could not reach that conclusion, which is why
+  this is also the only edit in the set that changes the image; see the sizes
+  below.
+
+  `ld2410_driver.c` is a different class and worth separating. The parameter
+  was named `byte`, which is a `typedef unsigned char` in that component's own
+  header and is used as a cast throughout the file, so inside the function the
+  type name was hidden by the parameter. Only plain `-Wshadow` reports this, so
+  the flag now enabled does not guard it — it is fixed, not enforced. The first
+  attempt at this one nearly deleted the typedef as dead: a `grep` filtered
+  with `-v "_byte\|byte_\|bytes"` hides every `(byte)0xFD`-style cast, and a
+  precise re-check found more than twenty live uses in that file alone.
+
+  It is also the site that shows the earlier record was one short, and the
+  discrepancy is worth leaving visible rather than quietly reconciled. That
+  sweep is recorded above as having used `-Wshadow` and found nine in our code:
+  the one defect plus the eight in the table below. But all eight of those are
+  in the `=local` class, and plain `-Wshadow` reports a superset — so a sweep
+  that really ran the plain spelling should have returned ten, with
+  `ld2410_driver.c` among them. Either it ran a narrower spelling than it was
+  recorded as running, or it dropped one. The nine in the table above are
+  therefore not the same nine; they are the eight benign ones plus the site the
+  old record is missing, the defect having already been fixed out of the set.
+
+  Why each rename is behaviour-preserving, kept from the triage that preceded
+  it so the reasoning does not have to be redone. In every case the shadowed
+  outer variable is either already spent at that point or holds the identical
+  value, which is why renaming is a no-op rather than a fix:
+
+  | site | variable | why the shadow was benign |
+  |---|---|---|
+  | `ezlopi_cloud_items.c:124` | `device_id` | a `uint32_t` hides the `cJSON *` loop variable, but the pointer is consumed on the line above and `cJSON_ArrayForEach`'s increment runs in the enclosing scope, so iteration is unaffected |
+  | `ezlopi_cloud_scenes.c:875` | `new_scene_id` | the inner sits in the `else` of `if (new_scene_id && …->valuestring)`, so the outer is known falsy there and is never read again |
+  | `ezlopi_core_broadcast.c:241` | `curr_node` | the outer was walked to `NULL` by the duplicate-check loop above; the inner re-seeds from `__method_head`, which is what a fresh walk needs |
+  | `ezlopi_core_scenes_cjson.c:797` | `value_type_name` | outer and inner are both initialised from `EZPI_core_scenes_get_scene_value_type_name(curr_field->value_type)` with `curr_field` unchanged between them, so the values are identical |
+  | `ezlopi_core_scenes_operators.c:1064` | `item_id` | the outer id was already resolved into `item_left`; the inner resolves the right-hand item. Correct, just identically named |
+  | `gxhtc3.c:224` | `i` | the inner is the 8-bit shift counter of a CRC8; the outer byte index is not referenced inside it |
+  | `sensor_0037_pms5003_sensor.c:138` | `pms_object` | the inner re-reads the same `item->user_arg` the outer already holds |
+  | `ezlopi_service_ws_server.c:337` | `cj_method` | the outer is `NULL` from its declaration until line 361 reassigns it, and line 368 is its only read, so the inner is redundant rather than load-bearing |
+
+  Worth saying plainly, because the first pass over this list got it wrong:
+  `scenes_cjson.c:797` looks like the dangerous shape — an inner declaration
+  initialised from a call — and is in fact the safest of the eight, because the
+  outer is initialised from the very same call. The shape is not the evidence;
+  what the outer holds at the point of the shadow is. The anchor in that table
+  for `scenes_operators.c` was also wrong while this was a gap entry: it read
+  `:1059`, which is a closing brace. The pair is 1045 and 1064, and the
+  compiler's own `1064:30` is what settled it.
+
+  **Evidence, in four parts, because a build that merely succeeds is exactly
+  what a flag that never reached the compiler also looks like.** The esp32
+  build is clean with zero shadow diagnostics. The generated
+  `compile_commands.json` shows the flag on 301 of our translation units and
+  missing from none — 302 entries carry it in all, the extra being a generated
+  `.S` under `build/` belonging to one of our components, where a C warning
+  flag is inert — and on 0 of ESP-IDF's 1,165. Three of ESP-IDF's own six
+  `=local` sites are confirmed present in that same compile database, which is
+  why a passing build is itself proof the flag did not reach them. The
+  `-Werror=shadow` is belt-and-braces: the same database shows ESP-IDF already
+  passing `-Werror=all` on 1,444 entries, so the promotion would happen without
+  it — but it is what the compiler names in the diagnostic, so it no longer
+  depends on that. An injected
+  block-scope `outer` hiding a parameter `outer` *fails* the build with
+  `error: declaration of 'outer' shadows a parameter [-Werror=shadow]`, and
+  fails for that reason specifically: the probe was given external linkage so
+  that `-Wunused-function` could not be what stopped the build, and the log
+  carries one shadow-class error and zero unused-function errors. Removing the
+  probe restores a clean build at a byte-identical image size.
+
+  All four CI targets then build clean, with zero shadow diagnostics and the
+  flag on 301 of 301 of our translation units on every one of them — the same
+  301 each time, since no component here is target-conditional:
+
+  | target | `Ezlo_Pi_v4x.bin` | was | delta |
+  |---|---|---|---|
+  | esp32 | 1,683,856 | 1,683,856 | 0 |
+  | esp32s2 | 1,374,176 | 1,374,192 | −16 |
+  | esp32s3 | 1,698,704 | 1,698,720 | −16 |
+  | esp32c3 | 1,757,104 | 1,757,104 | 0 |
+
+  Only one of the ten edits can move code at all: renaming a local or a
+  parameter cannot change codegen, and neither can a warning flag. So the
+  16 bytes off esp32s2 and off esp32s3 are attributable to the one deletion.
+  That the `pms5003` inner declaration was *semantically* a copy of a pointer
+  the function already held does not make it free — at least one call sits
+  between the outer read and the inner one, and the compiler cannot assume a
+  call leaves `item->user_arg` alone, so it had to emit a second load.
+  Removing the declaration removes that load. Every size in the table is a multiple of 16,
+  which is the likeliest reason esp32 and esp32c3 show `0` rather than that
+  nothing changed there; a net change below the padding quantum reads as zero.
+  The same code is compiled on all four — the compile database holds the same
+  301 of our translation units for every target — so there is no second
+  explanation available. **Nothing was flashed** — no board was available — so
+  every claim here is a compile-time and link-time one.
+
 - **Four `#endif` comments that named the wrong macro.** Comments on a closing
   `#endif` are the only navigation aid in long conditional blocks, and when they
   are wrong they are worse than absent — they send a reader to the wrong
@@ -5932,36 +6136,24 @@ Listed because a changelog that only mentions what was finished is misleading.
   "properly" and "stopped working" look the same for as long as the condition
   does not change.
 
-- **`-Wshadow` is not enabled in the build, so nothing stops a ninth shadowed
-  declaration from appearing.** The eight that the sweep left are no longer
-  untriaged — each was read individually and none changes behaviour — but that
-  result is a snapshot, not a guard. Enabling the flag would mean either
-  silencing eight warnings nobody intends to act on or renaming across eight
-  files for no behavioural gain, and the flag also fires inside ESP-IDF
-  headers, so it cannot simply be added with `-Werror`.
+- **The shadow guard covers the local-shadows-local class only, so a local that
+  hides a global, a typedef or a function name is still unguarded.** This is
+  the residue of a gap that used to be much larger: all nine shadowed
+  declarations are fixed and `-Wshadow=local -Werror=shadow` is now an error on
+  our components, recorded under *Build and configuration* above. What that
+  spelling does not report is the class `ld2410_driver.c` was in, where a
+  parameter named `byte` hid that component's own `typedef unsigned char byte`.
+  That site is fixed; a tenth of the same shape would not be caught.
 
-  The triage is recorded here so it does not have to be redone. The sweep that
-  found the `cj_device_items_data` defect above found nine; that one was shown
-  to change behaviour and was fixed. For the remaining eight, what makes each
-  one safe is specific, and in every case it is that the shadowed outer
-  variable is either already spent or holds the identical value:
-
-  | site | variable | why it is benign |
-  |---|---|---|
-  | `ezlopi_cloud_items.c:124` | `device_id` | a `uint32_t` shadows the `cJSON *` loop variable, but the pointer is consumed on the line above and `cJSON_ArrayForEach`'s increment runs in the enclosing scope, so iteration is unaffected |
-  | `ezlopi_cloud_scenes.c:875` | `new_scene_id` | the inner sits in the `else` of `if (new_scene_id && …->valuestring)`, so the outer is known falsy there and is never read again |
-  | `ezlopi_core_broadcast.c:241` | `curr_node` | the outer was walked to `NULL` by the duplicate-check loop above; the inner re-seeds from `__method_head`, which is what a fresh walk needs |
-  | `ezlopi_core_scenes_cjson.c:797` | `value_type_name` | outer and inner are both initialised from `EZPI_core_scenes_get_scene_value_type_name(curr_field->value_type)` with `curr_field` unchanged between them, so the values are identical |
-  | `ezlopi_core_scenes_operators.c:1059` | `item_id` | the outer id was already resolved into `item_left`; the inner resolves the right-hand item. Correct, just identically named |
-  | `gxhtc3.c:224` | `i` | the inner is the 8-bit shift counter of a CRC8; the outer byte index is not referenced inside it |
-  | `sensor_0037_pms5003_sensor.c:138` | `pms_object` | the inner re-reads the same `item->user_arg` the outer already holds |
-  | `ezlopi_service_ws_server.c:337` | `cj_method` | the outer is `NULL` from its declaration until line 361 reassigns it, and line 368 is its only read, so the inner is redundant rather than load-bearing |
-
-  Worth saying plainly, because the first pass over this list got it wrong:
-  `scenes_cjson.c:797` looks like the dangerous shape — an inner declaration
-  initialised from a call — and is in fact the safest of the eight, because the
-  outer is initialised from the very same call. The shape is not the evidence;
-  what the outer holds at the point of the shadow is.
+  The narrowing is deliberate rather than an oversight, and the reason is in
+  the resolved entry: plain `-Wshadow` fires when one of our locals happens to
+  share a name with anything an included header declares, so with `-Werror` it
+  would hand upstream header churn the power to break this build for a
+  non-defect. Closing this properly means plain `-Wshadow` plus a mechanism
+  that pins the accepted set — a suppression list, or `-Wno-error=shadow` with
+  a CI step that compares the warning count against a recorded baseline —
+  neither of which is a flag change, so neither is bundled into the commit that
+  enabled the narrow version.
 
 - **The seven functions in `ezlopi_cloud_devcfg_port.c` have no automated
   coverage of any kind.** They are the only part of the device-configuration

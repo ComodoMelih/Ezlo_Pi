@@ -872,10 +872,10 @@ void EZPI_scene_added(cJSON *cj_request, cJSON *cj_response)
         cJSON *cj_params = cJSON_GetObjectItem(__FUNCTION__, cj_request, ezlopi_params_str);
         if (cj_params)
         {
-            cJSON *new_scene_id = cJSON_GetObjectItem(__FUNCTION__, cj_params, ezlopi_sceneId_str);
-            if (new_scene_id && new_scene_id->valuestring)
+            cJSON *cj_scene_id = cJSON_GetObjectItem(__FUNCTION__, cj_params, ezlopi_sceneId_str);
+            if (cj_scene_id && cj_scene_id->valuestring)
             {
-                char *new_scene = EZPI_core_nvs_read_str(new_scene_id->valuestring);
+                char *new_scene = EZPI_core_nvs_read_str(cj_scene_id->valuestring);
                 if (new_scene)
                 {
                     cJSON_AddRawToObject(__FUNCTION__, cj_response, ezlopi_result_str, new_scene);

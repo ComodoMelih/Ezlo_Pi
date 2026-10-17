@@ -334,10 +334,14 @@ static void __message_upcall(httpd_req_t *req, const char *payload, uint32_t pay
         if (cj_request)
         {
             const char *login_method = "hub.offline.login.ui";
-            cJSON *cj_method = cJSON_GetObjectItem(__FUNCTION__, cj_request, ezlopi_method_str);
-            if (cj_method && cJSON_IsString(cj_method))
+            /* Deliberately a separate name from the function's cj_method,
+            ** which this used to shadow. The outer one is NULL here and is
+            ** only populated further down, for the error response; this one
+            ** answers whether an unauthenticated caller is allowed through. */
+            cJSON *cj_requested_method = cJSON_GetObjectItem(__FUNCTION__, cj_request, ezlopi_method_str);
+            if (cj_requested_method && cJSON_IsString(cj_requested_method))
             {
-                if (0 == strncmp(login_method, cj_method->valuestring, strlen(login_method)))
+                if (0 == strncmp(login_method, cj_requested_method->valuestring, strlen(login_method)))
                 {
                     proceed_to_api_consume = true;
                 }
