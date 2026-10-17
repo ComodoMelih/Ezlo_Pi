@@ -86,6 +86,67 @@
 const char *ezlopi__str = "";
 
 /*******************************************************************************
+ *                          The flash/PSRAM pin set, chosen by this file
+ *
+ * ezlopi_core_cjson_macros.c calls EZPI_core_pin_is_mspi() to find out whether
+ * a pin is one the chip is using for flash. On a target that resolves to
+ * ezlopi_core_pin_reserved.c, which asks the chip over esp_mspi_get_io(). That
+ * file is not in this rule's source list, and the definition below takes its
+ * place -- the link seam that stubs/driver/gpio.h describes as the intended
+ * arrangement: "any source that actually drives a pin will fail to link rather
+ * than silently appear to work".
+ *
+ * The seam is here rather than in a stub header because it buys something a
+ * header stub does not: the reserved set becomes an input to the test. The real
+ * set is in efuse and differs per part, so "does the policy refuse a flash pin"
+ * is only answerable on a host if the set can be chosen.
+ *
+ * It defaults to EMPTY, and that matters for the table below. Every expectation
+ * in pin_cases[] predates this and means "what the bound does", not "what the
+ * reservation does" -- including {"6", 6}, which on a real esp32 would now come
+ * back -1. Defaulting to empty keeps those cases testing the one thing they
+ * were written for, and test_a_flash_pin_is_refused() sets a set explicitly.
+ *******************************************************************************/
+
+#include "ezlopi_core_pin_reserved.h"
+
+#define HOST_MSPI_MAX (8)
+
+static int s_host_mspi_pins[HOST_MSPI_MAX];
+static unsigned s_host_mspi_count;
+
+/** @brief Choose the pin set the subject will see. NULL/0 clears it. */
+static void set_mspi_pins(const int *pins, unsigned count)
+{
+    if (count > HOST_MSPI_MAX)
+    {
+        printf("  FATAL: this test file asked for %u reserved pins, max %d\n",
+               count, HOST_MSPI_MAX);
+        exit(2);
+    }
+
+    s_host_mspi_count = count;
+
+    for (unsigned i = 0; i < count; i++)
+    {
+        s_host_mspi_pins[i] = pins[i];
+    }
+}
+
+bool EZPI_core_pin_is_mspi(int gpio_num)
+{
+    for (unsigned i = 0; i < s_host_mspi_count; i++)
+    {
+        if (s_host_mspi_pins[i] == gpio_num)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/*******************************************************************************
  *                          Test harness
  *******************************************************************************/
 
@@ -198,13 +259,20 @@ static const s_pin_case_t pin_cases[] = {
     {"255", UNUSED_255, "the 255 sentinel, which must survive unchanged"},
 
     /* In range, and therefore returned as written. Whether the pin is usable is
-     * the callers' question, not this function's -- GPIO 6 is a real pin on an
-     * esp32 and is still a terrible choice, and nothing here second-guesses
-     * that. */
+     * still mostly the callers' question -- GPIO 24 is absent from the esp32
+     * valid-pin mask and nothing here second-guesses that.
+     *
+     * GPIO 6 is the exception worth reading carefully. It is the esp32 flash
+     * clock, and on a board it now comes back -1, because EZPI_core_pin_is_mspi()
+     * says so. It is 6 here because this file's reserved set defaults to empty,
+     * which is what keeps these rows testing the bound rather than the
+     * reservation. The reservation has its own test, and the pairing is the
+     * point: the same input gives 6 with an empty set and -1 with a set
+     * containing 6, so each test is measuring only its own subject. */
     {"0", 0, "GPIO 0"},
     {"5", 5, "GPIO 5"},
     {"12", 12, "GPIO 12"},
-    {"6", 6, "GPIO 6, which is in range and reserved -- the callers' problem"},
+    {"6", 6, "GPIO 6 with no pins reserved -- the bound alone lets it through"},
     {"24", 24, "GPIO 24, in range and absent from the esp32 mask"},
     {"39", 39, "GPIO 39, the last pin on an esp32"},
 
@@ -342,6 +410,90 @@ static void test_the_boundary(void)
     snprintf(text, sizeof(text), "%d", (int)GPIO_NUM_MAX);
     ok(NO_PIN == read_pin_number(text),
        "GPIO_NUM_MAX itself is one past the end and is refused");
+}
+
+/**
+ * @brief   A pin the chip is using for flash comes back unused.
+ *
+ * The defect: GPIO_IS_VALID_GPIO is
+ *
+ *     ((1ULL << (gpio_num)) & SOC_GPIO_VALID_GPIO_MASK) != 0
+ *
+ * and the mask excludes 24 and 28..31 on an esp32, 22..25 on the s2 and s3, and
+ * nothing at all on the c3 -- so it never excluded a flash pin on any target.
+ * A configuration naming GPIO 6 passed every test in the tree and had a driver
+ * configure the SPI flash clock as a push-pull output. The masks were read out
+ * of soc_caps.h with the compiler, not by eye.
+ *
+ * WHY THE SECOND SET IS THE IMPORTANT ONE
+ *
+ * The obvious fix is a table: "6..11 are flash on esp32". The second case here
+ * is why that is wrong. soc/spi_pins.h for the esp32 carries a whole second set
+ * of pin numbers, SPI_D2WD_PIN_NUM_* -- 17, 8, 6, 16, 7, 11 -- because parts
+ * with embedded flash remap the bus, and the bootloader chooses between the two
+ * by reading efuse. On such a part a table would refuse 9 and 10, which are
+ * free, and allow 16 and 17, which are flash. That is wrong in both directions
+ * at once, and the expensive one is refusing pins that work.
+ *
+ * So the subject asks the chip instead, and this test asks it two different
+ * things to show the answer is not baked in.
+ */
+static void test_a_flash_pin_is_refused(void)
+{
+    /* The standard esp32 arrangement: SPI_IOMUX_PIN_NUM_* from
+     * soc/esp32/include/soc/spi_pins.h. */
+    static const int esp32_default_flash[] = {6, 7, 8, 9, 10, 11};
+
+    /* The embedded-flash arrangement on the same chip: SPI_D2WD_PIN_NUM_*. */
+    static const int esp32_d2wd_flash[] = {17, 8, 6, 16, 7, 11};
+
+    set_mspi_pins(esp32_default_flash, 6);
+
+    ok(NO_PIN == read_pin_number("6"), "GPIO 6, the flash clock, is refused");
+    ok(NO_PIN == read_pin_number("7"), "GPIO 7, flash MISO, is refused");
+    ok(NO_PIN == read_pin_number("8"), "GPIO 8, flash MOSI, is refused");
+    ok(NO_PIN == read_pin_number("9"), "GPIO 9, flash HD, is refused");
+    ok(NO_PIN == read_pin_number("10"), "GPIO 10, flash WP, is refused");
+    ok(NO_PIN == read_pin_number("11"), "GPIO 11, flash CS, is refused");
+
+    /* Immediately either side of the block. A reservation that caught these
+     * would be refusing working configurations, which is the failure this area
+     * already has a withdrawn attempt recorded for. */
+    ok(5 == read_pin_number("5"), "GPIO 5, just below the block, still works");
+    ok(12 == read_pin_number("12"), "GPIO 12, just above it, still works");
+    ok(0 == read_pin_number("0"),
+       "GPIO 0 still works -- a decoded 0 means 'unset', not this pin");
+
+    /* Neither sentinel denotes a pin, so neither is asked the question. */
+    ok(NO_PIN == read_pin_number("-1"), "the -1 sentinel is untouched");
+    ok(UNUSED_255 == read_pin_number("255"), "the 255 sentinel is untouched");
+
+    /* The remap. Same chip, same firmware, different efuse. */
+    set_mspi_pins(esp32_d2wd_flash, 6);
+
+    ok(NO_PIN == read_pin_number("16"),
+       "on an embedded-flash part GPIO 16 is flash and is refused");
+    ok(NO_PIN == read_pin_number("17"),
+       "and so is GPIO 17 -- a 6..11 table would have allowed both");
+    ok(9 == read_pin_number("9"),
+       "while GPIO 9 is free on that part and is allowed");
+    ok(10 == read_pin_number("10"),
+       "and so is GPIO 10 -- a 6..11 table would have refused both");
+
+    /* The control, and the reason this test is believable: clear the set and
+     * the same input comes back. Without this, a subject that had simply
+     * acquired a second bound at 6 -- or a read_pin_number() that had stopped
+     * reaching the subject at all -- would pass every assertion above. */
+    set_mspi_pins(NULL, 0);
+
+    ok(6 == read_pin_number("6"),
+       "with nothing reserved GPIO 6 comes back, so the refusals above are the "
+       "reserved set and not a new bound");
+    ok(16 == read_pin_number("16"), "and so does GPIO 16");
+
+    /* Left empty deliberately: test_the_invariant() asserts that every pin on
+     * the target comes back, which a leftover reserved set would break. */
+    ok(0 == s_host_mspi_count, "and the set is left clear for the other tests");
 }
 
 /**
@@ -519,6 +671,7 @@ int main(void)
     test_the_shift_is_defined();
     test_the_invariant();
     test_the_boundary();
+    test_a_flash_pin_is_refused();
     test_an_absent_pin();
     test_a_fractional_pin();
     test_the_key_lookup_folds_case();

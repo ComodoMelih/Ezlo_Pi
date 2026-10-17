@@ -53,6 +53,12 @@
 ** from this file. */
 #include "driver/gpio.h"
 
+/* EZPI_core_pin_is_mspi(). Carries no ESP-IDF type on purpose, so that this
+** file stays compilable by the host suite; the implementation it resolves to on
+** a target is ezlopi_core_pin_reserved.c, and on the host is a definition
+** test_cjsongpio.c supplies itself. */
+#include "ezlopi_core_pin_reserved.h"
+
 /**
  *
  */
@@ -250,6 +256,40 @@ void EZPI_core_cjson_assign_number_as_string(cJSON *cj_obj, uint32_t num, const 
 **     which answers that correctly and without UB once the count is in range.
 **     This fixes the undefined shift, it does not duplicate the valid-pin test.
 **
+** That last point held for the valid-pin mask and does not hold for the flash
+** pins, which is why EZPI_core_pin_is_mspi() is consulted here as well. The
+** distinction is what the callers are able to answer. GPIO_IS_VALID_GPIO can
+** answer "is 24 a pin on this part": it is
+**
+**     ((1ULL << (gpio_num)) & SOC_GPIO_VALID_GPIO_MASK) != 0
+**
+** and the mask is a compile-time constant that says so. It cannot answer "is 6
+** the flash clock", because the mask does not exclude flash pins on any target
+** -- measured by reading SOC_GPIO_VALID_GPIO_MASK out of soc_caps.h with the
+** compiler rather than by eye:
+**
+**     esp32    excludes 24, 28..31 only          -- 6..11 pass
+**     esp32s2  excludes 22..25 only              -- 27..32 pass
+**     esp32s3  excludes 22..25 only              -- 27..32 pass
+**     esp32c3  excludes nothing whatsoever       -- 12..17 pass
+**
+** So a configuration naming GPIO 6 on an esp32 passed every test in the tree
+** and had a driver configure the SPI flash clock as a push-pull output. There
+** is no second line of defence: ezlopi_hal_gpio.c's ezlopi_gpio_init(), which
+** is where such a test would otherwise belong, is commented out in its
+** entirety (:72-109), and the drivers reach gpio_config(), ledc_channel_config()
+** and uart_set_pin() directly rather than through one chokepoint. A question no
+** caller is in a position to answer has to be answered where the number enters,
+** and since the sixteen stragglers were routed through this accessor that is
+** again a single place.
+**
+** It is a reservation and not a validity test, so it does not refuse the
+** configuration either -- the pin comes back -1 and is unused, exactly as an
+** out-of-range number does. The set is asked of the chip at runtime rather than
+** tabulated, because it lives in efuse; ezlopi_core_pin_reserved.c explains why
+** a table would be wrong on the parts with embedded flash, and names the two
+** pad groups it deliberately does not report.
+**
 **   - -1 and 255 are passed through untouched. Both are "no pin" spellings the
 **     drivers already test for by hand (device_0001_digitalOut_generic.c:277
 **     checks 255, :303 checks -1 and 255), and a configuration using either is
@@ -303,9 +343,28 @@ int EZPI_core_cjson_get_value_gpio(cJSON *cj_root, const char *item_name_str)
         ** is itself undefined -- so the test has to be on the double. */
         const double raw = o_item->valuedouble;
 
-        if (((raw >= 0.0) && (raw < (double)GPIO_NUM_MAX)) ||
-            (raw == -1.0) || (raw == (double)EZPI_GPIO_UNUSED_255))
+        if ((raw >= 0.0) && (raw < (double)GPIO_NUM_MAX))
         {
+            /* Narrowing is safe here and only here: the bound above has
+            ** established raw is a real pin index. */
+            const int pin = (int)raw;
+
+            if (EZPI_core_pin_is_mspi(pin))
+            {
+                TRACE_W("%s: GPIO %d is wired to this chip's flash/PSRAM; treating the pin as unused",
+                        item_name_str, pin);
+            }
+            else
+            {
+                item_val = pin;
+            }
+        }
+        else if ((raw == -1.0) || (raw == (double)EZPI_GPIO_UNUSED_255))
+        {
+            /* The two "no pin" spellings, passed through untouched. They are
+            ** tested before the flash-pin question rather than after, because
+            ** neither is a pin index and EZPI_core_pin_is_mspi() would be being
+            ** asked about a number that does not denote a pin. */
             item_val = (int)raw;
         }
         else

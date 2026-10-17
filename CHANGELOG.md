@@ -2268,6 +2268,12 @@ targets.
     that correctly once the shift count is in range. This closes the undefined
     shift; it does not duplicate the valid-pin test. It also keeps the bound
     expressible on a host, where `GPIO_NUM_MAX` exists and the mask does not.
+
+    Still true of the mask, and no longer true of the flash pins: the same
+    accessor now also refuses a pin the chip is using for flash or PSRAM, which
+    is a question `GPIO_IS_VALID_GPIO` is not able to answer at all — see *Pins
+    the chip is using for flash or PSRAM* below for why that distinction is the
+    one that decides where the test belongs.
   - **`-1` and `255` pass through untouched.** Both are "no pin" spellings the
     drivers test for by hand, and a configuration using either works on a board
     today. They remain out-of-range shift counts; both were checked against the
@@ -2293,7 +2299,7 @@ targets.
   The per-target input-only pins were computed from the two SOC masks rather
   than recalled: esp32 → 34–39, esp32s2 → 46, esp32s3 and esp32c3 → none.
 
-  **Tested by [`tests/host/test_cjsongpio.c`](tests/host/test_cjsongpio.c)**, 59
+  **Tested by [`tests/host/test_cjsongpio.c`](tests/host/test_cjsongpio.c)**, 77
   checks, which compiles the real `ezlopi_core_cjson_macros.c` rather than a
   copy. It does what the call sites do — `1ULL << pin` on every value the table
   can produce — and it was run against a subject broken on purpose in both
@@ -2301,8 +2307,14 @@ targets.
 
   | Mutation | Result |
   |---|---|
-  | The range check removed | 30 checks fail, and with `SANITIZERS=` too, so the table and not the sanitizer is what catches it |
-  | The `255` clause removed | 1 check fails — the one asserting the sentinel survives |
+  | The range check removed | Under sanitizers the process aborts at check 30 — the undefined shift is fatal because this rule sets `-fno-sanitize-recover`. With `SANITIZERS=` it runs to the end and **28 of the 77 fail**, so the table and not the sanitizer is what catches it |
+  | The `255` clause removed | 2 checks fail — the table row asserting the sentinel survives, and the one in the flash-pin test that asserts the reservation is not applied to it |
+
+  Both numbers are re-measured against the suite as it now stands rather than
+  carried over. The earlier version of this table read "30 checks fail, and with
+  `SANITIZERS=` too", which conflated the point the sanitizer aborts at with a
+  count of failing assertions; they are different numbers, and only the second
+  is evidence the table has teeth of its own.
 
   Checking the second direction is the point. The earlier attempt in this area
   was withdrawn because it would have refused a normal two-sensor I²C
@@ -2333,6 +2345,149 @@ targets.
   plus 7 that only the riscv32 compiler is able to report, because `uint32_t` is
   `long unsigned int` there and `unsigned int` on xtensa. See *Device
   configuration pins* below.
+
+- **Pins the chip is using for flash or PSRAM are no longer accepted as sensor
+  pins.** A device configuration naming GPIO 6 on an esp32 passed every test in
+  the tree and had a driver configure the SPI flash clock as a push-pull output.
+
+  The reason nothing caught it is that the only pin test the drivers apply is
+  `GPIO_IS_VALID_GPIO`, which is
+
+  ```c
+  ((1ULL << (gpio_num)) & SOC_GPIO_VALID_GPIO_MASK) != 0
+  ```
+
+  — an *existence* test against a compile-time mask. The masks were read out of
+  `soc_caps.h` by the compiler rather than by eye, and what they exclude is not
+  what the name suggests:
+
+  | Target | `SOC_GPIO_VALID_GPIO_MASK` excludes | flash pins | pass? |
+  |---|---|---|---|
+  | esp32 | 24, 28–31 | 6–11 | **yes, all six** |
+  | esp32s2 | 22–25 | 27–32 | **yes, all six** |
+  | esp32s3 | 22–25 | 27–32 | **yes, all six** |
+  | esp32c3 | **nothing at all** | 12–17 | **yes, all six** |
+
+  So the macro never excluded a flash pin on any target, and on the C3 it
+  excludes no pin whatever — it cannot return false. There was no second line of
+  defence either: the place such a test would belong,
+  [`ezlopi_hal_gpio.c:72`](ezlopi-hal/ezlopi-hal-gpio/ezlopi_hal_gpio.c#L72)
+  onward, is commented out in its entirety, and the drivers reach
+  `gpio_config()`, `ledc_channel_config()` and `uart_set_pin()` directly rather
+  than through one chokepoint.
+
+  **The test is at the read, for a reason that is about who can answer the
+  question.** `GPIO_IS_VALID_GPIO` can answer "is 24 a pin on this part" — the
+  mask is a constant that says so. It cannot answer "is 6 the flash clock". A
+  question no caller is in a position to answer has to be answered where the
+  number enters, and because the sixteen stragglers were already routed through
+  `EZPI_core_cjson_get_value_gpio()` (see above), that is again a single place
+  covering all 144 reads.
+
+  **The set is asked of the chip, not tabulated, and that is the whole design.**
+  The obvious implementation is a table — "6–11 on esp32" — and it is wrong.
+  `soc/esp32/include/soc/spi_pins.h` carries a *second* set of pin numbers,
+  `SPI_D2WD_PIN_NUM_*` = 17, 8, 6, 16, 7, 11, because parts with embedded flash
+  remap the bus; the bootloader picks between the two by reading efuse
+  ([`bootloader_flash_config_esp32.c:88`](https://github.com/espressif/esp-idf)).
+  On such a part a table would refuse 9 and 10, which are free, and allow 16 and
+  17, which are flash — wrong in both directions at once, and the expensive one
+  is refusing pins that work.
+
+  So `EZPI_core_pin_is_mspi()` asks `esp_mspi_get_io()`, the function ESP-IDF
+  uses for this itself. It handles the efuse decode, the esp32 WP pad (which
+  lives in the image header rather than efuse) and the PSRAM chip select. The
+  answer is cached, since efuse does not change while the firmware runs.
+
+  **Two pad groups are deliberately not reported**, and both would have been
+  bugs:
+
+  - **A decoded pin number of `0`.** ROM uses `0` to mean *unset* for every pad
+    except WP — `flash_ops.c:985` states it outright: "rom code take 0x3f as
+    invalid wp pad num, but take 0 as other invalid mspi pads num". Treating a
+    returned `0` as GPIO 0 would have reserved the boot-strap and user-button
+    pin on most of these boards. No part uses GPIO 0 for flash, so dropping it
+    cannot hide a real reservation.
+  - **The octal pads** `ESP_MSPI_IO_DQS` and `D4`–`D7`. On an esp32s3 with quad
+    flash — which is what `sdkconfig.defaults.esp32s3` configures — their
+    default numbers 33–37 are free for a user to wire a sensor to. Reporting
+    them would refuse working configurations. A board genuinely running octal
+    flash has them in efuse, and this is named as a limit rather than left to be
+    discovered.
+
+  **It is a reservation, not a validity test, so the document is not refused.**
+  The pin comes back `-1` and is unused, exactly as an out-of-range number or an
+  absent key does. The two "no pin" sentinels are tested *before* the flash
+  question, because neither denotes a pin.
+
+  `esp_mspi_get_io()` is declared in `esp_private/spi_flash_os.h`, so IDF
+  promises nothing about it across versions. That cost was weighed against the
+  alternative: decoding `esp_rom_efuse_get_flash_gpio_info()` by hand needs the
+  6-bits-per-pad layout, the `0`-means-unset convention, the `0x3f` WP
+  convention and the esp32 WP special case reimplemented — a copy of the
+  function that cannot be corrected by an IDF update, rather than a dependency
+  that can. If a future IDF removes it the build breaks at the call, which is
+  the better failure than a table silently describing the wrong chip.
+  `spi_flash` is declared `PRIV_REQUIRES`; the build already succeeded without
+  it, because the include path reaches `esp_private/` transitively through other
+  components, and relying on that accident would break on whichever unrelated
+  component dropped `spi_flash` first.
+
+  **Tested on a host, with the reserved set as an input.** The policy lives in
+  `ezlopi_core_cjson_macros.c`, which the host suite compiles for real;
+  `ezlopi_core_pin_reserved.c` is not in that rule's sources and
+  `test_cjsongpio.c` supplies its own `EZPI_core_pin_is_mspi()` instead — the
+  link seam `stubs/driver/gpio.h` describes as the intended arrangement. That
+  buys what a header stub would not: the set is chosen per test, so the suite
+  checks the standard esp32 arrangement **and the remapped one**, asserting that
+  16 and 17 are refused while 9 and 10 are allowed. A hard-coded table passes
+  the first and fails the second.
+
+  The set defaults to empty, which is what lets the pre-existing table keep
+  testing the bound rather than the reservation — including its `{"6", 6}` row,
+  which on a real esp32 now returns `-1`.
+
+  | Mutation | Result |
+  |---|---|
+  | The reservation made unreachable | 8 checks fail — the six flash pins plus the two remapped ones |
+  | The reservation applied to the sentinels too | 2 checks fail, one of them the assertion that `255` survives — the "refuses input that works today" direction |
+  | Neither (control) | 77 checks, 0 failures |
+
+  The control inside the test matters as much as the mutations: after the
+  refusals it clears the set and asserts GPIO 6 and 16 come back. Without that,
+  a subject that had merely acquired a second hard bound at 6 — or a helper that
+  had stopped reaching the subject at all — would pass every refusal assertion
+  above it.
+
+  Four-target verification: all four build with **zero** warnings in the two
+  edited files and zero format warnings. Unlike a no-op cast, this adds real
+  code, so the images must get *bigger*, and a size equal to the old baseline
+  would mean the new translation unit was not linked:
+
+  | Target | before | after | delta |
+  |---|---|---|---|
+  | esp32 | 1683072 | 1683616 | +544 |
+  | esp32s2 | 1373488 | 1373952 | +464 |
+  | esp32s3 | 1697872 | 1698464 | +592 |
+  | esp32c3 | 1756320 | 1756848 | +528 |
+
+  `esp_mspi_get_io` and `EZPI_core_pin_is_mspi` are both present in all four
+  ELFs, which is the end-to-end proof that a private-header dependency resolves
+  and links on the xtensa and riscv32 toolchains alike. It is worth recording
+  how that was established, because two earlier attempts at it **reported
+  success and proved nothing**: the first probe function was called from nowhere
+  and `--gc-sections` dropped it; the second added
+  `__attribute__((constructor))` expecting `.init_array` to be a GC root, which
+  it is — but the component is a static library and `ld` only extracts an
+  archive member that resolves some undefined symbol, so the member was never
+  pulled in and its `.init_array` never considered. Both builds came out at
+  *exactly* the baseline size with the symbol absent, and both looked like a
+  clean pass. The size assertion is phrased as "must have changed" for that
+  reason.
+
+  What this does **not** cover is in *Known gaps*: the console UART pin and the
+  pins of a configured I²C or SPI bus are still unprotected, and those depend on
+  `sdkconfig` rather than on efuse.
 
 - **A device configuration that will not parse no longer bricks the hub.**
   `EZPI_device_prepare()` reads the stored configuration once per boot, and when
@@ -5577,13 +5732,27 @@ Listed because a changelog that only mentions what was finished is misleading.
   Beyond those sixteen, one real hole is left, and a second one this entry used
   to claim turned out not to exist:
 
-  - **Pins that are "valid" but already in use by the system.** On esp32
+  - **Pins that are "valid" but already in use by the system — the half that
+    depends on `sdkconfig` rather than on efuse.** On esp32
     `SOC_GPIO_VALID_GPIO_MASK` excludes only 24 and 28–31
-    (`soc/esp32/include/soc/soc_caps.h:131`), so GPIOs 6–11 — the SPI flash —
-    pass `GPIO_IS_VALID_GPIO` and `gpio_config()` succeeds on them. Nothing in
-    this tree knows which pins the build has claimed for the flash, the console
-    UART, or a configured I²C or SPI bus, and the last two depend on
-    `sdkconfig`.
+    (`soc/esp32/include/soc/soc_caps.h:131`), so a pin the system has already
+    claimed passes `GPIO_IS_VALID_GPIO` and `gpio_config()` succeeds on it.
+
+    The flash and PSRAM pins are no longer part of this gap. They are refused
+    at the accessor, against the set `esp_mspi_get_io()` reports for the chip
+    that is running — see *Pins the chip is using for flash or PSRAM are no
+    longer accepted as sensor pins* under *Device configuration* above. On esp32
+    that set is 6–11 for an external-flash part and 6, 7, 8, 11, 16, 17 for an
+    embedded-flash one, which is the reason it is read at runtime instead of
+    typed into a table.
+
+    What is left is the console UART pin and the pins of a configured I²C or
+    SPI bus. Nothing in this tree knows about either. The difference that
+    matters is where the answer lives: the flash pins are in efuse and the
+    bootloader, so a running chip can be asked; these are in `sdkconfig`, so
+    the answer is per-build and would have to be derived at compile time from
+    `CONFIG_ESP_CONSOLE_UART_TX_GPIO` and friends. That is a different
+    mechanism from the one above, not an extension of it.
 
   - **"Two devices claiming the same pin" was the wrong check, and an earlier
     version of this entry had it as a hole to close.** Two devices sharing a pin
@@ -5607,7 +5776,8 @@ Listed because a changelog that only mentions what was finished is misleading.
     now, and investigating it turned up the reason the second sensor on a bus
     never worked at all (see *I²C sensor bus* above).
 
-  Two things a future attempt needs, both of which cost more than they look:
+  Two things a future attempt needs, both of which looked expensive and are now
+  paid for:
 
   - **The pin keys are not one key.** The parser reads fifteen:
     `gpio`, `gpio_in`, `gpio_out`, `gpio_scl`, `gpio_sda`, `gpio_tx`, `gpio_rx`
@@ -5628,26 +5798,44 @@ Listed because a changelog that only mentions what was finished is misleading.
     of absent it accepts, and refusing any of them breaks configurations that
     work today.
 
-  For the reserved-pin half, the sources exist and are build-derived rather
-  than remembered: `soc/spi_pins.h` per target, and
-  `esp_rom_efuse_get_flash_gpio_info()` from `esp_rom_efuse.h`, which reports
-  the flash pins the running chip was actually strapped for. Both were confirmed
-  present in this IDF. That is the shape a correct check would take — read the
-  pins out of the build and the efuses, never from a table typed from memory.
+  Both of those were the reason the flash-pin half stayed deferred for as long
+  as it did, and neither turned out to block it. The fifteen keys cost nothing
+  because all fifteen already read through one accessor, and
+  `check_gpio_accessor.py` derives that key set from the
+  `ezlopi_gpio*_str` declarations rather than listing it, so a sixteenth key
+  would be covered the day it is added. The four spellings of absent cost
+  nothing because the check was placed *after* the in-range test, so it never
+  sees a sentinel. Both of those answers are reusable: a console-UART or
+  bus-pin check lands at the same line and inherits them.
+
+  **An earlier version of this paragraph named the wrong source, and the
+  correction is the interesting part.** It proposed `soc/spi_pins.h` plus
+  `esp_rom_efuse_get_flash_gpio_info()` as "the shape a correct check would
+  take". `spi_pins.h` is a compile-time header and gives the wrong answer on
+  embedded-flash parts, which use a second set of pins in the same header
+  (`SPI_D2WD_PIN_NUM_*`) selected by efuse at boot; and the efuse call is the
+  raw strapping, below the decoding the bootloader does. The implementation uses
+  `esp_mspi_get_io()` instead, which is where IDF itself already combines the
+  two, and which also knows about the esp32 WP pad coming from the image header
+  rather than from efuse. The principle the old paragraph stated was right —
+  never a table typed from memory — but the specific source it named would have
+  produced one of the wrong answers it was warning against.
 
   The intent to check at the HAL level is visible and disabled: the
   `GPIO_IS_VALID_OUTPUT_GPIO` and `GPIO_IS_VALID_GPIO` tests at
   [`ezlopi_hal_gpio.c:76`](ezlopi-hal/ezlopi-hal-gpio/ezlopi_hal_gpio.c#L76)
   and [line 96](ezlopi-hal/ezlopi-hal-gpio/ezlopi_hal_gpio.c#L96) are commented
-  out.
+  out. That is still true and still where a mode check would go, since the HAL
+  is the only layer that knows what mode a pin is being configured for.
 
-  Still deferred, and the correction above is the reason rather than an aside:
-  the first attempt at this gap named three things to check and one of them
-  would have refused a normal two-sensor I²C configuration. The cost of being
-  wrong here is refusing setups that work today, which is worse than the gap
-  itself, and getting it right means per-target and per-`sdkconfig` answers plus
-  a decision on four spellings of "no pin". That is a piece of work in its own
-  right rather than a few lines on the end of this one.
+  What remains deferred is the `sdkconfig`-derived half above and the
+  incompatible-mode case, and the original reason still holds for both: the cost
+  of being wrong is refusing setups that work today, which is worse than the gap
+  itself. The first attempt at this gap named three things to check and one of
+  them would have refused a normal two-sensor I²C configuration. The flash-pin
+  half became safe to do precisely because its answer is "the pins this chip is
+  using right now" — a set that cannot describe a working configuration. Neither
+  of the two left has that property.
 
 - **The BLE accumulator bounds are not tested, and nothing is freed on
   disconnect.** The accumulator itself is now bounded and freed iteratively (see
