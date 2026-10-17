@@ -875,6 +875,9 @@ fail:
 static bool print_string_ptr(const char *who, const unsigned char *const input, size_t input_len, printbuffer *const output_buffer)
 {
     const unsigned char *input_pointer = NULL;
+    /* One past the last byte the scan loop below looked at, and therefore the
+    ** only bound the copy loop may use -- see the comment above that loop. */
+    const unsigned char *input_end = NULL;
     unsigned char *output = NULL;
     unsigned char *output_pointer = NULL;
     size_t output_length = 0;
@@ -923,6 +926,7 @@ static bool print_string_ptr(const char *who, const unsigned char *const input, 
             break;
         }
     }
+    input_end = input_pointer;
     output_length = (size_t)(input_pointer - input) + escape_characters;
 
     output = ensure(who, output_buffer, output_length + sizeof("\"\""));
@@ -944,8 +948,38 @@ static bool print_string_ptr(const char *who, const unsigned char *const input, 
 
     output[0] = '\"';
     output_pointer = output + 1;
-    /* copy the string */
-    for (input_pointer = input; *input_pointer != '\0'; (void)input_pointer++, output_pointer++)
+    /* Copy the string, over exactly the span the scan loop measured.
+    **
+    ** This loop used to be bounded by the NUL alone, while the buffer it writes
+    ** into was sized by a scan loop bounded by the NUL *and* input_len. The two
+    ** agree only when there is a NUL at or before input_len, which is every
+    ** string cJSON built or copy-parsed and no string parse_string_with_ref()
+    ** produced: those point into the caller's payload and are terminated by
+    ** their closing quote. So a reference-parsed string containing anything
+    ** that needs escaping was copied until the next zero byte *anywhere*,
+    ** normally the end of the whole payload, into a buffer sized for the value.
+    **
+    ** That is a heap write overflow, not an overread, and it is reachable:
+    ** EZPI_device_prepare() parses the stored device configuration with
+    ** cJSON_ParseWithRef() and prints that same tree back through
+    ** cJSON_PrintPreallocated() into a 4 KB buffer, on every boot. A device
+    ** name containing one quote is enough. Measured against test_cjext.c's own
+    ** fixture: WRITE of size 1, 0 bytes after a 115-byte region, from here.
+    **
+    ** Bounding by input_end rather than by input_len again is what makes it
+    ** provable: output_length was computed from that span and the escapes found
+    ** in it, so the writes cannot leave the allocation. For every other
+    ** construction path the span ends at the NUL, so the output is unchanged.
+    **
+    ** Bounding here does not by itself make the output *right*: a reference
+    ** parser that still handed over raw escaped bytes under a decoded length
+    ** would print "a\tb" as "a\\t", in bounds. That half is fixed in
+    ** parse_string_with_ref(), which now copies such a string, so the slow loop
+    ** below is only ever reached for a NUL-terminated one and the two bounds
+    ** agree again on every path. The span bound is kept anyway, because it is
+    ** what makes the sizing and the copying agree by construction instead of by
+    ** an invariant a future parser change could break. */
+    for (input_pointer = input; input_pointer < input_end; (void)input_pointer++, output_pointer++)
     {
         if ((*input_pointer > 31) && (*input_pointer != '\"') && (*input_pointer != '\\'))
         {
@@ -1008,7 +1042,7 @@ static bool parse_object(const char *who, cJSON *const item, parse_buffer *const
 static bool print_object(const char *who, const cJSON *const item, printbuffer *const output_buffer);
 
 static bool parse_object_with_ref(const char *who, cJSON *const item, parse_buffer *const input_buffer);
-static bool parse_string_with_ref(cJSON *const item, parse_buffer *const input_buffer);
+static bool parse_string_with_ref(const char *who, cJSON *const item, parse_buffer *const input_buffer);
 static bool parse_value_with_ref(const char *who, cJSON *const item, parse_buffer *const input_buffer);
 static bool parse_array_with_ref(const char *who, cJSON *const item, parse_buffer *const input_buffer);
 
@@ -1169,7 +1203,7 @@ cJSON *cJSON_ParseWithRefOpts(const char *who, const char *value, const char **r
     return cJSON_ParseWithRefWithLengthOpts(who, value, buffer_length, return_parse_end, require_null_terminated);
 }
 
-static bool parse_string_with_ref(cJSON *const item, parse_buffer *const input_buffer)
+static bool parse_string_with_ref(const char *who, cJSON *const item, parse_buffer *const input_buffer)
 {
     const unsigned char *input_pointer = buffer_at_offset(input_buffer) + 1;
     const unsigned char *input_end = buffer_at_offset(input_buffer) + 1;
@@ -1204,6 +1238,40 @@ static bool parse_string_with_ref(cJSON *const item, parse_buffer *const input_b
         if (((size_t)(input_end - input_buffer->content) >= input_buffer->length) || (*input_end != '\"'))
         {
             goto fail; /* string ended unexpectedly */
+        }
+
+        /* A string with escapes in it cannot be referenced, so copy that one.
+        **
+        ** Referencing works because the bytes in the payload are already the
+        ** bytes of the value. An escape breaks that: the payload holds six
+        ** bytes for \u00e9 where the value is two, so there is nowhere to point
+        ** that spells the value. The length recorded below is the *decoded*
+        ** one, which is the only honest answer, and it then does not match the
+        ** bytes at valuestring -- a reader stops short of the closing quote
+        ** mid-escape, and print_string_ptr() re-escapes the raw backslash, so
+        ** {"dev_name":"a\tb"} printed back out reads {"dev_name":"a\\t"}. That
+        ** is a silent corruption of a value on the way to NVS, because
+        ** EZPI_device_prepare() parses the stored configuration this way and
+        ** prints the same tree back to store it.
+        **
+        ** Delegating to parse_string() rather than decoding here keeps one copy
+        ** of the escape and surrogate-pair logic, and gives the item exactly
+        ** the shape cJSON_Parse() would have given it: owned, NUL-terminated,
+        ** str_value_len the quote-to-quote span. Mixed ownership inside one
+        ** tree is already what the teardown expects -- cJSON_Delete() decides
+        ** per item, and parse_object_with_ref() only marks a key const when
+        ** is_key_ref says it is a reference -- so a copied string here is freed
+        ** exactly once, as a value through the type check and as a key through
+        ** the is_key_ref check.
+        **
+        ** The cost is an allocation on the path chosen to avoid allocating, so
+        ** it is worth being precise about when: only for a string that actually
+        ** contains a backslash. No key or value in a device configuration has
+        ** one unless a user put it there, which is exactly the case this
+        ** fixes. */
+        if (skipped_bytes > 0)
+        {
+            return parse_string(who, item, input_buffer);
         }
 
         item->is_value_ref = cJSON_True;
@@ -1259,7 +1327,7 @@ static bool parse_value_with_ref(const char *who, cJSON *const item, parse_buffe
     /* string */
     if (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == '\"'))
     {
-        return parse_string_with_ref(item, input_buffer);
+        return parse_string_with_ref(who, item, input_buffer);
     }
     /* number */
     if (can_access_at_index(input_buffer, 0) && ((buffer_at_offset(input_buffer)[0] == '-') || ((buffer_at_offset(input_buffer)[0] >= '0') && (buffer_at_offset(input_buffer)[0] <= '9'))))
@@ -2068,7 +2136,7 @@ static bool parse_object_with_ref(const char *who, cJSON *const item, parse_buff
         /* parse the name of the child */
         input_buffer->offset++;
         buffer_skip_whitespace(input_buffer);
-        if (!parse_string_with_ref(current_item, input_buffer))
+        if (!parse_string_with_ref(who, current_item, input_buffer))
         {
             goto fail; /* failed to parse name */
         }

@@ -266,7 +266,7 @@ static void test_string_member_is_the_key_not_the_value(void)
  *
  * Every fix in this batch is written as "cj_x && cJSON_IsString(cj_x)" or as a
  * bare "cJSON_IsString(element)" inside a walk. The bare form is only correct
- * because the predicate itself handles NULL (cjext.c:3477).
+ * because the predicate itself handles NULL (cjext.c:3545).
  */
 static void test_type_predicates_are_null_safe(void)
 {
@@ -359,7 +359,7 @@ static void test_borrowed_member_is_still_linked_to_siblings(void)
  *
  * Detach rather than delete is used here so the node can be inspected without
  * reading freed memory -- cJSON_DeleteItemFromArray is just detach plus free
- * (cjext.c:2709), so this exercises the same unlink path.
+ * (cjext.c:2777), so this exercises the same unlink path.
  */
 static void test_detach_clears_next_and_shifts_indices(void)
 {
@@ -382,7 +382,7 @@ static void test_detach_clears_next_and_shifts_indices(void)
         CHECK(detached == middle, "detach should return the same node");
 
         /* The truncation half: ArrayForEach would stop dead here. */
-        CHECK(NULL == detached->next, "a detached node's ->next must be NULL (cjext.c:2692)");
+        CHECK(NULL == detached->next, "a detached node's ->next must be NULL (cjext.c:2760)");
         CHECK(NULL == detached->prev, "a detached node's ->prev must be NULL");
 
         /* The off-by-one half: "cc" has moved from index 2 to index 1. */
@@ -537,16 +537,16 @@ static void test_str_value_len_includes_the_terminator(void)
  *
  *   - cJSON_Parse -> parse_object -> parse_string stores the span from the
  *     opening quote to the closing one, which is strlen + 1 (cjext.c:783,
- *     1954). The budget therefore extends one past the key's last character,
+ *     2022). The budget therefore extends one past the key's last character,
  *     the compare reaches the key's NUL, and a longer name is rejected. This
  *     path has always been correct -- by accident, as a side effect of a length
  *     that is really an allocation size.
  *   - cJSON_ParseWithRef -> parse_object_with_ref -> parse_string_with_ref
- *     subtracts that one (cjext.c:1211, 2081), so the budget stops exactly at
+ *     subtracts that one (cjext.c:1279, 2149), so the budget stops exactly at
  *     the end of the key and "configSize" matches "config". This key is also
  *     not NUL-terminated: it points into the payload and is followed by a
  *     quote, so the compare cannot simply be given a longer budget.
- *   - add_item_to_object stores strlen(new_key) (cjext.c:2480), so every tree
+ *   - add_item_to_object stores strlen(new_key) (cjext.c:2548), so every tree
  *     built in code has the same defect as the reference parser's.
  *
  * All three are asserted here because the fix has to be one that holds for all
@@ -554,7 +554,7 @@ static void test_str_value_len_includes_the_terminator(void)
  * reasons -- one of which forbids reading key[strlen].
  *
  * The case-sensitive variant compares max(strlen(name), str_key_len) with
- * strncmp (cjext.c:2320) and so has never had the defect. It is checked
+ * strncmp (cjext.c:2388) and so has never had the defect. It is checked
  * alongside because it is the detail that proves the diagnosis is about the
  * comparison budget and not about the key strings.
  */
@@ -659,11 +659,11 @@ static void test_object_lookup_is_not_prefix_ambiguous(void)
  *
  * This is here because the recorded fix for the defect above was to change the
  * length that add_item_to_object stores, and that length is also handed to the
- * key printer at cjext.c:2183 -- through which every response from all 123 API
+ * key printer at cjext.c:2251 -- through which every response from all 123 API
  * methods passes. That is a real code path, but the printer's scan loop is
  * `(*input_pointer && input_len--)`, which tests the NUL *first*, so any budget
  * at or above strlen produces identical output and the escape loop at
- * cjext.c:948 ignores the budget altogether.
+ * cjext.c:982 ignores the budget altogether.
  *
  * Asserted rather than argued, and asserted on a tree whose keys have both
  * conventions in it at once: parsed keys carry strlen + 1 and keys added in
@@ -726,7 +726,7 @@ static void test_key_printing_does_not_depend_on_the_recorded_length(void)
  * Same root cause as the lookup defect above -- a recorded length that is not
  * one convention -- but a different consequence, and a worse one.
  * cJSON_Duplicate hands item->str_key_len and item->str_value_len to
- * cJSON_strdup (cjext.c:3243, :3255), which allocated len + 1 and then copied
+ * cJSON_strdup (cjext.c:3311, :3323), which allocated len + 1 and then copied
  * len + 1 bytes out of the source. That is only right when len is a strlen, so
  * that the extra byte is the source's own terminator.
  *
@@ -808,6 +808,238 @@ static void test_duplicating_a_reference_tree_yields_c_strings(void)
     cJSON_Delete(WHO, referenced);
 }
 
+/**
+ * @brief A reference-parsed tree containing escapes prints back byte-for-byte.
+ *
+ * This is the one that mattered most, because the firmware does exactly it on
+ * every boot: EZPI_device_prepare() parses the stored device configuration with
+ * cJSON_ParseWithRef() and hands that same tree to
+ * EZPI_core_factory_info_v3_set_ezlopi_config(), which prints it back with
+ * cJSON_PrintPreallocated() into a 4 KB buffer and writes the result to NVS. So
+ * whatever this printer does to an escaped value is what gets stored.
+ *
+ * Two separate defects met here, and the test is written to tell them apart.
+ *
+ * The bounds one: print_string_ptr()'s copy loop was bounded by the NUL alone,
+ * while the buffer it writes into was sized by a scan loop bounded by the NUL
+ * *and* the recorded length. A referenced string has no NUL -- it ends at its
+ * closing quote -- so the copy ran to the next zero byte anywhere, normally the
+ * end of the whole payload, into a buffer sized for one value. A heap write
+ * overflow. Against this fixture, with the pre-fix cjext.c spliced back in,
+ * ASan reports WRITE of size 1, 0 bytes after a 115-byte region, inside
+ * print_string_ptr.
+ * The tight-buffer case below is the part that catches that: the destination is
+ * sized from the copying parser's output, so it is exactly big enough for the
+ * correct answer and the redzone sits immediately after it.
+ *
+ * The meaning one: even in bounds the output was wrong, because the reference
+ * parser records the decoded length while valuestring points at raw bytes, so
+ * the copy stopped mid-escape and re-escaped the backslash it had already
+ * passed -- "a\tb" came back as "a\\t", a tab turned into a literal backslash
+ * and the b dropped. Fixed by not referencing an escaped string at all; see the
+ * comment in parse_string_with_ref(). The strcmp against the copying parser's
+ * output is the part that catches that one, and it needs no sanitizer.
+ *
+ * Both parsers are run on the same text and their printed forms compared, so
+ * the expected value is measured rather than written out by hand -- there is no
+ * hand-computed length anywhere in here for the fix to be checked against.
+ */
+static void test_printing_a_reference_tree_with_escapes_round_trips(void)
+{
+    /* Every escape the printer has a branch for, plus a \u sequence that
+     * decodes to two bytes, and ordinary payload after them so that an
+     * over-copy has somewhere to run to. Each value is followed by more text,
+     * which is the condition for the overflow -- a lone value at the end of the
+     * payload over-copies into the allocator's slack and hides it. */
+    char payload[] = "{\"dev_name\":\"a\\tb\",\"room\":\"Kid\\\"s\","
+                     "\"path\":\"C:\\\\tmp\",\"city\":\"caf\\u00e9\","
+                     "\"ctrl\":\"x\\u0001y\",\"plain\":\"nothing to escape\"}";
+
+    cJSON *copied = cJSON_Parse(WHO, payload);
+    cJSON *referenced = cJSON_ParseWithRef(WHO, payload);
+    char *from_copy = NULL;
+    char *from_ref = NULL;
+    cJSON *item = NULL;
+
+    CHECK(NULL != copied, "copying parser rejected the fixture");
+    CHECK(NULL != referenced, "reference parser rejected the fixture");
+
+    if (NULL != copied)
+    {
+        from_copy = cJSON_PrintUnformatted(WHO, copied);
+        CHECK(NULL != from_copy, "printing the copied tree failed");
+    }
+    if (NULL != referenced)
+    {
+        from_ref = cJSON_PrintUnformatted(WHO, referenced);
+        CHECK(NULL != from_ref, "printing the reference-parsed tree failed");
+    }
+
+    if ((NULL != from_copy) && (NULL != from_ref))
+    {
+        CHECK(0 == strcmp(from_copy, from_ref),
+              "the two parsers must print the same text\n     copy: %s\n      ref: %s",
+              from_copy, from_ref);
+    }
+
+    /* Spelled out for the one value the probe used, so that a failure says
+     * which byte went wrong rather than only that two long strings differ. */
+    if (NULL != referenced)
+    {
+        item = cJSON_GetObjectItem(WHO, referenced, "dev_name");
+        CHECK(cJSON_IsString(item) && (NULL != item->valuestring) &&
+                  (0 == strcmp(item->valuestring, "a\tb")),
+              "a referenced escaped value decodes to a<TAB>b, got \"%s\"",
+              ((NULL != item) && (NULL != item->valuestring)) ? item->valuestring : "(null)");
+
+        item = cJSON_GetObjectItem(WHO, referenced, "city");
+        CHECK(cJSON_IsString(item) && (NULL != item->valuestring) &&
+                  (0 == strcmp(item->valuestring, "caf\xc3\xa9")),
+              "a \\u escape decodes to UTF-8");
+
+        /* The neighbour with no escapes must still be a reference, or this
+         * test would pass for the wrong reason -- a parser that copied every
+         * string would satisfy everything above. */
+        item = cJSON_GetObjectItem(WHO, referenced, "plain");
+        CHECK(cJSON_IsString(item) && (cJSON_True == item->is_value_ref),
+              "a string with no escapes is still referenced, not copied");
+    }
+
+    /* The bounds case: print into the smallest buffer that can hold the correct
+     * answer and not one byte more, so that the redzone sits immediately after
+     * the last legitimate byte. Pre-fix this wrote past the end -- measured at
+     * 0 bytes after a 21-byte region on a payload much shorter than this one.
+     *
+     * That smallest size is strlen + 2, not strlen + 1, which is worth a word
+     * because it looks like an off-by-one in the test. cJSON_PrintPreallocated()
+     * wants one byte more than the finished output needs, for every value shape
+     * tried -- a bare number, a flat object, a nested one, an array, with and
+     * without escapes. It is a property of the preallocated path's accounting,
+     * not of escaping, and it is unchanged by the fixes here: the same probe
+     * against the previous commit's cjext.c reports the same requirement for
+     * all ten shapes. Pinned in both directions below so that the sizing here
+     * is a recorded fact rather than a magic number, and so that a future
+     * change to ensure() which tightens or loosens it is caught here rather
+     * than in a caller that quietly starts returning false. */
+    if ((NULL != referenced) && (NULL != from_copy))
+    {
+        size_t exact = strlen(from_copy);
+        char *tight = (char *)ezlopi_malloc(WHO, exact + 2);
+        char *too_small = (char *)ezlopi_malloc(WHO, exact + 1);
+
+        CHECK((NULL != tight) && (NULL != too_small), "allocating the buffers failed");
+        if ((NULL != tight) && (NULL != too_small))
+        {
+            CHECK(cJSON_PrintPreallocated(WHO, referenced, tight, (int)(exact + 2), false),
+                  "printing into strlen + 2 must succeed");
+            CHECK(0 == strcmp(tight, from_copy),
+                  "the tight print must match the copying parser's output\n"
+                  "    tight: %s\n     copy: %s",
+                  tight, from_copy);
+
+            CHECK(!cJSON_PrintPreallocated(WHO, referenced, too_small, (int)(exact + 1), false),
+                  "strlen + 1 is one byte short, and must be refused rather "
+                  "than written past");
+        }
+        if (NULL != tight)
+        {
+            ezlopi_free(WHO, tight);
+        }
+        if (NULL != too_small)
+        {
+            ezlopi_free(WHO, too_small);
+        }
+    }
+
+    if (NULL != from_copy)
+    {
+        ezlopi_free(WHO, from_copy);
+    }
+    if (NULL != from_ref)
+    {
+        ezlopi_free(WHO, from_ref);
+    }
+    cJSON_Delete(WHO, copied);
+    cJSON_Delete(WHO, referenced);
+}
+
+/**
+ * @brief One reference-parsed tree holds both owned and referenced strings.
+ *
+ * The fix for the escaped-value corruption is that parse_string_with_ref()
+ * copies a string containing a backslash instead of pointing at it, so a single
+ * tree now has both kinds in it. That is not a new idea in this file --
+ * cJSON_Delete() already decides per item, and parse_object_with_ref() only
+ * marks a key cJSON_StringIsConst when is_key_ref says it is a reference, which
+ * is exactly the hook a copied key needs -- but it is now load-bearing, so it
+ * is asserted rather than assumed.
+ *
+ * The teardown half of the claim is checked by ASan and LeakSanitizer rather
+ * than by an assertion: a copied string that the type bits said was a reference
+ * would leak, and a referenced string that they said was owned would be a free
+ * of a pointer into this function's own array. Both are fatal under the suite's
+ * sanitizer flags, so the test failing to crash is the result.
+ */
+static void test_an_escaped_string_is_copied_not_referenced(void)
+{
+    /* An escaped key and a plain key, an escaped value and a plain value, so
+     * all four combinations of (key, value) x (owned, referenced) appear. */
+    char payload[] = "{\"a\\tb\":\"c\\td\",\"plain\":\"zz\"}";
+
+    cJSON *tree = cJSON_ParseWithRef(WHO, payload);
+    cJSON *escaped = NULL;
+    cJSON *plain = NULL;
+
+    CHECK(NULL != tree, "reference parser rejected the fixture");
+
+    if (NULL != tree)
+    {
+        /* Found by its decoded name, which is the whole point: the key in the
+         * payload reads a\tb as four bytes and the name is three. */
+        escaped = cJSON_GetObjectItem(WHO, tree, "a\tb");
+        plain = cJSON_GetObjectItem(WHO, tree, "plain");
+
+        CHECK(NULL != escaped, "an escaped key is found by its decoded name");
+        CHECK(NULL != plain, "the plain key beside it is still found");
+    }
+
+    if (NULL != escaped)
+    {
+        CHECK(cJSON_False == escaped->is_key_ref,
+              "an escaped key is owned, so is_key_ref must say so");
+        CHECK((NULL != escaped->string) && ('\0' == escaped->string[strlen("a\tb")]),
+              "an owned key is NUL-terminated");
+        CHECK(0 == strcmp(escaped->string, "a\tb"),
+              "an owned key reads back decoded, got \"%s\"", escaped->string);
+
+        CHECK(cJSON_False == escaped->is_value_ref,
+              "an escaped value is owned, so is_value_ref must say so");
+        CHECK((NULL != escaped->valuestring) && (0 == strcmp(escaped->valuestring, "c\td")),
+              "an owned value reads back decoded, got \"%s\"",
+              (NULL != escaped->valuestring) ? escaped->valuestring : "(null)");
+
+        /* Not merely "not in the payload": inside it. An owned copy must not
+         * alias the text it was decoded from, or the free would be wrong. */
+        CHECK((escaped->string < payload) ||
+                  (escaped->string >= (payload + sizeof(payload))),
+              "an owned key does not point into the payload");
+    }
+
+    if (NULL != plain)
+    {
+        CHECK(cJSON_True == plain->is_key_ref,
+              "a plain key is still referenced");
+        CHECK(cJSON_True == plain->is_value_ref,
+              "a plain value is still referenced");
+        CHECK((NULL != plain->valuestring) &&
+                  (plain->valuestring > payload) &&
+                  (plain->valuestring < (payload + sizeof(payload))),
+              "a referenced value points into the payload");
+    }
+
+    cJSON_Delete(WHO, tree);
+}
+
 /*******************************************************************************
  *                          Public Function Definitions
  *******************************************************************************/
@@ -838,6 +1070,8 @@ int main(void)
     test_object_lookup_is_not_prefix_ambiguous();
     test_key_printing_does_not_depend_on_the_recorded_length();
     test_duplicating_a_reference_tree_yields_c_strings();
+    test_printing_a_reference_tree_with_escapes_round_trips();
+    test_an_escaped_string_is_copied_not_referenced();
 
     printf("%u check(s), %u failure(s)\n", tests_run, tests_failed);
 

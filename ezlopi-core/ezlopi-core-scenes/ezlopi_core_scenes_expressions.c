@@ -1552,10 +1552,10 @@ static int __remove_exp_id_from_nvs_exp_list(uint32_t target_id)
             while (cj_exp_id)
             {
                 /* ->next is captured *before* the delete below.
-                 * cJSON_DeleteItemFromArray frees the node (cjext.c:2709),
+                 * cJSON_DeleteItemFromArray frees the node (cjext.c:2777),
                  * and cJSON_ArrayForEach's "element = element->next"
                  * (cjext.h:246) then read it back out of freed memory.
-                 * Detaching also NULLs the node's ->next (cjext.c:2692),
+                 * Detaching also NULLs the node's ->next (cjext.c:2760),
                  * so even ignoring the free, the walk stopped dead at the
                  * first match -- which defeats the "incase for doubles"
                  * intent of this loop. */

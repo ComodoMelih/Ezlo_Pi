@@ -13,9 +13,9 @@ findings. Twenty-nine of the findings were one copy-pasted mistake:
         EZPI_core_nvs_write_rooms(updated_rooms);
         ...
 
-Both halves of that are load-bearing. cJSON_PrintBuffered() (cjext.c:1440)
-really does return NULL -- on a negative prebuffer (1389), on ezlopi_malloc()
-failure (1395), and on print_value() failure (1406) -- which is precisely why
+Both halves of that are load-bearing. cJSON_PrintBuffered() (cjext.c:1508)
+really does return NULL -- on a negative prebuffer (1514), on ezlopi_malloc()
+failure (1520), and on print_value() failure (1531) -- which is precisely why
 every one of these sites has an `if (ptr)` written for it. And TRACE_D really
 is compiled in: CONFIG_EZPI_UTIL_TRACE_EN is `default y` in Kconfig.projbuild
 and =y in all four committed sdkconfig.defaults.* files. So the strlen(NULL)

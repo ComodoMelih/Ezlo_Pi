@@ -26,8 +26,11 @@
  *         cJSON_AddNullToObject(__FUNCTION__, cj_response, ezlopi_error_str);
  *
  * and cjext's add_item_to_object() ends in add_item_to_array(). It appends.
- * There is no replace and no duplicate check -- see the note in cjext.c around
- * line 2386 and the test for it in test_cjext.c. So a handler that had already
+ * There is no replace and no duplicate check -- see add_item_to_array()'s own
+ * "append to the end" at cjext.c:2479, and the test for it in test_cjext.c.
+ * (This read "around line 2386", which was already stale before this commit:
+ * written as prose rather than as "cjext.c:N", it was invisible to every sweep
+ * that renumbered the citations around it.) So a handler that had already
  * reported a failure produced a reply with two members of that name:
  *
  *     {"result":{...},"error":{"code":-32602,...},"error":null}
@@ -533,7 +536,7 @@ static void test_envelope_echoes_the_request_fields(void)
 /* A reply that omits id/sender/method is a reply a UI cannot match to the call
 ** it made. This records what the subject does with a request that left them
 ** out -- it omits them rather than inventing or crashing, because cjext's
-** add_item_to_object() refuses a NULL item (cjext.c:2449). Recorded rather
+** add_item_to_object() refuses a NULL item (cjext.c:2517). Recorded rather
 ** than asserted as desirable: a client is on its own correlating this. */
 static void test_request_without_id_does_not_crash(void)
 {
