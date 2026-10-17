@@ -871,6 +871,125 @@ None of these have been exercised on physical hardware; see Known gaps.
   All four targets build clean, with the fixed destructor present in each ELF.
   Not exercised on physical hardware; see Known gaps.
 
+- **A `strlen()` on address `0x1`, because the guard in front of it tested the
+  wrong one of two type fields — and a `!= NULL` test cannot catch it.**
+  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
+  read `field_value.u_value.value_string` behind a test on
+  `curr_field->value_type` plus a null check, then handed the result to
+  [`ISSUNSTATE_check_mdrn`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L762),
+  which calls
+  [`strlen`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L767)
+  on it. Both halves of that guard look right and neither is.
+
+  `l_fields_v2_t` carries two type-ish members, and they are not the same
+  question. `field_value.e_type` is the union discriminant: it is set by
+  [`EZPI_scenes_populate_fields_get_value`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_populate.c#L494)
+  from the *actual JSON type* of the `value` member, on the line next to the
+  write into the union. `value_type` is the declared schema type: it is set by
+  [`EZPI_scenes_populate_assign_field`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_populate.c#L633)
+  from the `"type"` *string* in the scene JSON. Nothing cross-checks the two, so
+  `{"type":"token","value":true}` is an accepted field whose `value_type` says
+  TOKEN and whose `e_type` says BOOL. Testing `value_type` therefore tells you
+  what the field was *labelled*, not which union member is live.
+
+  The null check is the part worth dwelling on, because it is the reason this
+  survived a reading pass. A field is `memset` to zero at allocation and
+  `u_value.value_bool = true` writes one byte of
+  [`u_field_value_v2_t`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_v2_type_declaration.h#L129),
+  so `value_string` reads back as `0x1` — non-null, so `NULL !=` passes, and
+  `strlen` then walks address 1. A number is the same shape with the low word of
+  the double standing in for the pointer. The question was never whether the
+  pointer is null; it is whether it is a pointer.
+
+  That is not reasoning that deserves to be taken on trust, so it is measured:
+  the first new check in
+  [`tests/host/test_scenefields.c`](tests/host/test_scenefields.c) performs
+  exactly the write the `cJSON_True` arm performs and prints the value it reads
+  back out of the other member.
+
+  **Reachable by anyone who can create or edit a scene**, which is the part that
+  makes it a [sec] item rather than a tidiness one. The isSunState dispatcher
+  selects a handler by field *name* and never looks at the type at all —
+  [`EZPI_STRNCMP_IF_EQUAL`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods.c#L581)
+  against a six-entry name table — so a field named `range` reaches this
+  function whatever its declared or actual type, and the handler's own
+  `value_type` test was the only thing in the way.
+
+  **The fix is to read the discriminant, which is what the rest of the component
+  already did.** The serializer does it for this exact schema type — the TOKEN
+  arm of `__cjson_add_fields` dispatches on
+  [`e_type`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_cjson.c#L761) and
+  *warns* rather than reading the union when it is neither a string nor a cJSON.
+  So does the destructor:
+  [`EZPI_core_scenes_delete_field_value`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_delete.c#L248)
+  switches on `e_type` to decide what the union holds. A TOKEN carrying a
+  non-string is a state two other readers already treat as legitimate; this one
+  was the deviation. It is also the second site of this shape fixed on this
+  branch — the sibling
+  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L630)
+  was corrected under *Scene HTTP requests* — which is why the remainder is
+  recorded as a class under *Known gaps* rather than as one more line item.
+
+  **De-unioning the value was considered and rejected on a measured cost.**
+  Making `u_field_value_v2_t` a `struct` would end this defect class at the
+  layout level rather than one reader at a time, and it was tempting because
+  this tree already contains an "a struct, not a union" fix — the
+  `s_item_expn_data_t` item in the next section. That precedent does not apply:
+  there the tag and the value shared storage, so storing the value destroyed the
+  tag. `s_field_value_t` is already the correct tagged-union shape; the tag was
+  present and simply not read. And the cost is real — compiled both ways,
+  `sizeof(u_field_value_v2_t)` goes 8 → 48 and `sizeof(l_fields_v2_t)` 88 → 128,
+  so 40 bytes per field on every field of every block of every scene, to fix
+  readers that should be reading the tag they already have.
+
+  **No diagnostic is emitted on the mismatch arm, deliberately.** This function
+  runs about once a second, so a trace here would be precisely the log flood the
+  retry backoff under *Scene HTTP requests* was written to stop. The sibling
+  `ISSUNSTATE_get_offs_tmval` *does* trace its equivalent mismatch and can,
+  because its once-per-day gate rate-limits it; there is no equivalent gate
+  here. The cost is that a mistyped `range` field now makes the scene quietly
+  not fire instead of crashing — better, but not good, and listed under *Known
+  gaps* with the place a once-per-scene check belongs.
+
+  **Evidence, and what it does and does not cover.** The three new checks are
+  layout claims about the union, not tests of the guard: this file has no host
+  harness — it needs NVS, HTTP, a clock and five sibling scene modules — so the
+  host suite covers the *premise* and the build sweep covers the wiring, and
+  neither substitutes for the other. `test_scenefields` goes 18 → 24 checks, 0
+  failures, clean under `-Werror` with ASan and UBSan.
+
+  The control is the layout itself, which is the only way to show these checks
+  are not tautologies: with `union` changed to `struct` the bool check fails
+  with `a stored \`true\` reads back as value_string (nil)`, and restoring the
+  union returns it to 24 passing. A third check is the opposite control — a
+  token that really does hold a string still passes the discriminant test — so
+  the first two cannot be satisfied by a guard that rejects everything.
+
+  Four targets cross-built against a `git archive HEAD` baseline, 0 errors on
+  either side: esp32 +16 bytes of image, esp32s2 +16, esp32s3 +16, esp32c3 +16.
+  Both controls held constant on every target, which matters more than usual
+  here: the whole translation unit sits behind
+  `CONFIG_EZPI_SERV_ENABLE_MESHBOTS`, so a config drift would make a build that
+  compiled none of this indistinguishable from a successful one. The one warning
+  reported in this file on each side of each target is an upstream
+  `#warning "need to optimize these switch-case"` directive, not a diagnostic
+  about code; it is identical before and after.
+
+  **One thing the sweep taught about the sweeps.** `.flash.text` is not a clean
+  measure of a change in this tree, and the build numbers in this document
+  should be read accordingly. The sweep was run twice over code that was
+  byte-identical between runs — only a comment had grown — and `.flash.text`
+  reported `+12/+12/+12/+10` the first time and `+16/+16/+16/+12` the second.
+  The cause is that every `TRACE_*` macro expands to a call carrying `__LINE__`
+  as an integer argument
+  ([`ezlopi_util_trace.h`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L172)),
+  and 71 of this file's 89 trace calls sit below the edit, so adding comment
+  lines re-encodes 71 immediates and a few of them change instruction width.
+  The image size was `+16` on all four targets in *both* runs, so that is the
+  number quoted; the section attribution is not stable enough to quote.
+
+  Untested on hardware. No board has evaluated an isSunState scene.
+
 ### Scene triggers — [bug]
 
 - **A type tag stored in a `union` with the value it describes, so storing the
@@ -956,7 +1075,7 @@ None of these have been exercised on physical hardware; see Known gaps.
 
 - **"20 minutes before sunrise" fired forty minutes after it, and "30 seconds
   after" fired six hours later.** The offset half of an isSunState trigger —
-  [`__issunstate_add_offs`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1985)
+  [`__issunstate_add_offs`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L2019)
   — had seven defects in it. Its companion entry under *Scene HTTP requests*
   fixed the half that fetches the suntime; this is the half that moves it, and
   until now it moved it to the wrong place for every offset anybody would
@@ -1004,7 +1123,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   **Nothing was range-checked, and `strtoul` accepts a leading minus.** An
   out-of-range result is not a loud failure here. The moment is compared to the
   wall clock *for equality* by
-  [`ISSUNSTATE_check_mdrn`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L728),
+  [`ISSUNSTATE_check_mdrn`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L762),
   so a trigger at 81:39:39 is not an error — it is a scene that sits in the
   list, reports nothing, and never fires:
 
@@ -1110,7 +1229,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   that compare the moment to the clock —
   [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
   and
-  [`ISSUNSTATE_check_flag_result`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L773)
+  [`ISSUNSTATE_check_flag_result`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L807)
   — now require `moment_valid` first, because the struct's own zeroes read as
   00:00:00, a time the clock reaches every night.
 
@@ -6016,7 +6135,7 @@ enumerators — so the live half of this component was never affected.
   `web_server`, and the
   [`web_port = port`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L273)
   on the next line still runs with the real port. The third caller,
-  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1868),
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902),
   was never at risk: its `web_server` is a `char` array initialised from a
   literal.
 
@@ -6148,12 +6267,18 @@ enumerators — so the live half of this component was never affected.
   [DELETE](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L764) arms of
   `__ezlopi_http_generate_request()`. And the field is NULL on a path with no
   malloc on it at all.
-  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1868)
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902)
   — the third caller, the one the previous entry establishes was never at risk
   for `web_server` — builds its config with a
-  [designated initializer](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1844)
-  that names **10** of the struct's **20** members. `target_page` is one of the
-  10 it omits, so C zero-initializes it. Its `method` is `HTTP_METHOD_GET` and
+  [designated initializer](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1947)
+  that named **10** of the struct's **20** members. `target_page` was one of the
+  10 it omitted, so C zero-initialized it. (Read that line today and it names
+  **11**, because `.target_page` is what this entry adds — the count was
+  re-derived against the current file and the tense corrected rather than left
+  reading as a description of code that no longer exists. The struct's 20 was
+  re-counted by hand: a grep says 19 because `TaskHandle_t
+  mbedtls_task_handle;` does not match the pattern.) Its `method` is
+  `HTTP_METHOD_GET` and
   it sets no `username` or `password`, so it takes the GET arm that reads
   `target_page`. That is not an edge case: it is every evaluation of every
   `isSunState` condition in the device, deterministically, on first boot with
@@ -6486,7 +6611,7 @@ enumerators — so the live half of this component was never affected.
 
 - **An isSunState scene fired at 05:48 or 17:48 local time, anywhere on
   earth.** The function that was supposed to fetch today's sunrise or sunset,
-  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1868),
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902),
   was 51 lines long and had five independent defects in them. What makes it
   worth writing up as one entry rather than five is that each defect made the
   next one undetectable.
@@ -6850,8 +6975,9 @@ enumerators — so the live half of this component was never affected.
   removed" from "the file was not compiled". No new warning appears in the
   subject on any target, on either side.
 
-  The full host suite is **6154** checks across **27** binaries, 0 failures.
-  (It was 6083 when this entry was written; the suntime backoff below added 71.)
+  The full host suite is **6160** checks across **27** binaries, 0 failures.
+  (It was 6083 when this entry was written; the suntime backoff below added 71
+  and the field-discriminant guard above added 6.)
 
   **Untested on hardware.** No board has sent a scene HTTP request. Every
   number above is from a host build of the real translation unit or from a
@@ -6878,7 +7004,7 @@ enumerators — so the live half of this component was never affected.
 
   **Nothing throttled it because the state that would have throttled it was
   being deleted.**
-  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1868)
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902)
   clears `curr_tm_day` on entry and sets it only once a time has actually been
   parsed, so a failure leaves it clear — which is correct, and is the signal the
   caller reads to tell a failure from a success. But the caller's response to
@@ -7033,7 +7159,7 @@ enumerators — so the live half of this component was never affected.
   on three targets and exactly on `esp32s3`; the remainder is segment alignment
   padding in the image container.
 
-  The full host suite is **6154** checks across **27** binaries, 0 failures.
+  The full host suite is **6160** checks across **27** binaries, 0 failures.
 
   **Untested on hardware.** No board has fetched a sunrise time, and nothing has
   been flashed. The 86,400-against-50 figure is a host loop over a pure
@@ -7250,7 +7376,7 @@ enumerators — so the live half of this component was never affected.
 - **The isSunState fix in the previous section was not affected by any of
   this**, which was established by reading the call site rather than assumed
   from the shared subject matter:
-  [`ezlopi_core_scenes_when_methods_helper_functions.c#L1808`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1808)
+  [`ezlopi_core_scenes_when_methods_helper_functions.c#L1911`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1911)
   calls `EZPI_core_nvs_read_latidtude_longitude()` directly and never touches
   the cache. The blast radius of the stale-cache defect was `hub.info.get`
   alone.
@@ -9133,7 +9259,7 @@ Listed because a changelog that only mentions what was finished is misleading.
   shift and now the retry policy were all extracted so that they could be
   tested, and they have **277** assertions between them. The two functions that
   call them still have none.
-  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1868)
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902)
   needs a radio: a test for it means a seam at `EZPI_core_http_mbedtls_req` — a
   function pointer or a weak symbol — which is a larger change to the HTTP
   component than this defect warranted.
@@ -9154,6 +9280,14 @@ Listed because a changelog that only mentions what was finished is misleading.
   wiring fails nothing. That asymmetry is the shape of this whole gap, and it is
   stated here rather than left to be inferred, because the entry below reports a
   lot of green and only half of it is the kind that can go red.
+
+  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
+  is now a third function in this half, and the same way round. The discriminant
+  guard added to it under *Memory safety* has its *premise* measured — three
+  checks in `test_scenefields.c` that write a bool into the union and read a
+  non-null `char *` back out, with the de-unioned layout as a control that makes
+  them fail — and the guard itself demonstrated only by a four-target build.
+  Mutating the layout fails a check; deleting the guard fails nothing.
 
 - **The wire shape of `hms_interval` is assumed, not verified.** The isSunState
   offset parser described under *Scene triggers* takes a string — `"30"`,
@@ -9176,7 +9310,7 @@ Listed because a changelog that only mentions what was finished is misleading.
   **The same union-without-its-tag read is still present two lines away, and
   was deliberately not fixed in that change.**
   [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
-  gates on [`value_string`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L709)
+  gates on [`value_string`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L743)
   being non-NULL for its `EZLOPI_VALUE_TYPE_TOKEN` field, with
   no `e_type` check, and the `cJSON_Object` arm of field population stores
   `VALUE_TYPE_CJSON` for any value_type it does not name — `TOKEN` is not among
@@ -9360,6 +9494,65 @@ Listed because a changelog that only mentions what was finished is misleading.
   is the part worth carrying forward: any future sweep should pass
   `--platform=unix32`, or it will keep inventing `%llu` findings and hiding
   `%d` ones.
+
+- **324 reads of the scene field union are not gated on the union's own
+  discriminant, and two have been fixed one at a time.** The `strlen()` on
+  address `0x1` under *Memory safety* was not a one-off, and the honest thing is
+  to say how large the surrounding class is rather than let two fixes imply it
+  is closed.
+
+  A sweep over the nine `.c` files in `ezlopi-core-scenes` finds **369** reads
+  of a `u_value` member — excluding writes, frees, and `populate.c`/`delete.c`,
+  where the discriminant is *established* rather than consumed, so demanding a
+  guard there is backwards. Of those, **324** have no `if` or `switch` on
+  `e_type` anywhere in the chain of blocks enclosing them: `when_methods.c` 103,
+  `operators.c` 69, `then_methods.c` 59,
+  `when_methods_helper_functions.c` 47, `cjson.c` 14,
+  `then_methods_helper_func.c` 12, `scenes_v2.c` 8, `expressions.c` 6,
+  `print.c` 6.
+
+  **The split inside that number is the part that matters.** 171 of the 324 have
+  no type test of any kind. The other **153 sit under a test on `value_type`** —
+  the declared schema type — which is the exact shape of the defect that was
+  fixed: code that looks type-safe, reads as type-safe in review, and is
+  checking the wrong field. Those 153 are more dangerous than the 171, not less.
+
+  **Why this is documented rather than fixed.** The two sites corrected on this
+  branch were corrected because each was traced to a specific unsafe
+  consumer — a `strlen()` and an `snprintf("%s")`. The remaining sites have not
+  been traced that way, and `when_methods_helper_functions.c` alone is 2300-odd
+  lines with no host harness and no stub set that would give it one
+  (`tests/host/stubs-scenes/` contains a single `sdkconfig.h`). Bulk-editing 324
+  guards into a file nothing can test would trade a known, bounded defect for an
+  unknown number of unverified changes, several of which would silently disable
+  working scenes. So the two that were proven are fixed and the rest is counted.
+
+  **The sweep is a heuristic in one direction, and its own docstring says so.**
+  It walks brace depth backwards from each read to collect every dominating
+  condition, so a guard twenty lines up counts and a sibling `if` in a previous
+  block does not — but it does not understand early `return`/`continue` guards,
+  or a helper that validates on the caller's behalf. A finding therefore means
+  "no dominating `e_type` test was found here", not "this is reachable". It also
+  cannot tell a guard from a consumer: the fixed site still reports one finding,
+  because the `!= NULL` clause *of the new guard* is itself a union read. The
+  count went 325 → 324 and a diff of the two finding lists shows the one that
+  disappeared is the read passed to `ISSUNSTATE_check_mdrn` — the dangerous
+  one — with every other line a uniform shift from the comment added above.
+
+  **The structural fix, named because it is not the one taken.** The cross-check
+  belongs once, at
+  [`EZPI_scenes_populate_assign_field`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_populate.c#L633),
+  which is the one place that has both values in hand and runs once per field
+  per scene edit rather than once per second: a field whose declared `type`
+  disagrees with the `e_type` its `value` produced could be rejected at the door
+  and every downstream reader would be entitled to its assumption. That is a
+  change to the scene-accept path with a compatibility question attached — it
+  would start refusing scene JSON that today is accepted, and nobody here knows
+  what the controller actually sends — so it is not made on a guess. It is also
+  the place a diagnostic belongs, which is the second half of this gap: the
+  guard that was added is silent, because the function it is in runs about once
+  a second, so a mistyped `range` field now yields a scene that never fires and
+  no log line saying why.
 
 - **`EZPI_hal_i2c_master_deinit()` is dead code with two defects in it, and was
   left alone deliberately.** It is declared in

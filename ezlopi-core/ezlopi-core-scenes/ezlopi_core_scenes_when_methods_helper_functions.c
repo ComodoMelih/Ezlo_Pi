@@ -706,7 +706,41 @@ uint8_t ISSUNSTATE_eval_days(l_scenes_list_v2_t *scene_node, l_fields_v2_t *curr
 uint8_t ISSUNSTATE_eval_range(l_scenes_list_v2_t *scene_node, l_fields_v2_t *curr_field, struct tm *info, uint8_t curr_sunstate_mode)
 {
     uint8_t flag_check = 0;
-    if ((EZLOPI_VALUE_TYPE_TOKEN == curr_field->value_type) && (NULL != curr_field->field_value.u_value.value_string))
+    /* `value_type` is the declared scene-schema type and says nothing about
+    ** which union member is live; `field_value.e_type` is the discriminant and
+    ** does. They are set from different places and nothing cross-checks them:
+    ** EZPI_scenes_populate_assign_field takes value_type from the "type" string
+    ** in the scene JSON, while EZPI_scenes_populate_fields_get_value sets
+    ** e_type from the actual JSON type of "value". So a field declared
+    ** {"type":"token","value":true} arrives here as TOKEN holding a bool.
+    **
+    ** A NULL test cannot catch that, which is why one was not enough. The
+    ** union is zeroed at allocation and `value_bool = true` writes a single
+    ** byte of it, so `value_string` reads back as 0x1 -- non-NULL -- and
+    ** ISSUNSTATE_check_mdrn below calls strlen() on address 1. A number is the
+    ** same shape: the low word of the double becomes the pointer.
+    **
+    ** Reading the discriminant is what the rest of the component already does.
+    ** The serializer does it for this exact schema type: the TOKEN arm of
+    ** __cjson_add_fields, ezlopi_core_scenes_cjson.c line 759, dispatches on
+    ** e_type and warns rather than reading the union when it is neither a
+    ** string nor a cJSON. The destructor does it too --
+    ** EZPI_core_scenes_delete_field_value switches on e_type to decide whether
+    ** the union holds something to free. A TOKEN holding a non-string is
+    ** therefore a state two other readers already treat as legitimate; this
+    ** one was the deviation.
+    **
+    ** No diagnostic is emitted on the mismatch arm, deliberately. This
+    ** function runs about once a second, so a trace here would be the same
+    ** log flood that the retry backoff above was written to stop. The sibling
+    ** ISSUNSTATE_get_offs_tmval does trace its equivalent mismatch, and can,
+    ** because its once-per-day `moment_tm_day != curr_tm_day` gate rate-limits
+    ** it; there is no equivalent gate here. The cost is that a mistyped range
+    ** field now makes the scene quietly not fire rather than crash, with
+    ** nothing in the log -- recorded under Known gaps. */
+    if ((EZLOPI_VALUE_TYPE_TOKEN == curr_field->value_type) &&
+        (VALUE_TYPE_STRING == curr_field->field_value.e_type) &&
+        (NULL != curr_field->field_value.u_value.value_string))
     {
         s_sunstate_data_t *user_data = (s_sunstate_data_t *)(scene_node->when_block->fields->user_arg);
         if ((user_data) && (0 != user_data->sunstate_mode))

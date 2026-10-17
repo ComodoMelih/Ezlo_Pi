@@ -347,6 +347,104 @@ static void test_item_exp_number_is_not_freed_as_a_pointer(void)
     checks++;
 }
 
+/* 12 to 14. Why a NULL test is not a type test.
+ *
+ * These are layout claims, like test 9, and they exist to pin down the premise
+ * of a guard added in ezlopi_core_scenes_when_methods_helper_functions.c.
+ *
+ * `l_fields_v2_t` carries two type-ish members that are set from different
+ * places and are never cross-checked. `value_type` is the declared schema type
+ * and comes from the "type" string in the scene JSON;
+ * `field_value.e_type` is the union discriminant and is set from the actual
+ * JSON type of the "value" member, right beside the write into the union. So
+ * {"type":"token","value":true} is an accepted scene field whose value_type is
+ * EZLOPI_VALUE_TYPE_TOKEN and whose e_type is VALUE_TYPE_BOOL.
+ *
+ * Several readers in that file tested the schema type and then checked
+ * `NULL != u_value.value_string` before using it, which looks like enough and
+ * is not: the two members share bytes, so the question is not whether the
+ * pointer is NULL but whether it is a pointer at all. These checks measure
+ * what the non-pointer cases actually read back as.
+ *
+ * The exact values are little-endian-specific; the claim the guard rests on is
+ * only "non-NULL", which holds on any byte order, so that is what is asserted
+ * and the exact value is reported alongside rather than required. */
+static void test_a_bool_in_the_union_reads_back_as_a_non_null_pointer(void)
+{
+    l_fields_v2_t *f = new_field("sunrise_range");
+    char what[128];
+
+    /* Exactly what the cJSON_True arm of EZPI_scenes_populate_fields_get_value
+     * does for {"type":"token","value":true}: tag it a bool, write one byte
+     * into a union that was zeroed at allocation. */
+    f->value_type = EZLOPI_VALUE_TYPE_TOKEN;
+    f->field_value.e_type = VALUE_TYPE_BOOL;
+    f->field_value.u_value.value_bool = true;
+
+    snprintf(what, sizeof(what),
+             "a stored `true` reads back as value_string %p, which is not NULL",
+             (void *)f->field_value.u_value.value_string);
+    CHECK(NULL != f->field_value.u_value.value_string, what);
+
+    /* So the guard that was there admitted it, and strlen() would have been
+     * called on that address. This is the whole reason the discriminant has to
+     * be read. */
+    CHECK(VALUE_TYPE_STRING != f->field_value.e_type,
+          "and the discriminant says it is not a string, which is the test that works");
+
+    EZPI_scenes_delete_fields(f);
+}
+
+/* 13. The same for a number, which is the other arm that admits a scalar.
+ *
+ * A double with fractional bits sets low-order mantissa bytes, so the pointer
+ * is non-NULL on a 32-bit target where only the low word aliases it as well as
+ * on this 64-bit host. An exactly-representable value like 1234.0 has a zero
+ * low word and would read back as NULL on a 32-bit build -- which is why the
+ * bool above is the dependable primitive and this one is not asserted for a
+ * specific value. */
+static void test_a_number_in_the_union_reads_back_as_a_non_null_pointer(void)
+{
+    l_fields_v2_t *f = new_field("sunrise_range");
+    char what[128];
+
+    f->value_type = EZLOPI_VALUE_TYPE_TOKEN;
+    f->field_value.e_type = VALUE_TYPE_NUMBER;
+    f->field_value.u_value.value_double = 1234.5678;
+
+    snprintf(what, sizeof(what),
+             "a stored 1234.5678 reads back as value_string %p, which is not NULL",
+             (void *)f->field_value.u_value.value_string);
+    CHECK(NULL != f->field_value.u_value.value_string, what);
+
+    EZPI_scenes_delete_fields(f);
+}
+
+/* 14. And the control: the case the readers were written for still passes the
+ * discriminant test, so the added guard does not reject a legitimate token.
+ *
+ * Without this the two checks above would be satisfied by a guard that
+ * rejected everything. */
+static void test_a_real_string_token_still_passes_the_discriminant_test(void)
+{
+    l_fields_v2_t *f = new_field("sunrise_range");
+
+    f->value_type = EZLOPI_VALUE_TYPE_TOKEN;
+    f->field_value.e_type = VALUE_TYPE_STRING;
+    f->field_value.u_value.value_string = malloc(3);
+    assert(f->field_value.u_value.value_string);
+    snprintf(f->field_value.u_value.value_string, 3, "at");
+
+    CHECK(VALUE_TYPE_STRING == f->field_value.e_type,
+          "a token that really is a string is admitted by the discriminant");
+    CHECK(NULL != f->field_value.u_value.value_string,
+          "and is a usable pointer");
+    CHECK(0 == strcmp(f->field_value.u_value.value_string, "at"),
+          "holding the value it was given");
+
+    EZPI_scenes_delete_fields(f);
+}
+
 int main(void)
 {
     test_scalar_user_arg_is_not_freed();
@@ -360,6 +458,9 @@ int main(void)
     test_item_exp_tag_survives_its_value();
     test_item_exp_user_arg_releases_inner_string();
     test_item_exp_number_is_not_freed_as_a_pointer();
+    test_a_bool_in_the_union_reads_back_as_a_non_null_pointer();
+    test_a_number_in_the_union_reads_back_as_a_non_null_pointer();
+    test_a_real_string_token_still_passes_the_discriminant_test();
 
     printf("test_scenefields: %d checks passed\n", checks);
     return 0;
