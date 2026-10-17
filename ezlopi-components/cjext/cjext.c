@@ -92,9 +92,32 @@ const char *cJSON_Version(void)
     return version;
 }
 
-/* Case insensitive string comparison, doesn't consider two NULL pointers equal though */
+/* Case insensitive string comparison, doesn't consider two NULL pointers equal though.
+**
+** string2 is a member key and item_key_len is the length recorded for it, which
+** is not a single convention: the copying parser stores the span from the
+** opening quote to the closing one (strlen + 1, or more when the key contains
+** escapes), while parse_string_with_ref() and add_item_to_object() store
+** strlen. The previous version returned equal as soon as item_key_len
+** characters had matched and never checked that string1 ended there, so under
+** the two shorter conventions a key was matched by any name it was a prefix of
+** -- cJSON_GetObjectItem(o, "configSize") returned the "config" member of a
+** built or reference-parsed tree. The copying parser escaped that only because
+** its extra one let the compare reach the key's terminator.
+**
+** So the budget bounds the walk but does not decide equality: equality also
+** requires that string1 ends where string2 does. Written to read neither string
+** past its end under any of the conventions, which is why the budget cannot
+** just be widened instead -- a reference-parsed key points into the payload and
+** is followed by a quote rather than a NUL, so string2[item_key_len] must never
+** be read. It is not: the loop stops at the first difference or at a NUL shared
+** by both, and the check after it reads only string1, which is a caller-supplied
+** C string in every case.
+*/
 static int case_insensitive_strcmp(const unsigned char *string1, const unsigned char *string2, size_t item_key_len)
 {
+    size_t index = 0;
+
     if ((string1 == NULL) || (string2 == NULL))
     {
         return 1;
@@ -105,15 +128,26 @@ static int case_insensitive_strcmp(const unsigned char *string1, const unsigned 
         return 0;
     }
 
-    for (; (tolower(*string1) == tolower(*string2) && --item_key_len); (void)string1++, string2++)
+    for (index = 0; index < item_key_len; index++)
     {
-        if (*string1 == '\0')
+        int char1 = tolower(string1[index]);
+        int char2 = tolower(string2[index]);
+
+        if (char1 != char2)
+        {
+            return char1 - char2;
+        }
+
+        if ('\0' == char1)
         {
             return 0;
         }
     }
 
-    return tolower(*string1) - tolower(*string2);
+    /* The budget ran out with everything matched so far, which means the key
+    ** has no terminator to compare against. Equal only if the name stops here
+    ** too. */
+    return ('\0' == string1[index]) ? 0 : 1;
 }
 
 // static internal_hooks global_hooks = { internal_malloc, internal_free, internal_realloc };
@@ -135,7 +169,30 @@ static unsigned char *cJSON_strdup(const char *who, const unsigned char *string,
         return NULL;
     }
 
-    memcpy(copy, string, length);
+    /* string_len bytes and then a terminator this function writes itself, not
+    ** string_len + 1 bytes copied out of the source.
+    **
+    ** The old form required string_len to be a strlen -- so that the extra byte
+    ** it read was the source's own NUL -- and two of the seven callers do not
+    ** pass one: the two cJSON_Duplicate() sites, which propagate whatever the
+    ** source recorded. Six pass a str_value_len or str_key_len rather than a
+    ** literal strlen(), but four of those six have it assigned from strlen() on
+    ** the line above. A recorded length differs by construction: the copying
+    ** parser stores the quote-to-quote span, and parse_string_with_ref() stores
+    ** the decoded length while the text stays in the payload, ending in a quote.
+    **
+    ** So cJSON_Duplicate() of a reference-parsed tree produced keys and values
+    ** that were not C strings at all: measured on {"config":null}, the
+    ** duplicated key was the seven bytes `config"' in a seven-byte allocation
+    ** with no terminator anywhere, and strlen() on it was a heap-buffer-overflow
+    ** under AddressSanitizer. Reading one byte fewer and terminating here is
+    ** correct for every caller and for all three conventions, because a copy of
+    ** the first string_len bytes of a C string is never truncated when
+    ** string_len is at or above its strlen -- and the two over-counting
+    ** conventions are over-counting, never under. */
+    memcpy(copy, string, string_len);
+    copy[string_len] = '\0';
+
     return copy;
 }
 

@@ -285,7 +285,7 @@ static void ezpi_serv_ble_factory_reset_write_func(esp_gatt_value_t *value, esp_
                 }
                 /* No cJSON_Delete(cj_sub_cmd) here. cJSON_GetObjectItem hands
                  * back a borrowed pointer that is still linked into 'root', and
-                 * cJSON_Delete walks the ->next sibling chain (cjext.c:158), so
+                 * cJSON_Delete walks the ->next sibling chain (cjext.c:215), so
                  * deleting it freed cj_sub_cmd *and every member after it* while
                  * root still referenced them -- then the cJSON_Delete(root)
                  * below walked that freed chain. Heap corruption on any write

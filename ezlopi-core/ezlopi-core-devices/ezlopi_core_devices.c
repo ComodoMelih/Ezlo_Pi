@@ -670,7 +670,7 @@ void EZPI_device_prepare(void)
                     {
                         TRACE_D("added-chipset: %s", tmp_str);
                         /* cjext returns this from ezlopi_realloc over an
-                         * ezlopi_malloc (cjext.c:1331 and 1349), so this has to
+                         * ezlopi_malloc (cjext.c:1388 and 1406), so this has to
                          * be the matching ezlopi_free rather than plain free().
                          * Equivalent in the shipped configurations, where
                          * CONFIG_EZPI_HEAP_ENABLE is off and ezlopi_free is

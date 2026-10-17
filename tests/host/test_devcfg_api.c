@@ -337,91 +337,24 @@ bool EZPI_CLOUD_devcfg_port_driver_at(int index, const char **name,
  *                          Response readers
  *******************************************************************************/
 
-/**
- * @brief Find a member by its exact key, walking the child list directly.
- *
- * Not cJSON_GetObjectItem, and this is the one place in this file worth
- * explaining at length, because the reason is a cjext defect rather than a
- * preference.
- *
- * cjext keeps two incompatible conventions for cJSON.str_key_len:
- *
- *   - the parser stores the length *including* the NUL -- cjext.c:1897 and
- *     :2024 assign str_key_len = str_value_len, which the string parser sets
- *     to the byte count plus the terminator;
- *   - add_item_to_object stores it *excluding* the NUL -- cjext.c:2423 and
- *     :2785 assign strlen(key).
- *
- * cJSON_GetObjectItem is the case-insensitive lookup, and it passes the
- * stored key's str_key_len to case_insensitive_strcmp (cjext.c:2271) as the
- * number of bytes it is allowed to compare. That function can only reject a
- * requested name that is *longer* than the stored key by reaching the stored
- * key's NUL and comparing it against a real character -- which it can only do
- * if the budget includes the NUL.
- *
- * So on a parsed tree the budget is inclusive and the lookup is correct; on a
- * tree built with cJSON_Add*ToObject the budget runs out exactly at the prefix
- * boundary, and a lookup of a longer name matches a shorter key. Measured, on
- * a built object holding "config" then "configSize":
- *
- *     cJSON_GetObjectItem(o, "configSize")          -> the "config" node
- *     cJSON_GetObjectItemCaseSensitive(o, "config"  -> the "configSize" node
- *                                           "Size")
- *
- * The case-sensitive variant is unaffected because it compares
- * max(strlen(name), str_key_len) bytes (cjext.c:2263) and so always sees past
- * the shorter key.
- *
- * That matters here because a response is a *built* tree and the result
- * carries both "config" and "configSize". Reading it with the lookup the rest
- * of the firmware uses would make this file assert on cjext's prefix handling
- * instead of on the subject, and two checks would fail for a reason that has
- * nothing to do with the code under test.
- *
- * The defect does not reach the subject's own behaviour: requests arrive
- * parsed, so every lookup the handler and the validator perform on input --
- * "params", "config", "dev_detail", "device_id", "id_item" -- runs against the
- * inclusive convention and is correct. The serialised response is correct too;
- * the ambiguity exists only inside cjext's lookup, not in the JSON. It is not
- * fixed here: add_item_to_object's length also feeds the key printer at
- * cjext.c:2126, so changing the convention is a change to how all 123 methods
- * print, and belongs in its own commit with its own evidence rather than
- * riding along with a new API.
- *
- * test_cjext_prefix_lookup_is_still_broken() below pins the behaviour, so that
- * the day cjext is fixed this file says so instead of quietly changing
- * meaning.
- */
-static cJSON *member(cJSON *cj_object, const char *name)
-{
-    cJSON *cj_child = NULL;
-
-    if ((NULL == cj_object) || (NULL == name))
-    {
-        return NULL;
-    }
-
-    for (cj_child = cj_object->child; NULL != cj_child;
-         cj_child = cj_child->next)
-    {
-        if ((NULL != cj_child->string) &&
-            (0 == strcmp(cj_child->string, name)))
-        {
-            return cj_child;
-        }
-    }
-
-    return NULL;
-}
-
+/* Responses are read with cJSON_GetObjectItem -- the lookup the rest of the
+** firmware uses -- which is only safe to do here because cjext's
+** case_insensitive_strcmp now requires the requested name to end where the key
+** does. It did not always: the budget it was given was the key's recorded
+** length, two of whose three writers exclude the terminator, so on a *built*
+** tree -- which is what a response is -- a lookup of "configSize" returned the
+** "config" node. A result object here carries both of those keys, so this file
+** used to walk the child list with strcmp itself to avoid asserting on cjext
+** instead of on the subject. test_object_lookup_is_not_prefix_ambiguous() in
+** tests/host/test_cjext.c now owns that property for all three tree kinds. */
 static cJSON *result_of(cJSON *cj_response)
 {
-    return member(cj_response, ezlopi_result_str);
+    return cJSON_GetObjectItem(__FUNCTION__, cj_response, ezlopi_result_str);
 }
 
 static cJSON *error_of(cJSON *cj_response)
 {
-    return member(cj_response, ezlopi_error_str);
+    return cJSON_GetObjectItem(__FUNCTION__, cj_response, ezlopi_error_str);
 }
 
 /* The error's "data" token, or NULL if there is no error. */
@@ -435,7 +368,7 @@ static const char *token_of(cJSON *cj_response)
         return NULL;
     }
 
-    cj_data = member(cj_error, ezlopi_data_str);
+    cj_data = cJSON_GetObjectItem(__FUNCTION__, cj_error, ezlopi_data_str);
 
     return cJSON_IsString(cj_data) ? cj_data->valuestring : NULL;
 }
@@ -450,7 +383,7 @@ static int code_of(cJSON *cj_response)
         return 0;
     }
 
-    cj_code = member(cj_error, ezlopi_code_str);
+    cj_code = cJSON_GetObjectItem(__FUNCTION__, cj_error, ezlopi_code_str);
 
     return cJSON_IsNumber(cj_code) ? (int)cj_code->valuedouble : 0;
 }
@@ -467,7 +400,7 @@ static int bad_index_of(cJSON *cj_response)
         return -1;
     }
 
-    cj_index = member(cj_error, "badIndex");
+    cj_index = cJSON_GetObjectItem(__FUNCTION__, cj_error, "badIndex");
 
     return cJSON_IsNumber(cj_index) ? (int)cj_index->valuedouble : -1;
 }
@@ -482,7 +415,7 @@ static double number_in_result(cJSON *cj_response, const char *name)
         return -1.0;
     }
 
-    cj_value = member(cj_result, name);
+    cj_value = cJSON_GetObjectItem(__FUNCTION__, cj_result, name);
 
     return cJSON_IsNumber(cj_value) ? cj_value->valuedouble : -1.0;
 }
@@ -558,7 +491,7 @@ static cJSON *drivers_of(cJSON *cj_response)
         return NULL;
     }
 
-    cj_drivers = member(cj_result, "drivers");
+    cj_drivers = cJSON_GetObjectItem(__FUNCTION__, cj_result, "drivers");
 
     return cJSON_IsArray(cj_drivers) ? cj_drivers : NULL;
 }
@@ -589,7 +522,7 @@ static cJSON *driver_at(cJSON *cj_response, int index)
 ** care check the node directly. */
 static const char *driver_name_at(cJSON *cj_response, int index)
 {
-    cJSON *cj_name = member(driver_at(cj_response, index), "name");
+    cJSON *cj_name = cJSON_GetObjectItem(__FUNCTION__, driver_at(cj_response, index), "name");
 
     return cJSON_IsString(cj_name) ? cj_name->valuestring : NULL;
 }
@@ -649,7 +582,7 @@ static void test_get_on_an_unconfigured_hub(void)
     ok(NULL == error_of(cj_response), "no configuration is not an error");
     ok(NULL != cj_result, "there is a result");
 
-    cj_config = member(cj_result, "config");
+    cj_config = cJSON_GetObjectItem(__FUNCTION__, cj_result, "config");
     ok(NULL != cj_config, "\"config\" is present");
     ok(cJSON_IsNull(cj_config), "\"config\" is null, not absent");
 
@@ -660,7 +593,7 @@ static void test_get_on_an_unconfigured_hub(void)
        "maxConfigSize is the field size");
 
     cj_chipset =
-        member(cj_result, "expectedChipset");
+        cJSON_GetObjectItem(__FUNCTION__, cj_result, "expectedChipset");
     ok(cJSON_IsString(cj_chipset), "expectedChipset is a string");
     ok((NULL != cj_chipset) && (NULL != cj_chipset->valuestring) &&
            (0 == strcmp(cj_chipset->valuestring, THIS_CHIP)),
@@ -1221,7 +1154,7 @@ static void test_a_failed_write(void)
     ok((NULL != token_of(cj_response)) &&
            (0 == strcmp(token_of(cj_response), "devcfg.store.failed")),
        "with its own token");
-    ok(NULL == member(cj_result, "rebootRequired"),
+    ok(NULL == cJSON_GetObjectItem(__FUNCTION__, cj_result, "rebootRequired"),
        "and no rebootRequired");
 
     cJSON_Delete(__FUNCTION__, cj_response);
@@ -1296,7 +1229,7 @@ static void test_the_port_edge_cases(void)
     fakes_reset();
     fake_chipset = NULL;
     cj_response = run_get();
-    ok(cJSON_IsNull(member(result_of(cj_response), "expectedChipset")),
+    ok(cJSON_IsNull(cJSON_GetObjectItem(__FUNCTION__, result_of(cj_response), "expectedChipset")),
        "get reports a missing chipset name as null");
     cJSON_Delete(__FUNCTION__, cj_response);
 
@@ -1429,9 +1362,9 @@ static void test_every_error_reply_is_complete(void)
 
         ok(NULL != cj_error, "this request is refused");
         ok(cJSON_IsNumber(
-               member(cj_error, ezlopi_code_str)),
+               cJSON_GetObjectItem(__FUNCTION__, cj_error, ezlopi_code_str)),
            "the error has a numeric code");
-        ok(cJSON_IsString(member(cj_error,
+        ok(cJSON_IsString(cJSON_GetObjectItem(__FUNCTION__, cj_error,
                                               ezlopi_message_str)),
            "the error has a message");
         ok((NULL != got_token) && ('\0' != got_token[0]),
@@ -1442,7 +1375,7 @@ static void test_every_error_reply_is_complete(void)
         ** on its value so that "absent" and "present as -1" are told apart. */
         if (requests[i].wants_index)
         {
-            cJSON *cj_index = member(cj_error, "badIndex");
+            cJSON *cj_index = cJSON_GetObjectItem(__FUNCTION__, cj_error, "badIndex");
 
             ok(cJSON_IsNumber(cj_index),
                "an entry-specific refusal carries badIndex");
@@ -1451,7 +1384,7 @@ static void test_every_error_reply_is_complete(void)
         }
         else
         {
-            ok(NULL == member(cj_error, "badIndex"),
+            ok(NULL == cJSON_GetObjectItem(__FUNCTION__, cj_error, "badIndex"),
                "a refusal that is not about one entry omits badIndex");
         }
 
@@ -1650,7 +1583,7 @@ static void test_drivers_list_reports_the_table(void)
     for (i = 0; i < fake_table_rows; i++)
     {
         cJSON *cj_entry = driver_at(cj_response, i);
-        cJSON *cj_id = member(cj_entry, "id_item");
+        cJSON *cj_id = cJSON_GetObjectItem(__FUNCTION__, cj_entry, "id_item");
 
         ok(cJSON_IsObject(cj_entry), "every entry is an object");
         ok(cJSON_IsNumber(cj_id), "carrying a numeric id_item");
@@ -1669,9 +1602,9 @@ static void test_drivers_list_reports_the_table(void)
     /* The member is "id_item", with the underscore, because that is the key a
     ** dev_detail entry uses. A client that has to rename a key while copying a
     ** value is a client that will eventually get it wrong. */
-    ok(NULL != member(driver_at(cj_response, 0), "id_item"),
+    ok(NULL != cJSON_GetObjectItem(__FUNCTION__, driver_at(cj_response, 0), "id_item"),
        "the id is spelled the way a configuration entry spells it");
-    ok(NULL == member(driver_at(cj_response, 0), "idItem"),
+    ok(NULL == cJSON_GetObjectItem(__FUNCTION__, driver_at(cj_response, 0), "idItem"),
        "and not camel-cased as well");
 
     cJSON_Delete(__FUNCTION__, cj_response);
@@ -1761,12 +1694,12 @@ static void test_drivers_list_name_edge_cases(void)
     /* A missing name is null, not "". The two mean different things to a
     ** client: one is a driver whose name this image does not know, the other is
     ** a driver named the empty string. */
-    cj_name = member(driver_at(cj_response, 0), "name");
+    cj_name = cJSON_GetObjectItem(__FUNCTION__, driver_at(cj_response, 0), "name");
     ok(cJSON_IsNull(cj_name), "a row with no name reports null");
 
     /* All padding and nothing else trims to empty. Not null -- the table does
     ** hold a name here, it is just made entirely of alignment. */
-    cj_name = member(driver_at(cj_response, 1), "name");
+    cj_name = cJSON_GetObjectItem(__FUNCTION__, driver_at(cj_response, 1), "name");
     ok(cJSON_IsString(cj_name) && (0 == strcmp("", cj_name->valuestring)),
        "a name that is only padding trims to the empty string");
 
@@ -1873,7 +1806,7 @@ static void test_drivers_list_agrees_with_the_write_path(void)
 
     for (i = 0; i < fake_table_rows; i++)
     {
-        cJSON *cj_id = member(driver_at(cj_response, i), "id_item");
+        cJSON *cj_id = cJSON_GetObjectItem(__FUNCTION__, driver_at(cj_response, i), "id_item");
         char request[256];
         cJSON *cj_set = NULL;
 
@@ -1912,7 +1845,7 @@ static void test_drivers_list_agrees_with_the_write_path(void)
 
         for (n = 0; NULL != (cj_entry = driver_at(cj_response, n)); n++)
         {
-            cJSON *cj_id = member(cj_entry, "id_item");
+            cJSON *cj_id = cJSON_GetObjectItem(__FUNCTION__, cj_entry, "id_item");
 
             if (cJSON_IsNumber(cj_id) && (7777.0 == cj_id->valuedouble))
             {
@@ -2011,74 +1944,12 @@ static void test_drivers_list_fits_the_transport(void)
 #undef TRANSPORT_BUFFER
 }
 
-/**
- * @brief Pin the cjext lookup defect that member() exists to avoid.
- *
- * See the long comment on member(). This does not test the subject; it tests
- * the assumption the subject's response format is safe under, so that the
- * assumption cannot rot silently.
- *
- * Two things are asserted. First, that requests -- which always arrive parsed
- * -- are looked up correctly, because that is what makes the handler's own
- * input lookups sound and is the reason this defect is documented rather than
- * worked around in the subject. Second, that a *built* tree is still
- * prefix-ambiguous, which is why this file reads responses with member().
- *
- * If cjext is fixed so add_item_to_object stores the inclusive length, the
- * second check fails. That is the intended outcome: it is a prompt to drop
- * member() and the comment explaining it, not a regression. The failure
- * message says so.
- */
-static void test_cjext_prefix_lookup_is_still_broken(void)
-{
-    cJSON *cj_built = cJSON_CreateObject(__FUNCTION__);
-    cJSON *cj_parsed = must_parse("{\"config\":null,\"configSize\":7}");
-    cJSON *cj_found = NULL;
-
-    printf("test_cjext_prefix_lookup_is_still_broken\n");
-
-    if (NULL == cj_built)
-    {
-        printf("  FATAL: out of memory\n");
-        exit(2);
-    }
-
-    cJSON_AddNullToObject(__FUNCTION__, cj_built, "config");
-    cJSON_AddNumberToObject(__FUNCTION__, cj_built, "configSize", 7);
-
-    /* The half that matters for the subject: parsed input is looked up
-    ** correctly, so every lookup the handler performs on a request is sound. */
-    cj_found = cJSON_GetObjectItem(__FUNCTION__, cj_parsed, "configSize");
-    ok(cJSON_IsNumber(cj_found),
-       "cjext looks up a prefix-shadowed name correctly on a PARSED tree");
-
-    /* The half that explains member(). Not an assertion that the defect is
-    ** desirable -- an assertion that it is still there. */
-    cj_found = cJSON_GetObjectItem(__FUNCTION__, cj_built, "configSize");
-    ok((NULL != cj_found) && (NULL != cj_found->string) &&
-           (0 == strcmp(cj_found->string, "config")),
-       "cjext still returns \"config\" for \"configSize\" on a BUILT tree "
-       "(if this fails, cjext was fixed -- delete member() and its comment)");
-
-    /* The case-sensitive variant compares max(both lengths) and is unaffected,
-    ** which is the detail that proves the diagnosis is about the comparison
-    ** budget and not about the key strings. */
-    cj_found = cJSON_GetObjectItemCaseSensitive(cj_built, "configSize");
-    ok(cJSON_IsNumber(cj_found),
-       "the case-sensitive variant is correct on a built tree");
-
-    cJSON_Delete(__FUNCTION__, cj_built);
-    cJSON_Delete(__FUNCTION__, cj_parsed);
-}
-
 /*******************************************************************************
  *                          main
  *******************************************************************************/
 int main(void)
 {
     printf("test_devcfg_api\n");
-
-    test_cjext_prefix_lookup_is_still_broken();
 
     test_the_subject_exists();
     test_get_on_an_unconfigured_hub();

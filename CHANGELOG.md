@@ -2292,7 +2292,7 @@ would change that, and it is listed under Known gaps rather than claimed here.
   ```
 
   cjext's `add_item_to_object()`
-  ([`cjext.c:2386`](ezlopi-components/cjext/cjext.c#L2386)) ends in
+  ([`cjext.c:2443`](ezlopi-components/cjext/cjext.c#L2443)) ends in
   `add_item_to_array()`. It appends — no replace, no duplicate check. So a
   handler that had already reported a failure produced a reply with that member
   twice:
@@ -2459,6 +2459,245 @@ envelope one. That question has since been answered under **Dead code —
 [bug]** below: the branch and the variable are both gone, and with them the
 warning, so `ezlopi_core_api.c` now compiles without diagnostics on all four
 targets.
+
+### JSON library — [bug]
+
+Two defects in the vendored `cjext`, with one root cause: the length recorded
+beside a string does not mean the same thing in all the places that write it,
+and the code that reads it assumed it did. They are here rather than under
+*Memory safety* because neither is reachable on a shipped build — the first is
+a wrong answer rather than a bad access, and the second is latent. A third
+defect of the same family **is** reachable and is **not fixed**; it is recorded
+under *Known gaps*.
+
+The three conventions, since every claim below depends on them:
+
+| written by | value | text is |
+|---|---|---|
+| copying parser ([`cjext.c:783`](ezlopi-components/cjext/cjext.c#L783)) | span from the opening quote to the closing one — `strlen + 1`, more with `\uXXXX` escapes | owned, NUL-terminated |
+| reference parser ([`cjext.c:1211`](ezlopi-components/cjext/cjext.c#L1211)) | the decoded length — exactly `strlen` when there are no escapes | points into the caller's payload, followed by `"`, **not** NUL-terminated |
+| built in code (`add_item_to_object`, `cJSON_CreateString`, `cJSON_CreateRaw`, `cJSON_SetValuestring`, …) | `strlen` | owned, NUL-terminated |
+
+The first of those was established by reading
+`parse_string()` rather than by trusting the previous entry on this, which had
+it as "the parser stores the inclusive length" without distinguishing the two
+parsers — and the two parsers are on opposite sides of this.
+
+- **`cJSON_GetObjectItem()` returned a member whose key is merely a prefix of
+  the name asked for.** The lookup passes the *stored* key's `str_key_len` to
+  `case_insensitive_strcmp()` as a byte budget
+  ([`cjext.c:2328`](ezlopi-components/cjext/cjext.c#L2328)), and the old
+  comparison returned equal as soon as that many characters had matched,
+  without ever checking that the requested name ended there. So under the two
+  conventions that record `strlen`, a key matched any name it was a prefix of:
+  on an object holding `config`, `cJSON_GetObjectItem(o, "configSize")`
+  returned the `config` node — and did so even when no `configSize` member
+  existed at all, which is the shape that makes it dangerous, because the
+  caller gets a non-`NULL` answer where the correct one is `NULL`.
+
+  **The previously recorded diagnosis was wrong about which trees are
+  affected.** It said parsed trees were safe and built trees were not. Only the
+  *copying* parser is safe, and only by accident: its extra one lets the
+  compare reach the key's terminator. `cJSON_ParseWithRef()` records `strlen`,
+  so reference-parsed trees were affected exactly as built ones were — which
+  matters, because that is the parser the stored device configuration and the
+  BLE provisioning payload go through. The old entry's claim that
+  "parsed trees cannot misfire regardless of the name" covered both parsers and
+  was true of one.
+
+  **The previously recorded *fix* would have introduced a heap overread.** It
+  was "make `add_item_to_object()` store the inclusive length". But
+  `cJSON_strdup()` at the time copied `string_len + 1` bytes, so a built key
+  recorded as `strlen + 1` would have been copied as `strlen + 2` — one byte
+  past its own allocation — every time `cJSON_Duplicate()` ran. It would also
+  have left the reference parser broken, since nothing about it would have
+  changed. This is why the fix went in on the reading side instead.
+
+  Fixed by making the budget bound the walk without deciding equality:
+  equality now also requires the name to end where the key does
+  ([`cjext.c:117`](ezlopi-components/cjext/cjext.c#L117)). That is correct under
+  all three conventions without knowing which one produced the key, which was
+  the property worth having — the conventions are not going to be unified
+  cheaply. The budget could not simply be widened by one instead: a
+  reference-parsed key is followed by a quote rather than a NUL, so
+  `key[str_key_len]` must never be read, and the new comparison never reads it.
+
+  **The recorded blast radius turned out to be empty.** The reason this was
+  left unfixed before was that `str_key_len` also feeds the key printer, "and
+  every response from all 123 API methods goes through that printer". The
+  printer is in fact insensitive to the recorded length being *too large*: its
+  scan loop tests the NUL before the budget
+  ([`cjext.c:903`](ezlopi-components/cjext/cjext.c#L903), `(*input_pointer &&
+  input_len--)`, short-circuiting), and it derives its output length from how
+  far the pointer got rather than from the budget. So no amount of
+  over-counting changes a printed key. That is asserted rather than argued:
+  `test_key_printing_does_not_depend_on_the_recorded_length()` builds one tree
+  whose keys carry two different conventions at once and pins the exact
+  serialisation. The claim about a board was wrong too — no board was needed to
+  settle any of this.
+
+- **`cJSON_Duplicate()` produced keys and values that were not C strings.**
+  Latent, and found by following the first fix rather than by looking for it.
+  `cJSON_strdup()` allocated `string_len + 1` bytes and then `memcpy`'d
+  `string_len + 1` bytes out of the source — which is only correct if
+  `string_len` is a `strlen`, so that the extra byte read is the source's own
+  terminator. Two of its seven callers do not pass one, and both are in
+  `cJSON_Duplicate()`, which propagates whatever length the source item
+  recorded. That count is worth stating carefully, because the obvious way to
+  take it is wrong: *six* of the seven pass a `str_value_len` or a
+  `str_key_len` rather than a literal `strlen()` call, which looks alarming
+  until each is read — four of those six have the field assigned from
+  `strlen()` on the line immediately above the call, so they are `strlen`s in
+  value.
+
+  Measured, not inferred. Duplicating a reference-parsed `{"config":null}`
+  under AddressSanitizer gave a duplicated key of seven bytes, `config"`, in a
+  seven-byte allocation with no terminator anywhere, and `strlen()` on it
+  reported `heap-buffer-overflow … 0 bytes after 7-byte region`. The value side
+  ([`cjext.c:3243`](ezlopi-components/cjext/cjext.c#L3243)) is the more
+  dangerous half of the two, because `valuestring` is read as a C string in
+  hundreds of places across the firmware whereas a key is mostly only printed.
+
+  Fixed in `cJSON_strdup()` itself — copy `string_len` bytes and write the
+  terminator here — rather than at the two call sites, after checking all seven
+  callers individually: the five that pass a `strlen` are unaffected, and the
+  two in `cJSON_Duplicate()` propagate a length that is at or above the
+  source's `strlen` and never below, so copying one byte fewer cannot truncate
+  anything.
+
+  **It is latent rather than live**, and the reason is worth stating so that it
+  is not re-derived: the only two callers of `cJSON_ParseWithRef()` in the
+  firmware — [`ezlopi_core_devices.c:630`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.c#L630)
+  for the stored device configuration and
+  [`ezlopi_service_ble_provisioning.c:416`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c#L416)
+  for the provisioning payload — neither duplicates its tree. Copying-parsed
+  and built trees were over-reading by one byte within an allocation they
+  owned, which is harmless in practice and still wrong.
+
+**Evidence.** Three new tests in
+[`tests/host/test_cjext.c`](tests/host/test_cjext.c), which is now at 100
+checks, 0 failures. The lookup test was written before the fix and failed in
+exactly the three places predicted — the built tree, the reference-parsed tree,
+and the reference-parsed tree with the longer key first — and passes in all
+fifteen of its assertions after it, with `cJSON_GetObjectItemCaseSensitive()`
+as a control that was correct throughout. The duplication test was shown to fail against the old
+`cJSON_strdup()` spliced back in, reading the key back as `config"` and the
+value as `abcd"`; its first two assertions read the last byte of the
+duplicate's own allocation, so they are in bounds either way and catch the
+defect without a sanitizer, while ASan is what turns a future regression that
+runs *further* off the end into a hard error.
+
+Beyond the new tests, the fix retired a workaround:
+[`tests/host/test_devcfg_api.c`](tests/host/test_devcfg_api.c) had its own
+exact-match reader, written because the firmware's own lookup could not be
+trusted to read a response, plus a test pinning the defect in place. Both are
+gone and its 25 response reads now go through `cJSON_GetObjectItem()`, so those
+assertions exercise the fixed lookup against real built API responses rather
+than working around it. That file is at 319 checks, 0 failures.
+
+**Two long comments elsewhere in the tree describe these same conventions and
+were deliberately left alone**, which is worth saying because they are the
+obvious thing for a reader to suspect of being stale after this commit: the
+header comment on `__take_field()` in
+[`ezlopi_cloud_mqtt_config.c`](ezlopi-cloud/ezlopi-cloud-mqtt-config/ezlopi_cloud_mqtt_config.c#L417)
+and the do-not-swap-this-line note in
+[`ezlopi_core_api.c`](ezlopi-core/ezlopi-core-api/ezlopi_core_api.c#L108).
+Both were re-read against the fixed source. Both are about *values* and about
+the parsers, neither of which this commit touches — the parsers still disagree,
+a referenced value is still terminated by a quote rather than a NUL, and
+`EZPI_STRNCMP_IF_EQUAL()` still takes the longer of the two lengths — so both
+conclusions still hold and neither comment cites a `cjext.c` line number that
+the insertion could have moved. The one thing that changed is a reason the
+`ezlopi_core_api.c` note did not list: reference-parsed *keys* were also
+mis-compared on lookup. That reason is now gone, which strengthens its
+conclusion rather than weakening it, so the note stands as written.
+
+All four targets build with no new warnings: esp32 `1683856` (unchanged),
+esp32s2 `1374192` (+16), esp32s3 `1698720` (+16), esp32c3 `1757104`
+(unchanged). Sixteen bytes is the image padding quantum, so the real cost of
+both fixes together is somewhere between nothing and 16 bytes per target — a
+rewritten comparison loop and one fewer byte in a `memcpy` length. Unlike most
+entries here the generated code genuinely did change, so a zero delta on two
+targets is the padding absorbing it rather than a build that did not pick the
+change up; the +16 on the other two is what confirms the change is present.
+**Nothing was flashed.**
+
+**The tree-wide sweep that preceded the fix**, kept because it is the reason
+nobody has to go looking for broken behaviour in the field: no call site in the
+firmware was getting a wrong answer that mattered. It ran while the defect was
+still open, to decide how urgent fixing it was, and two of its conclusions were
+wrong in ways the fix exposed.
+
+The sweep started by measuring rather than by reading more `cjext.c` — a first
+pass at reading `parse_string()` had got the convention backwards. A 17-check C
+probe under ASan/UBSan reported `str_key_len` beside `strlen()` for the same
+key reached both ways, identifying a returned child by its *index* via pointer
+identity so that a correct-by-accident value could not pass. Measured: a
+copying-parsed `"config"` stores 7, a built one stores 6. Seven of the
+seventeen checks disagreed with a correct lookup. The probe also showed the
+exposure was wider than sibling pairs: an object holding `{"config":1}`
+*alone* returned that member for a `configSize` lookup, because the comparison
+stopped before the mismatch.
+
+With that, the sweep was mechanical:
+
+- **40 colliding names.** Of the key names this firmware looks up, the pairs
+  where one is a strict case-insensitive prefix of another.
+- **127 call sites** look up one of those 40 names.
+- **25 of the 127 search an object this firmware built**, found by an awk pass
+  that, per function body, intersects the locals assigned from
+  `cJSON_CreateObject`/`CreateArray`/`CreateRaw`/`Duplicate`/
+  `AddObjectToObject`/`AddArrayToObject` with the locals used as the search
+  object. The first version of that scan counted only `Create*` and so missed
+  two sites; `AddObjectToObject` returns a freshly built child and matters just
+  as much.
+- **23 of those 25 are immune by construction.** They search an item-value
+  object, and every such object in the firmware is built by the single
+  chokepoint
+  [`ezlopi_core_valueformatter.c`](ezlopi-core/ezlopi-core-valueformatter/ezlopi_core_valueformatter.c),
+  which adds only `value` and `valueFormatted`. `value` is the shortest key
+  present, so nothing can be a strict prefix of it — confirmed mechanically
+  rather than by eye, by grepping for the only four names that could be
+  (`ezlopi_v_str`, `ezlopi_va_str`, `ezlopi_val_str`, `ezlopi_valu_str`): zero
+  matches.
+- **2 sites were genuinely exposed**, both in
+  [`ezlopi_core_scenes_operators.c`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_operators.c)
+  at lines 1102 and 1148, and both look up `valueType` on a freshly-built
+  item-value object. Because that object never contains a `valueType` key, the
+  lookup resolved to the `value` item instead. Both were masked: the result
+  goes to `cJSON_GetStringValue()`, which returns `NULL` for anything that is
+  not a string, into a `NULL`-safe `STR_OP_COMP` comparison against
+  `"dictionary"`. They now get the `NULL` a correct lookup returns, so their
+  behaviour is unchanged by the fix as well as by the defect.
+
+**The first wrong conclusion was the scoping.** "Everything else searches a
+parsed tree" treated the two parsers as one and wrote off every site that
+searches a parsed tree, including explicitly `cJSON_ParseWithRef` — which
+records `strlen` and was exposed exactly as a built tree was. So the sweep's
+25-of-127 classification under-counted. The count was not redone, and the
+reason is that the fix removes the question: all 127 sites now resolve
+correctly whichever of the three ways their tree was made, which is a stronger
+statement than any recount of which ones were at risk.
+
+**The second was the residue.** The sweep left one item open:
+`ezpi_value_scales_list()` at
+[`ezlopi_cloud_scenes_block_data_list.c:268`](ezlopi-cloud/ezlopi-cloud-scenes/ezlopi_cloud_scenes_block_data_list.c#L268)
+keys a built object by the runtime `value_type` of an item and then looks that
+key back up, so a prefix pair among the value-type names would silently merge
+two types' scale lists into one — zero such pairs among the 26 value types
+shipped drivers use, but one driver away from not being zero, with no test that
+would catch it. That is closed, not by counting the names again but because the
+lookup no longer matches a name against a key it merely extends: a
+`volume_flow` lookup against a `volume` key now returns `NULL`. The
+absent-name assertions in
+`test_object_lookup_is_not_prefix_ambiguous()` are what hold that, and they
+cover both directions — a name longer than any key, and a name shorter than
+the key it is a prefix of.
+
+One claim of the sweep's that stands unchanged: the item-id keys of
+`cj_device_items_data` cannot collide, because every id is rendered `%08x` and
+so every key is exactly 8 characters, and no fixed-width set can contain a
+strict prefix pair.
 
 ### Device configuration — [bug]
 
@@ -2899,8 +3138,8 @@ targets.
   so an allocation failure while printing silently skipped both the write and
   the restart. And the print buffer is now released with `ezlopi_free()`:
   `cjext` allocates it through `ezlopi_malloc`
-  ([`cjext.c:1331`](ezlopi-components/cjext/cjext.c#L1331)) and resizes it with
-  `ezlopi_realloc` ([line 1349](ezlopi-components/cjext/cjext.c#L1349)) before
+  ([`cjext.c:1388`](ezlopi-components/cjext/cjext.c#L1388)) and resizes it with
+  `ezlopi_realloc` ([line 1406](ezlopi-components/cjext/cjext.c#L1406)) before
   returning it, so the plain `free()` there was a mismatch. Equivalent in the shipped configurations,
   where `CONFIG_EZPI_HEAP_ENABLE` is `default n` and unset in all four
   `sdkconfig.defaults.*` files so `ezlopi_free` *is* `free()`; it is the
@@ -3196,44 +3435,40 @@ targets.
   of a crash. That guard is unreachable while the validator is correct and is
   **not covered by a test**, which the comment on it says plainly.
 
-- **A `cjext` lookup defect was found and documented rather than fixed.**
-  `cJSON_GetObjectItem()` passes the *stored* key's `str_key_len` to
-  `case_insensitive_strcmp()` as the number of bytes it may compare
-  ([`cjext.c:2271`](ezlopi-components/cjext/cjext.c#L2271)), and the two places
-  that set that field disagree about whether it includes the NUL: the parser
-  stores the inclusive length ([lines
-  1897](ezlopi-components/cjext/cjext.c#L1897) and
-  [2024](ezlopi-components/cjext/cjext.c#L2024)), while
-  `add_item_to_object()` stores `strlen()` ([line
-  2423](ezlopi-components/cjext/cjext.c#L2423)). Without the NUL in the budget
-  the comparison cannot reject a requested name that is a *longer* extension of
-  a stored key. Measured, on an object holding `config` then `configSize`:
+- **A `cjext` lookup defect surfaced here, and is now fixed under *JSON
+  library* above.** `cJSON_GetObjectItem()` passed the *stored* key's
+  `str_key_len` to `case_insensitive_strcmp()` as the number of bytes it may
+  compare ([`cjext.c:2328`](ezlopi-components/cjext/cjext.c#L2328)), and the
+  comparison returned equal as soon as that many characters matched, so a key
+  was matched by any name it was a prefix of. It surfaced here because a
+  *response* is a built tree, so two checks reading `configSize` out of one
+  were getting the `config` node:
 
   ```
   built  tree: cJSON_GetObjectItem(o, "configSize") -> the "config" node
   parsed tree: cJSON_GetObjectItem(o, "configSize") -> the "configSize" node
   ```
 
-  `cJSON_GetObjectItemCaseSensitive()` is unaffected; it compares
-  `max(strlen(name), str_key_len)` bytes ([line
-  2263](ezlopi-components/cjext/cjext.c#L2263)).
+  `cJSON_GetObjectItemCaseSensitive()` was unaffected; it compares
+  `max(strlen(name), str_key_len)` bytes
+  ([`cjext.c:2320`](ezlopi-components/cjext/cjext.c#L2320)).
 
-  **It does not reach this feature's behaviour.** Requests always arrive
-  parsed, so every lookup `.set` and the validator perform on input —
-  `params`, `config`, `dev_detail`, `device_id`, `id_item` — runs under the
-  inclusive convention and is correct; and the serialised response is correct
-  JSON either way, since the ambiguity exists only inside `cjext`'s lookup. It
-  surfaced because a *response* is a built tree, so two checks reading
-  `configSize` out of one were getting the `config` node. The test reads
-  responses with its own exact-match walk and
-  `test_cjext_prefix_lookup_is_still_broken()` pins the behaviour from both
-  sides, so the day `cjext` is fixed this says so instead of quietly changing
-  meaning.
+  **It never reached this feature's behaviour**, which is why the feature
+  shipped alongside it. Requests arrive parsed, and the serialised response is
+  correct JSON either way, since the ambiguity existed only inside `cjext`'s
+  lookup. What this entry originally said beyond that was wrong on three
+  counts, each corrected under *JSON library* above: the defect was not
+  confined to built trees (`cJSON_ParseWithRef` records `strlen` too, so
+  reference-parsed trees were equally affected — only the *copying* parser
+  escaped, and by accident); the fix was not "make `add_item_to_object()` store
+  the inclusive length", which would have made `cJSON_Duplicate()` read a byte
+  past every built key; and the key printer, named here as the reason to defer,
+  is provably insensitive to the recorded length.
 
-  Not fixed here because `str_key_len` also feeds the key printer ([line
-  2126](ezlopi-components/cjext/cjext.c#L2126)): changing the convention
-  changes how all 123 methods print, which belongs in its own commit with its
-  own evidence rather than riding along with a new API.
+  The workaround this entry describes is gone. `test_devcfg_api.c` no longer
+  has its own exact-match walk and no longer pins the defect; its 27 response
+  reads call `cJSON_GetObjectItem()` directly, which is what retiring the
+  workaround was supposed to look like.
 
 - Costs **2,752 bytes** on esp32 (`0x191730` against `0x190c70`) — 1,764 in
   `.flash.text` and 984 in `.flash.rodata`, the remaining 4 being image
@@ -4076,11 +4311,11 @@ enumerators — so the live half of this component was never affected.
 
   Both halves of that matter, and both were checked rather than assumed.
   `cJSON_PrintBuffered()`
-  ([`cjext.c:1383`](ezlopi-components/cjext/cjext.c#L1383)) returns `NULL` on
+  ([`cjext.c:1440`](ezlopi-components/cjext/cjext.c#L1440)) returns `NULL` on
   three paths — a negative prebuffer
-  ([1389](ezlopi-components/cjext/cjext.c#L1389)), an `ezlopi_malloc()` failure
-  ([1395](ezlopi-components/cjext/cjext.c#L1395)), and a `print_value()`
-  failure ([1406](ezlopi-components/cjext/cjext.c#L1406)) — which is exactly
+  ([1446](ezlopi-components/cjext/cjext.c#L1446)), an `ezlopi_malloc()` failure
+  ([1452](ezlopi-components/cjext/cjext.c#L1452)), and a `print_value()`
+  failure ([1463](ezlopi-components/cjext/cjext.c#L1463)) — which is exactly
   why every one of these sites already had an `if (ptr)` written for it. And
   the trace is not compiled out: `CONFIG_EZPI_UTIL_TRACE_EN` is `default y` in
   [`Kconfig.projbuild`](ezlopi-main/Kconfig.projbuild#L18) and `=y` in all four
@@ -6025,98 +6260,78 @@ Listed because a changelog that only mentions what was finished is misleading.
   moment something needs to call it, it needs designing. Recorded here so that
   the next person to reach for it knows it has never run.
 
-- **`cJSON_GetObjectItem()` can return the wrong member, on trees this firmware
-  builds itself.** Diagnosed in full in the device-configuration entry above.
-  In one line: the key-length field means two different things depending on
-  whether a tree was parsed or built, and the case-insensitive lookup needs the
-  parsed convention to reject a requested name that extends a stored key. On a
-  built tree, looking up `configSize` can return `config`.
+- **Printing a reference-parsed string that contains an escape writes past the
+  end of the output buffer. Measured, reachable without authentication, and not
+  fixed.** This replaces the lookup entry that used to sit here, which is fixed
+  and written up under *JSON library* above. It was found while establishing
+  that the key printer was safe for *that* fix, which it is — this is a
+  different property of the same function.
 
-  Not fixed, and the reason is the size of the blast radius rather than the
-  size of the fix. The one-line change — make `add_item_to_object()` store the
-  inclusive length — also changes what the key printer at
-  [`cjext.c:2126`](ezlopi-components/cjext/cjext.c#L2126) is handed, and every
-  response from all 123 API methods goes through that printer. It needs its own
-  commit, its own host test for the printer, and a board, none of which belong
-  inside a feature change.
+  `print_string_ptr()` walks the string twice. The first loop sizes the output
+  and is bounded both by the NUL and by the recorded length
+  ([`cjext.c:903`](ezlopi-components/cjext/cjext.c#L903)). The second loop,
+  taken only when something needs escaping, is bounded by **the NUL alone**
+  ([`cjext.c:948`](ezlopi-components/cjext/cjext.c#L948)) — and it writes into
+  a buffer sized by the first. A reference-parsed string has no NUL: it points
+  into the payload and is followed by a quote. So the second loop runs from the
+  start of the value to the next zero byte *anywhere*, which is the end of the
+  entire payload, reading past the value and writing that far past the end of
+  the output buffer.
 
-  What is known: requests arrive parsed, so input validation across the
-  firmware is unaffected, and serialised output is correct either way. The
-  exposure is in-firmware code that looks up a longer member name against a
-  built tree holding a shorter prefix of it.
+  Under AddressSanitizer, with one `\t` escape in the first value, a further
+  1 KB of payload after it, and an output buffer sized to exactly what the
+  correct answer needs:
 
-  **Now audited.** The sweep is described in the entry below. Result: two call
-  sites in the whole tree are genuinely exposed, both are masked, and both are
-  unreachable on shipped hardware. The bug is still worth fixing, but it is not
-  currently costing a correct response anywhere.
+  ```
+  ERROR: AddressSanitizer: heap-buffer-overflow
+  WRITE of size 1 ... in print_string_ptr cjext.c:953
+      print_string -> print_value -> print_object -> cJSON_PrintPreallocated
+  0 bytes after 1029-byte region
+  ```
 
-- **The prefix-lookup sweep: one latent collision is left, in the scene
-  block-data scale list.** This entry records the sweep the item above used to
-  say had not been done, because its residue is a gap rather than a fix.
+  A first, smaller probe did **not** abort, and the reason is worth recording
+  because it is how this stays hidden: with only a few bytes of payload after
+  the escape, the over-writes land in allocator slack and the over-reads stop
+  at the payload's own terminator. The distance over-written is the length of
+  everything after the escape, so a short fixture shows no fault at all. What
+  it does show is the corruption: `{"dev_name":"a\tb"}` re-serialised as
+  `{"dev_name":"a\\t"}` — the value changed from `a`,TAB,`b` to `a`,`\`,`t`.
+  That is a second defect behind the first. The reference parser records the
+  *decoded* length ([`cjext.c:1211`](ezlopi-components/cjext/cjext.c#L1211), it
+  subtracts the escape backslashes) while `valuestring` points at the **raw**
+  bytes, so the recorded length does not describe the text it is attached to,
+  and even the in-bounds part of the output is wrong.
 
-  The first thing the sweep needed was ground truth, not more reading of
-  `cjext.c` — a first pass at reading `parse_string()` got the convention
-  backwards, which would have made the bug universal rather than build-only.
-  So the convention was measured instead, by a 17-check C probe built under
-  ASan/UBSan that reports `str_key_len` beside `strlen()` for the same key
-  reached both ways, and that identifies a returned child by its *index* via
-  pointer identity so a correct-by-accident value cannot pass. Measured: a
-  parsed `"config"` stores 7, a built `"config"` stores 6. Seven of the
-  seventeen checks disagree with a correct lookup, and all seven are on built
-  trees. The probe also showed the exposure is wider than sibling pairs: an
-  object holding `{"config":1}` *alone* returns that member for a `configSize`
-  lookup, because the comparison stops before the mismatch.
+  **It is on a live path, unlike the two fixed above.** Every boot,
+  `EZPI_device_prepare()` parses the stored device configuration with
+  `cJSON_ParseWithRef()`
+  ([`ezlopi_core_devices.c:630`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.c#L630))
+  and hands that tree to `EZPI_core_factory_info_v3_set_ezlopi_config()`
+  ([line 720](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.c#L720)),
+  which `cJSON_PrintPreallocated()`s it into a 4 KB heap buffer
+  ([`ezlopi_core_factory_info.c:946`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L946)).
+  That configuration is supplied by whoever provisioned the hub, over BLE
+  dynamic-config or the UART command, neither of which authenticates. A device
+  name containing a quote is enough to put an escape in it.
 
-  With the convention established, the sweep was mechanical:
+  Not fixed in the commit that fixed the other two, because it is two
+  decisions rather than one and only the first is mechanical:
 
-  - **40 colliding names.** Of the key names this firmware looks up, the pairs
-    where one is a strict case-insensitive prefix of another.
-  - **127 call sites** look up one of those 40 names.
-  - **25 of the 127 search an object this firmware built**, found by an awk
-    pass that, per function body, intersects the locals assigned from
-    `cJSON_CreateObject`/`CreateArray`/`CreateRaw`/`Duplicate`/
-    `AddObjectToObject`/`AddArrayToObject` with the locals used as the search
-    object. The first version of that scan counted only `Create*` and so missed
-    two sites; `AddObjectToObject` returns a freshly built child and matters
-    just as much. Everything else searches a parsed tree, including
-    `cJSON_ParseWithRef`, which was checked and does use the inclusive
-    convention — parsed trees cannot misfire regardless of the name.
-  - **23 of those 25 are immune by construction.** They search an item-value
-    object, and every such object in the firmware is built by the single
-    chokepoint
-    [`ezlopi_core_valueformatter.c`](ezlopi-core/ezlopi-core-valueformatter/ezlopi_core_valueformatter.c),
-    which adds only `value` and `valueFormatted`. `value` is the shortest key
-    present, so nothing can be a strict prefix of it — confirmed mechanically
-    rather than by eye, by grepping for the only four names that could be
-    (`ezlopi_v_str`, `ezlopi_va_str`, `ezlopi_val_str`, `ezlopi_valu_str`):
-    zero matches.
-  - **2 sites are genuinely exposed**, both in
-    [`ezlopi_core_scenes_operators.c`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_operators.c)
-    at lines 1102 and 1148, and both look up `valueType` on a
-    freshly-built item-value object. Because that object never contains a
-    `valueType` key, the lookup resolves to the `value` item instead. Both are
-    masked: the result goes to `cJSON_GetStringValue()`, which returns `NULL`
-    for anything that is not a string, into a `NULL`-safe `STR_OP_COMP`
-    comparison against `"dictionary"`. For every shipped driver the outcome is
-    therefore identical to the outcome of a correct lookup. They are also dead:
-    no shipped driver has a dictionary-valued item.
+  - The overflow has a small, local fix: the second loop must walk the same
+    span the first one measured, which is already sitting in `input_pointer`
+    when the first loop ends. That makes the two loops agree by construction,
+    which is the invariant the function needs and does not currently state.
+  - The corruption does not. It asks what a reference-parsed string containing
+    escapes should *mean*, given that its raw bytes are not its value — either
+    `parse_string_with_ref()` rejects such strings, or it falls back to the
+    copying path for them and gives up the no-allocation property for exactly
+    those. That changes ownership within a single tree, so it needs checking
+    against `cJSON_Delete()` rather than guessing.
 
-  What is left, and why this is a gap rather than a closed question:
-  `ezpi_value_scales_list()` at
-  [`ezlopi_cloud_scenes_block_data_list.c:268`](ezlopi-cloud/ezlopi-cloud-scenes/ezlopi_cloud_scenes_block_data_list.c#L268)
-  keys a built object by the runtime `value_type` of an item and then looks
-  that key back up. A prefix pair among the value-type names would silently
-  merge two types' scale lists into one. Counted: **zero prefix pairs among the
-  26 value types shipped drivers actually use**, so it is correct today. It is
-  one driver away from not being — a `value_type_int` already in the enum
-  alongside a new `value_type_int64`, or `volume` alongside `volume_flow`,
-  would do it, and the symptom would be a wrong scale list in a scene editor
-  rather than a crash. There is no test that would catch it.
-
-  One claim the sweep settled rather than left open: the item-id keys of
-  `cj_device_items_data` cannot collide, because every id is rendered `%08x`
-  and so every key is exactly 8 characters, and no fixed-width set can contain
-  a strict prefix pair.
+  No test covers either half yet. The three tests added with the fixes above do
+  not reach it: they use escape-free reference strings, and the printer test
+  deliberately asserts only the property the fix depended on — that an
+  over-counted length cannot change a printed key — which remains true.
 
 - **Nobody knows which `isItemStateChanged` scenes change behaviour now that
   the type tag survives.** The `union`→`struct` fix in the scene-triggers entry

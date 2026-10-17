@@ -266,7 +266,7 @@ static void test_string_member_is_the_key_not_the_value(void)
  *
  * Every fix in this batch is written as "cj_x && cJSON_IsString(cj_x)" or as a
  * bare "cJSON_IsString(element)" inside a walk. The bare form is only correct
- * because the predicate itself handles NULL (cjext.c:3420).
+ * because the predicate itself handles NULL (cjext.c:3477).
  */
 static void test_type_predicates_are_null_safe(void)
 {
@@ -359,7 +359,7 @@ static void test_borrowed_member_is_still_linked_to_siblings(void)
  *
  * Detach rather than delete is used here so the node can be inspected without
  * reading freed memory -- cJSON_DeleteItemFromArray is just detach plus free
- * (cjext.c:2652), so this exercises the same unlink path.
+ * (cjext.c:2709), so this exercises the same unlink path.
  */
 static void test_detach_clears_next_and_shifts_indices(void)
 {
@@ -382,7 +382,7 @@ static void test_detach_clears_next_and_shifts_indices(void)
         CHECK(detached == middle, "detach should return the same node");
 
         /* The truncation half: ArrayForEach would stop dead here. */
-        CHECK(NULL == detached->next, "a detached node's ->next must be NULL (cjext.c:2635)");
+        CHECK(NULL == detached->next, "a detached node's ->next must be NULL (cjext.c:2692)");
         CHECK(NULL == detached->prev, "a detached node's ->prev must be NULL");
 
         /* The off-by-one half: "cc" has moved from index 2 to index 1. */
@@ -413,11 +413,11 @@ static void test_detach_clears_next_and_shifts_indices(void)
  *
  * cJSON_Parse goes through parse_string(), which sets str_value_len from an
  * *allocation* calculation -- the span from the opening quote to the closing
- * quote, less any escape backslashes (cjext.c:723-726). For a string with no
- * escapes that is strlen + 1. cJSON_CreateString sets it from strlen()
- * (cjext.c:2890), so an item built in code and an item parsed off the wire
- * report different numbers for the same text. cJSON_ParseWithRef subtracts the
- * extra one (cjext.c:1154) and additionally leaves valuestring pointing into
+ * quote, less any escape backslashes. For a string with no escapes that is
+ * strlen + 1. cJSON_CreateString sets it from strlen(), so an item built in
+ * code and an item parsed off the wire report different numbers for the same
+ * text. cJSON_ParseWithRef subtracts the extra one in
+ * parse_string_with_ref() and additionally leaves valuestring pointing into
  * the payload, terminated by a quote and not a NUL.
  *
  * Nothing in the firmware noticed, because str_value_len is only ever used
@@ -426,6 +426,23 @@ static void test_detach_clears_next_and_shifts_indices(void)
  * The tree's convention is visible in EZPI_STRNCMP_IF_EQUAL's own note in
  * ezlopi_cloud_constants.h ("Add '+1' ... consider the '\0' char also") and in
  * every caller that pairs str_value_len with strlen(literal) + 1.
+ *
+ * Two places inside cjext itself did notice, and the reason both were found by
+ * following this trap rather than by looking for them is that both treat a
+ * recorded length as a strlen. cJSON_strdup() copied str_value_len + 1 bytes,
+ * which made cJSON_Duplicate() of a reference-parsed tree produce strings with
+ * no terminator at all -- fixed, and pinned by
+ * test_duplicating_a_reference_tree_yields_c_strings() below. The other is
+ * print_string_ptr()'s second loop, the one that writes the escapes, which is
+ * bounded by the NUL alone and so runs off the end of a reference-parsed
+ * string that contains an escape; that one is **not fixed**, it is a heap
+ * write overflow rather than an overread, and it is written
+ * up under Known gaps in the CHANGELOG. Note the direction: for a
+ * reference-parsed string with escapes the recorded length is an
+ * *under*-estimate of the raw bytes, because parse_string_with_ref() records
+ * the decoded length while valuestring points at the undecoded text. So "an
+ * over-estimate is harmless" is the right summary for the firmware's readers
+ * and is not a statement about cjext's own.
  *
  * Code that does arithmetic on it does notice. A handler that bounds-checked
  * an incoming field with it rejected a value of exactly the maximum length as
@@ -508,6 +525,289 @@ static void test_str_value_len_includes_the_terminator(void)
     }
 }
 
+/**
+ * @brief A member lookup must not match a key that is merely a prefix of the
+ *        name asked for, whichever way the tree was built.
+ *
+ * cJSON_GetObjectItem() is case-insensitive and compares through
+ * case_insensitive_strcmp(), which is given ->str_key_len as its budget and
+ * returns equal as soon as that many characters have matched. It never checks
+ * that the name it was handed ends there. So the answer depends entirely on
+ * what the key's recorded length means, and three writers disagree:
+ *
+ *   - cJSON_Parse -> parse_object -> parse_string stores the span from the
+ *     opening quote to the closing one, which is strlen + 1 (cjext.c:783,
+ *     1954). The budget therefore extends one past the key's last character,
+ *     the compare reaches the key's NUL, and a longer name is rejected. This
+ *     path has always been correct -- by accident, as a side effect of a length
+ *     that is really an allocation size.
+ *   - cJSON_ParseWithRef -> parse_object_with_ref -> parse_string_with_ref
+ *     subtracts that one (cjext.c:1211, 2081), so the budget stops exactly at
+ *     the end of the key and "configSize" matches "config". This key is also
+ *     not NUL-terminated: it points into the payload and is followed by a
+ *     quote, so the compare cannot simply be given a longer budget.
+ *   - add_item_to_object stores strlen(new_key) (cjext.c:2480), so every tree
+ *     built in code has the same defect as the reference parser's.
+ *
+ * All three are asserted here because the fix has to be one that holds for all
+ * three at once, and because the two broken ones are broken for different
+ * reasons -- one of which forbids reading key[strlen].
+ *
+ * The case-sensitive variant compares max(strlen(name), str_key_len) with
+ * strncmp (cjext.c:2320) and so has never had the defect. It is checked
+ * alongside because it is the detail that proves the diagnosis is about the
+ * comparison budget and not about the key strings.
+ */
+static void test_object_lookup_is_not_prefix_ambiguous(void)
+{
+    /* Not a const char *: cJSON_ParseWithRef leaves the keys pointing into
+     * this buffer, so it has to outlive the tree. */
+    char payload[] = "{\"config\":null,\"configSize\":7}";
+    char reversed[] = "{\"configSize\":7,\"config\":null}";
+
+    cJSON *built = cJSON_CreateObject(WHO);
+    cJSON *copied = cJSON_Parse(WHO, payload);
+    cJSON *referenced = cJSON_ParseWithRef(WHO, payload);
+    cJSON *ref_reversed = cJSON_ParseWithRef(WHO, reversed);
+    cJSON *found = NULL;
+
+    CHECK(NULL != built, "CreateObject failed");
+    CHECK(NULL != copied, "copying parser rejected the fixture");
+    CHECK(NULL != referenced, "reference parser rejected the fixture");
+    CHECK(NULL != ref_reversed, "reference parser rejected the reversed fixture");
+
+    if (NULL != built)
+    {
+        cJSON_AddNullToObject(WHO, built, "config");
+        cJSON_AddNumberToObject(WHO, built, "configSize", 7);
+
+        found = cJSON_GetObjectItem(WHO, built, "configSize");
+        CHECK(cJSON_IsNumber(found),
+              "built tree: \"configSize\" must find the number, got the \"%s\" node",
+              ((NULL != found) && (NULL != found->string)) ? found->string : "(none)");
+
+        /* The other direction has always worked: the budget is then longer
+         * than the name, so the compare reaches the name's own NUL. Asserted
+         * so that a fix which trades one direction for the other is caught. */
+        found = cJSON_GetObjectItem(WHO, built, "config");
+        CHECK(cJSON_IsNull(found),
+              "built tree: \"config\" must find the null, not the longer key");
+
+        found = cJSON_GetObjectItemCaseSensitive(built, "configSize");
+        CHECK(cJSON_IsNumber(found),
+              "built tree: the case-sensitive variant was already correct");
+    }
+
+    if (NULL != copied)
+    {
+        found = cJSON_GetObjectItem(WHO, copied, "configSize");
+        CHECK(cJSON_IsNumber(found),
+              "copying parser: \"configSize\" must find the number, got the \"%s\" node",
+              ((NULL != found) && (NULL != found->string)) ? found->string : "(none)");
+
+        found = cJSON_GetObjectItem(WHO, copied, "config");
+        CHECK(cJSON_IsNull(found),
+              "copying parser: \"config\" must find the null");
+    }
+
+    if (NULL != referenced)
+    {
+        found = cJSON_GetObjectItem(WHO, referenced, "configSize");
+        CHECK(cJSON_IsNumber(found),
+              "reference parser: \"configSize\" must find the number, got a %s node",
+              cJSON_IsNull(found) ? "null" : "different");
+
+        found = cJSON_GetObjectItem(WHO, referenced, "config");
+        CHECK(cJSON_IsNull(found),
+              "reference parser: \"config\" must find the null");
+    }
+
+    /* Declaration order must not matter. With the longer key first, a budget
+     * that stops at the end of the key gets the right answer for the wrong
+     * reason, so this ordering is the one that would hide the defect. */
+    if (NULL != ref_reversed)
+    {
+        found = cJSON_GetObjectItem(WHO, ref_reversed, "config");
+        CHECK(cJSON_IsNull(found),
+              "reference parser, longer key first: \"config\" must find the null");
+
+        found = cJSON_GetObjectItem(WHO, ref_reversed, "configSize");
+        CHECK(cJSON_IsNumber(found),
+              "reference parser, longer key first: \"configSize\" must find the number");
+    }
+
+    /* A name that is absent entirely, and shares a prefix with a key, must not
+     * be found at all -- the failure mode is a lookup that returns something
+     * plausible rather than NULL. */
+    if (NULL != built)
+    {
+        CHECK(NULL == cJSON_GetObjectItem(WHO, built, "configSizeAndMore"),
+              "built tree: an absent longer name must not match either key");
+        CHECK(NULL == cJSON_GetObjectItem(WHO, built, "con"),
+              "built tree: an absent shorter name must not match either key");
+    }
+
+    cJSON_Delete(WHO, built);
+    cJSON_Delete(WHO, copied);
+    cJSON_Delete(WHO, referenced);
+    cJSON_Delete(WHO, ref_reversed);
+}
+
+/**
+ * @brief Serialisation does not depend on ->str_key_len, so changing what the
+ *        lookup is told about a key cannot change what any response prints.
+ *
+ * This is here because the recorded fix for the defect above was to change the
+ * length that add_item_to_object stores, and that length is also handed to the
+ * key printer at cjext.c:2183 -- through which every response from all 123 API
+ * methods passes. That is a real code path, but the printer's scan loop is
+ * `(*input_pointer && input_len--)`, which tests the NUL *first*, so any budget
+ * at or above strlen produces identical output and the escape loop at
+ * cjext.c:948 ignores the budget altogether.
+ *
+ * Asserted rather than argued, and asserted on a tree whose keys have both
+ * conventions in it at once: parsed keys carry strlen + 1 and keys added in
+ * code carry strlen, so if the printer were sensitive to the budget, a round
+ * trip through it would not be stable.
+ */
+static void test_key_printing_does_not_depend_on_the_recorded_length(void)
+{
+    char payload[] = "{\"config\":null,\"configSize\":7}";
+
+    cJSON *mixed = cJSON_Parse(WHO, payload);
+    char *printed = NULL;
+    char *reprinted = NULL;
+
+    CHECK(NULL != mixed, "fixture failed to parse");
+
+    if (NULL != mixed)
+    {
+        /* Added in code, so strlen; the two parsed keys carry strlen + 1. One
+         * key needs escaping, which is the branch that ignores the budget. */
+        cJSON_AddStringToObject(WHO, mixed, "a\tb", "v");
+        cJSON_AddNumberToObject(WHO, mixed, "configSizeToo", 8);
+
+        printed = cJSON_PrintUnformatted(WHO, mixed);
+        CHECK(NULL != printed, "printing failed");
+
+        if (NULL != printed)
+        {
+            CHECK(0 == strcmp(printed,
+                              "{\"config\":null,\"configSize\":7,"
+                              "\"a\\tb\":\"v\",\"configSizeToo\":8}"),
+                  "keys print the same whichever convention they carry, got %s",
+                  printed);
+
+            /* And the text survives a round trip, which re-reads every key
+             * through the parser's convention and prints it again. */
+            cJSON *again = cJSON_Parse(WHO, printed);
+            CHECK(NULL != again, "the printed text must parse");
+
+            if (NULL != again)
+            {
+                reprinted = cJSON_PrintUnformatted(WHO, again);
+                CHECK((NULL != reprinted) && (0 == strcmp(printed, reprinted)),
+                      "printing is stable across a round trip");
+                ezlopi_free(WHO, reprinted);
+                cJSON_Delete(WHO, again);
+            }
+
+            ezlopi_free(WHO, printed);
+        }
+
+        cJSON_Delete(WHO, mixed);
+    }
+}
+
+/**
+ * @brief Duplicating a reference-parsed tree must produce keys and values that
+ *        are C strings.
+ *
+ * Same root cause as the lookup defect above -- a recorded length that is not
+ * one convention -- but a different consequence, and a worse one.
+ * cJSON_Duplicate hands item->str_key_len and item->str_value_len to
+ * cJSON_strdup (cjext.c:3243, :3255), which allocated len + 1 and then copied
+ * len + 1 bytes out of the source. That is only right when len is a strlen, so
+ * that the extra byte is the source's own terminator.
+ *
+ * For a reference-parsed item it is not: the length is exact and the text
+ * points into the payload, where the next byte is the closing quote. So the
+ * copy was the key's characters followed by a quote, in an allocation with no
+ * room for anything else -- a buffer with no NUL in it at all. Measured before
+ * the fix, on {"config":null}: a seven-byte allocation holding `config"', and
+ * strlen() on it reported a heap-buffer-overflow 0 bytes after a 7-byte region.
+ *
+ * Not reachable from the firmware today -- the only two cJSON_ParseWithRef
+ * callers, the stored device config and the BLE provisioning payload, do not
+ * duplicate their trees -- so this is asserted here rather than reported as a
+ * live crash. The value side is the one to watch: valuestring is read as a C
+ * string in hundreds of places, so a duplicated reference value reaching any of
+ * them would be the same overflow without needing a key lookup.
+ *
+ * The first two checks below do not need a sanitizer to catch this: the byte
+ * they read is the last one of the duplicate's own allocation, so it is in
+ * bounds under either implementation and only its value differs. Confirmed
+ * against the old form, which fails them and also reads the key back as
+ * `config"' and the value as `abcd"'. ASan is what turned the original
+ * discovery into a hard error rather than a plausible-looking string, and is
+ * what would catch a future regression that runs further off the end.
+ */
+static void test_duplicating_a_reference_tree_yields_c_strings(void)
+{
+    /* Deliberately a key and a value whose characters are followed in the
+     * payload by something that is not a NUL. */
+    char payload[] = "{\"config\":\"abcd\"}";
+
+    cJSON *referenced = cJSON_ParseWithRef(WHO, payload);
+    cJSON *duplicate = NULL;
+
+    CHECK(NULL != referenced, "reference parser rejected the fixture");
+
+    if (NULL != referenced)
+    {
+        /* The precondition, so that a later change to the reference parser
+         * cannot make this test vacuous by terminating its strings. */
+        CHECK('\0' != referenced->child->string[referenced->child->str_key_len],
+              "fixture precondition: a referenced key is not NUL-terminated");
+
+        duplicate = cJSON_Duplicate(WHO, referenced, true);
+        CHECK(NULL != duplicate, "duplicate failed");
+    }
+
+    if ((NULL != duplicate) && (NULL != duplicate->child))
+    {
+        cJSON *child = duplicate->child;
+
+        /* The claims. Both of these read the byte at [len], which is the last
+         * byte of the duplicate's own allocation -- in bounds either way, so
+         * the assertion is about its value and not about the sanitizer. */
+        CHECK((NULL != child->string) && ('\0' == child->string[child->str_key_len]),
+              "a duplicated key is terminated at its recorded length");
+        CHECK((NULL != child->valuestring) &&
+                  ('\0' == child->valuestring[child->str_value_len]),
+              "a duplicated value is terminated at its recorded length");
+
+        /* And the consequence, which is what actually overflowed: these are
+         * the ordinary C-string uses, and under ASan they are the real test. */
+        CHECK((NULL != child->string) && (0 == strcmp(child->string, "config")),
+              "the duplicated key reads back as \"config\", got \"%s\"",
+              (NULL != child->string) ? child->string : "(null)");
+        CHECK((NULL != child->valuestring) &&
+                  (0 == strcmp(child->valuestring, "abcd")),
+              "the duplicated value reads back as \"abcd\", got \"%s\"",
+              (NULL != child->valuestring) ? child->valuestring : "(null)");
+
+        /* The duplicate must also still be findable by name, which exercises
+         * the lookup against a key whose length came from the reference
+         * convention but whose storage is now a terminated copy. */
+        CHECK(cJSON_IsString(cJSON_GetObjectItem(WHO, duplicate, "config")),
+              "the duplicated member is still found by its name");
+    }
+
+    cJSON_Delete(WHO, duplicate);
+    cJSON_Delete(WHO, referenced);
+}
+
 /*******************************************************************************
  *                          Public Function Definitions
  *******************************************************************************/
@@ -535,6 +835,9 @@ int main(void)
     test_borrowed_member_is_still_linked_to_siblings();
     test_detach_clears_next_and_shifts_indices();
     test_str_value_len_includes_the_terminator();
+    test_object_lookup_is_not_prefix_ambiguous();
+    test_key_printing_does_not_depend_on_the_recorded_length();
+    test_duplicating_a_reference_tree_yields_c_strings();
 
     printf("%u check(s), %u failure(s)\n", tests_run, tests_failed);
 
