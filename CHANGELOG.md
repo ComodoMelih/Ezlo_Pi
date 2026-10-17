@@ -1474,6 +1474,130 @@ three BLE-capable targets the image grew 16, 32 and 32 bytes.
   configuration — the *equality* between the three before-and-after pairs is the
   claim here, not the specific totals.
 
+- **`__otel_publish()` sent the shared transmit buffer without checking that
+  anything had been written into it.** Two missing lines, and it is the pair of
+  them that turned a cosmetic bug into a read off the end of a heap buffer.
+
+  `cJSON_PrintPreallocated()` returns false for an object that does not fit —
+  and it returns false *after* writing a truncated prefix, leaving no
+  terminator at the truncation point
+  ([`cjext.c:1537`](ezlopi-components/cjext/cjext.c#L1537) → `print_value` →
+  `ensure`, which refuses to grow a `noalloc` buffer).
+  `EZPI_core_buffer_acquire()` hands back the shared `__buffer` exactly as the
+  previous holder left it
+  ([`ezlopi_core_buffer.c:158`](ezlopi-core/ezlopi-core-buffer/ezlopi_core_buffer.c#L158)
+  — it takes the semaphore and returns the pointer, with no clearing). The
+  three other live holders each do the same two things before trusting the
+  buffer: `memset(buffer, 0, buffer_len)`, then `if (true ==
+  cJSON_PrintPreallocated(...))`.
+  [`__otel_publish()`](ezlopi-services/ezlopi-service-otel/ezlopi_service_otel.c#L218)
+  did neither. It printed, ignored the result, then called `strlen(buffer)` and
+  sent that many bytes over the websocket.
+
+  So on an object that did not fit, `strlen()` did not stop at the end of the
+  truncated JSON — there was no terminator there — and it did not stop at the
+  end of the previous holder's bytes either, because nothing had put one there.
+  It ran off the end of the buffer, and whatever length it came back with was
+  what got transmitted.
+
+  The premise was measured on the host rather than inferred, with the
+  destination pre-filled with a non-zero pattern standing in for a previous
+  holder's leftovers. Printing a 61-byte object into 40 bytes:
+
+  ```
+  returned false
+  bytes the printer changed: 35 of 40
+  is there a NUL in the buffer at all? no
+  buffer as bytes: {"method":"hub.items.list","token":RRRRR
+  ```
+
+  Three things in that are worse than the reasoning predicted. There is no
+  terminator anywhere in the destination, so the read is unbounded rather than
+  bounded by the residue. The truncation lands mid-key, so the bytes that *are*
+  valid stop exactly where a credential would have started, which is the shape
+  that makes this look like harmless truncation in a log. And the fixture is not
+  contrived: `hub.items.list` with a token is an ordinary API response, and
+  responses are what the previous holder of this buffer had been printing.
+
+  Fixed at
+  [`ezlopi_service_otel.c:248`](ezlopi-services/ezlopi-service-otel/ezlopi_service_otel.c#L248)
+  and
+  [`:250`](ezlopi-services/ezlopi-service-otel/ezlopi_service_otel.c#L250),
+  with the dropped object traced rather than discarded silently. Of the two it
+  is the return check that makes this safe; the `memset` only bounds the damage
+  should the check ever be dropped again, and it is not free — it clears 10 KB
+  per published object. It is there because it is what the three other holders
+  do and because an unbounded read is the failure mode worth spending 10 KB of
+  `memset` to rule out.
+
+  **Two things this fix corrects about how it was first written down.** It was
+  recorded under *Known gaps* first, and re-reading the code to fix it
+  contradicted the note twice.
+
+  The note said the object had to exceed "the 2 KB it asks for". There is no
+  2 KB and nothing is asked for: the `2000` in the call is
+  `wait_to_acquired_ms`, the length arrives through `buffer_len`, and it is
+  `CONFIG_EZPI_CORE_STATIC_BUFFER_SIZE` — `default 10240` at
+  [`Kconfig.projbuild:528`](ezlopi-main/Kconfig.projbuild#L528), `=10240` in all
+  four committed `sdkconfig.defaults.*`, and passed to `EZPI_core_buffer_init()`
+  at
+  [`ezlopi_core_ezlopi.c:123`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L123).
+  The bar is 10 KB, not 2 KB. That is a materially higher bar and it is reached
+  by content rather than by accident: the trace attributes include `method`,
+  `id` and `error` copied verbatim out of the incoming message, with no length
+  cap, at
+  [`ezlopi_service_webprov.c:313`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L313)
+  and
+  [`ezlopi_service_broadcast.c:142`](ezlopi-services/ezlopi-service-broadcast/ezlopi_service_broadcast.c#L142).
+
+  The note also said the previous holders were "the API response path and the
+  cloud broadcast path", which undercounts. There are three other live holders —
+  the cloud response path (`ezlopi_service_webprov.c:489`), the local websocket
+  server's response path (`ezlopi_service_ws_server.c:844`) and the broadcast
+  path (`ezlopi_core_broadcast.c:199`) — plus a fourth behind `#if 0`. Both
+  errors are the same kind: a number and a count written from reasoning about
+  the call rather than from reading what the call does.
+
+  **Why this is [bug] and not [sec].** The marker in this file means reachable
+  from an unauthenticated BLE, UART or local-network client, and this is not,
+  on two counts. The entire file is inside `#ifdef
+  CONFIG_EZPI_ENABLE_OPENTELEMETRY`, which is `is not set` in all four committed
+  `sdkconfig.defaults.*` and which a CI check already forbids committing as a
+  default — so no shipped image contains this code at all. And the bytes go to
+  the operator's own collector, not back to whoever provoked the oversized
+  object. Whether a local-network client can drive a trace past 10 KB on an
+  opted-in build was not traced, which is the other reason not to claim the
+  stronger marker.
+
+  **Pinned by a new hygiene check**,
+  `tests/ci/check_print_preallocated_result.py`, which enforces two rules: no
+  `cJSON_PrintPreallocated()` result may be discarded anywhere in the
+  first-party trees — there are nine call sites and all nine now consume it —
+  and every `EZPI_core_buffer_acquire()` holder must clear the buffer before
+  printing into it. The two are reported separately on purpose, because they
+  fail differently: with the `memset` but no return check the damage is a
+  malformed fragment in zeroed memory, with the return check and no `memset`
+  nothing escapes at all, and only the pair reads out of bounds. Thirteen
+  fixtures run before the tree is scanned, one of which is the comment this fix
+  left behind in `otel.c` — a check in that directory has matched its own
+  documentation before.
+
+  The check was run against three mutations, not one. Against `8235e1a`'s
+  `otel.c` it reports both rules at both lines; with the `memset` restored and
+  the return check removed it reports only the discarded result; with the return
+  check restored and the `memset` removed, only the uncleared buffer. A
+  single-stage mutation would have proved one rule and credited it with both.
+
+  **Measured.** All four targets build at the committed defaults with rc=0 and
+  **zero size delta** — but that zero means the file was not compiled, not that
+  the change is free, and the instrument that was supposed to prove that was
+  wrong: the object file is produced either way, empty, so counting objects
+  showed `1` in every configuration. What does show it is the 6 640-byte
+  difference between esp32 with the symbol off (1 683 856) and on (1 690 496).
+  Against that otel-on build the fix costs **96 bytes** (1 690 496 → 1 690 592)
+  for a `memset` call, a branch and an error trace, with no warnings in
+  `otel.c` and no `-Wshadow` diagnostics. Nothing was flashed.
+
 ### Local discovery — [bug]
 
 - **The hub advertised a service on a port with nothing listening on it.** The
@@ -2859,12 +2983,12 @@ of the preallocated path's own accounting and not of this change or of
 escaping. The test asserts it in both directions: `strlen + 2` must succeed and
 produce the right text, and `strlen + 1` must be *refused* rather than written
 past. Worth recording because a failed print leaves a partial write with no
-terminator anywhere in the destination — measured, under
-**`__otel_publish()`** in *Known gaps*, which is the one caller that neither
-clears the buffer first nor checks the return.
-`EZPI_core_factory_info_v3_set_ezlopi_config()`, the caller on the path fixed
-here, does check it, so a configuration too large for its 4 KB buffer is
-refused rather than half-written to the partition.
+terminator anywhere in the destination — measured, under **`__otel_publish()`**
+in *Open-telemetry* above, which was the one caller that neither cleared the
+buffer first nor checked the return and is fixed
+there. `EZPI_core_factory_info_v3_set_ezlopi_config()`, the caller on the
+path fixed here, does check it, so a configuration too large for its 4 KB
+buffer is refused rather than half-written to the partition.
 
 All four targets build clean: esp32 `1683856`, esp32s2 `1374192`, esp32s3
 `1698720`, esp32c3 `1757104` — **zero delta on every target** against the
@@ -6067,7 +6191,7 @@ enumerators — so the live half of this component was never affected.
   | Job | What it does |
   | --- | --- |
   | `host-tests` | `make -C tests/host` under ASan + UBSan |
-  | `hygiene` | the static checks, 13 of them, each a `tests/ci/check_*.py` named in the job rather than a glob — so a check that exists and is never invoked shows up as an orphan. Started as five subjects (no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes) and every entry added since is described where its fix is, not here, so that this row cannot drift out of date again |
+  | `hygiene` | the static checks, 14 of them, each a `tests/ci/check_*.py` named in the job rather than a glob — so a check that exists and is never invoked shows up as an orphan. Started as five subjects (no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes) and every entry added since is described where its fix is, not here, so that this row cannot drift out of date again |
   | `firmware` | builds all four targets in `espressif/idf:v4.4.6`, asserts the generated config was actually inherited from the per-target defaults, merges and verifies a flashable image, uploads `bin`/`elf`/`map`/`sdkconfig` |
   | `firmware-outdir` | builds esp32 with `idf.py -B /tmp/...`, outside the workspace, and asserts the image landed there and that **no `./build` was created at all** — so the tree cannot regress to a build directory it only builds in by default |
   | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled, that the pinned header is still the default CA source, and that `ca_mios` reached the ELF |
@@ -6438,56 +6562,6 @@ Listed because a changelog that only mentions what was finished is misleading.
   The honest state is that this function does not work and nothing calls it; the
   moment something needs to call it, it needs designing. Recorded here so that
   the next person to reach for it knows it has never run.
-
-- **`__otel_publish()` sends the shared transmit buffer without checking that
-  anything was written into it.** Found while establishing how much room
-  `cJSON_PrintPreallocated()` actually needs; not fixed, and not bundled with
-  the printer fix because it is a different file and a different mistake.
-
-  Four of the five users of the shared buffer follow the same two-step pattern:
-  `memset(buffer, 0, buffer_len)` and then `if (true ==
-  cJSON_PrintPreallocated(...))` before using it — `EZPI_core_broadcast_cjson()`
-  ([`ezlopi_core_broadcast.c:203`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_broadcast.c#L203)),
-  `ezlopi_service_webprov.c:493`, `ezlopi_service_ws_server.c:848`, and the
-  `#if 0` copy at `ezlopi_core_broadcast.c:175`.
-  [`__otel_publish()`](ezlopi-services/ezlopi-service-otel/ezlopi_service_otel.c#L227)
-  does **neither**: it prints, ignores the result, then calls `strlen(buffer)`
-  and sends that many bytes over the websocket.
-
-  `EZPI_core_buffer_acquire()` hands back the shared `__buffer` as it was left
-  ([`ezlopi_core_buffer.c:158`](ezlopi-core/ezlopi-core-buffer/ezlopi_core_buffer.c#L158)
-  — it takes the semaphore and returns the pointer, with no clearing), which is
-  why the other four `memset` it. So when a telemetry object does not fit in the
-  2 KB it asks for, the buffer holds a truncated JSON prefix with no terminator
-  where the truncation happened, followed by whatever the previous holder left
-  there — and the previous holders are the API response path and the cloud
-  broadcast path. `strlen()` then runs past the truncation point into that
-  residue, and the result is transmitted.
-
-  The premise was measured rather than inferred, on the host, with the
-  destination pre-filled with a non-zero pattern standing in for a previous
-  holder's leftovers. Printing a 61-byte object into 40 bytes:
-
-  ```
-  returned false
-  bytes the printer changed: 35 of 40
-  is there a NUL in the buffer at all? no
-  buffer as bytes: {"method":"hub.items.list","token":RRRRR
-  ```
-
-  Three things in that are worse than the reasoning predicted. There is no
-  terminator anywhere in the destination, so `strlen()` does not run into the
-  residue and stop — it runs off the end of the 2 KB shared buffer and keeps
-  going. The truncation lands mid-key, so the bytes that *are* valid stop
-  exactly where a credential would have started, which is the shape that makes
-  this look like a harmless truncation in a log. And the fixture is not
-  contrived: `hub.items.list` with a token is an ordinary API response, and
-  responses are what the previous holder of this buffer was printing.
-
-  Not measured on hardware. What is established is the premise — the return
-  value, the partial write, and the absent terminator; that the residue
-  specifically contains credentials follows from which code shares the buffer,
-  which is read from the source and not observed.
 
 - **Nobody knows which `isItemStateChanged` scenes change behaviour now that
   the type tag survives.** The `union`→`struct` fix in the scene-triggers entry

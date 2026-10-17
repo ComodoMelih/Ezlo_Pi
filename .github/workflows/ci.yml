@@ -306,6 +306,21 @@ jobs:
       - name: No pinned sdkconfig.h includes
         run: python3 tests/ci/check_sdkconfig_includes.py
 
+      # cJSON_PrintPreallocated() returns false for an object that does not fit
+      # *after* writing a truncated prefix, and it writes no terminator at the
+      # truncation point. __otel_publish() ignored that return and also skipped
+      # the memset that the three other live users of the shared transmit
+      # buffer do, so strlen() ran off the end of the buffer and that length was
+      # what got sent over the websocket -- with the previous holder of the
+      # buffer being an API response. Two rules, reported separately on purpose:
+      # with the memset but no return check the damage is a malformed fragment,
+      # with the return check and no memset nothing escapes, and only the pair
+      # reads out of bounds. Thirteen fixtures run first, one of them the
+      # comment the fix left behind, because a check in this directory has
+      # matched its own documentation before.
+      - name: Every cJSON_PrintPreallocated result is consumed
+        run: python3 tests/ci/check_print_preallocated_result.py
+
       # The only check here that is not a grep over a known shape, because the
       # defect it covers is not a shape -- it is an ordering relation between a
       # dereference and the NULL test written to guard it. There were 34 of

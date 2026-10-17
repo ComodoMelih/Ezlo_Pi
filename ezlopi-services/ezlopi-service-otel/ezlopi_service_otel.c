@@ -221,19 +221,49 @@ static void __otel_publish(cJSON *cj_telemetry)
     {
         uint32_t buffer_len = 0;
         char *buffer = EZPI_core_buffer_acquire(__FUNCTION__, &buffer_len, 2000);
-        if (buffer)
+        if (buffer && buffer_len)
         {
-            uint32_t rertries = 3;
-            cJSON_PrintPreallocated(__FUNCTION__, cj_telemetry, buffer, buffer_len, false);
+            /* Both of the next two lines are load-bearing and neither was here.
+            ** EZPI_core_buffer_acquire() returns the shared buffer exactly as
+            ** the previous holder left it -- ezlopi_core_buffer.c:158 takes the
+            ** semaphore and returns the pointer, with no clearing -- and for a
+            ** telemetry object larger than buffer_len,
+            ** cJSON_PrintPreallocated() returns false having written a truncated
+            ** prefix with no terminator anywhere in the destination. So the
+            ** strlen() below used to run off the end of the buffer, and that
+            ** length was what got sent. The other three live holders of this
+            ** buffer are the cloud response path, the local websocket server's
+            ** response path and the broadcast path, so the bytes past the
+            ** truncation are response payloads.
+            **
+            ** Note that the 2000 above is wait_to_acquired_ms, not a size: the
+            ** length comes back through buffer_len and is
+            ** CONFIG_EZPI_CORE_STATIC_BUFFER_SIZE, 10240 in all four committed
+            ** defaults. So the memset clears 10 KB per published object, which
+            ** is why it is worth saying that it is the *return check* that makes
+            ** this safe -- the clear only bounds the damage if someone later
+            ** drops the check. Both are what the three other holders do, and
+            ** that all four do it is now pinned by
+            ** tests/ci/check_print_preallocated_result.py. */
+            memset(buffer, 0, buffer_len);
 
-            while (rertries--)
+            if (true == cJSON_PrintPreallocated(__FUNCTION__, cj_telemetry, buffer, buffer_len, false))
             {
-                if (EZPI_SUCCESS == EZPI_core_websocket_client_send(__wss_client, buffer, strlen(buffer), 1000))
-                {
-                    break;
-                }
+                uint32_t rertries = 3;
 
-                vTaskDelay(10 / portTICK_RATE_MS);
+                while (rertries--)
+                {
+                    if (EZPI_SUCCESS == EZPI_core_websocket_client_send(__wss_client, buffer, strlen(buffer), 1000))
+                    {
+                        break;
+                    }
+
+                    vTaskDelay(10 / portTICK_RATE_MS);
+                }
+            }
+            else
+            {
+                TRACE_E("telemetry does not fit in the %u-byte shared buffer, dropped", (unsigned int)buffer_len);
             }
 
             EZPI_core_buffer_release(__FUNCTION__);
