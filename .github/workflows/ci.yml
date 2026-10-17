@@ -321,6 +321,28 @@ jobs:
       - name: Every cJSON_PrintPreallocated result is consumed
         run: python3 tests/ci/check_print_preallocated_result.py
 
+      # `%s` and `%[...]` in a scanf format write as far as the input reaches.
+      # The last arm of the URL ladder in EZPI_parse_http_url() used both with
+      # no field width, into host[100] and page[200], on a string that
+      # EZPI_scenes_populate_fields_get_value allocates at strlen + 1 with no
+      # cap -- so hub.scenes.action.block.test could choose the length of a
+      # stack write. Measured under AddressSanitizer with the ladder reproduced
+      # verbatim: "ftp://" + 599 characters + ":80/x" overflows host, and a
+      # 599-character path overflows page by 601 bytes.
+      #
+      # The eight arms above it are all width-bounded, which is what made the
+      # site survive review: it reads as a corner that cannot be reached. It
+      # can -- arms seven and eight are catch-alls for the http:// and https://
+      # prefixes, so only a third scheme gets this far, and then nothing is
+      # bounded. -Wformat cannot object, because the format is well-formed and
+      # the compiler does not know the destination size.
+      #
+      # Twenty-four fixtures run first, including the printf-family TRACE_S
+      # eleven lines below the defect, because a check that reported every
+      # unbounded "%s" in a string literal would report most of the tree.
+      - name: Every scanf string conversion has a field width
+        run: python3 tests/ci/check_scanf_field_width.py
+
       # The only check here that is not a grep over a known shape, because the
       # defect it covers is not a shape -- it is an ordering relation between a
       # dereference and the NULL test written to guard it. There were 34 of

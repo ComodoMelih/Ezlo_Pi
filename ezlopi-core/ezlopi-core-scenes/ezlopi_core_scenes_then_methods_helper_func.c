@@ -192,7 +192,39 @@ void EZPI_parse_http_url(s_ezlopi_core_http_mbedtls_t *tmp_http_data, l_fields_v
                 port = 443;
                 succ_parsing = 1;
             }
-            else if (sscanf(field_value_string, "%*[^:]%*[:/]%[^:]:%d%s", host, &port, page) == 3)
+            /* The fallback arm, for a URL whose scheme is neither http:// nor
+            ** https://. It used to spell its conversions `%[^:]` and `%s`,
+            ** neither of which carries a field width, writing straight into
+            ** host[100] and page[200] above.
+            **
+            ** Reaching it needs a non-http scheme, which is why the eight arms
+            ** above do not protect it. Each of them opens with a literal
+            ** "http://" or "https://", and the seventh and eighth are
+            ** catch-alls for those two prefixes -- so a 599-character host
+            ** behind an http:// prefix lands on the seventh arm and is bounded
+            ** at 99 there. Give it any other scheme and arms one to eight all
+            ** fail their literal, leaving this one.
+            **
+            ** `field_value_string` is the `url` field of a sendHttpRequest
+            ** action. EZPI_scenes_populate_fields_get_value allocates it at
+            ** strlen(valuestring) + 1 with no cap, so its length is whatever
+            ** the request said, and hub.scenes.action.block.test runs this
+            ** parse on a block taken straight from the request without a scene
+            ** ever being stored.
+            **
+            ** Measured, with this ladder reproduced verbatim under
+            ** AddressSanitizer: "ftp://" + 599 characters + ":80/x" is a
+            ** stack-buffer-overflow write past the end of host, and
+            ** "ftp://h:80/" + 599 characters is a 601-byte write past the end
+            ** of page.
+            **
+            ** The widths are each buffer minus its terminator. A host longer
+            ** than 99 now fails the ':' that follows the conversion, so the
+            ** arm returns 1 instead of 3 and the URL is reported unparseable.
+            ** That is the right answer rather than a regression: truncating a
+            ** host silently would send the request to a different host than
+            ** the one the action named. */
+            else if (sscanf(field_value_string, "%*[^:]%*[:/]%99[^:]:%d%199s", host, &port, page) == 3)
             {
                 succ_parsing = 1;
             }

@@ -5095,7 +5095,7 @@ enumerators — so the live half of this component was never affected.
   of all fourteen corrected sites makes it report **13**. Separately, making
   `%%` consume an argument — a one-line mutation that silently shifts every
   index after it — trips the self-test on `bad_percent_percent`. On the tree as
-  it stands it scans **494 files** and reports nothing.
+  it stands it scans **496 files** and reports nothing.
 
   **The one it misses is the thirteenth-of-fourteen**, and it is recorded in
   the check's own docstring rather than left to be discovered. Recognition is
@@ -5105,6 +5105,99 @@ enumerators — so the live half of this component was never affected.
   wrong trade: `.len` is an `int` in `ezlopi_core_http.c` and a `uint32_t` in
   the BLE services, both correct. A 64-bit host build of the file remains the
   complete check; this is the cheap guard that runs on every commit.
+
+- **A `sscanf` that let the caller choose the length of a stack write.** The
+  last arm of the URL-parsing ladder in
+  [`EZPI_parse_http_url()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L133)
+  was
+
+  ```c
+  char host[100] = {0};
+  char page[200] = {0};
+  ...
+  else if (sscanf(field_value_string, "%*[^:]%*[:/]%[^:]:%d%s",
+                  host, &port, page) == 3)
+  ```
+
+  `%[^:]` writes into `host[100]` and `%s` into `page[200]`, and neither
+  carries a field width, so both write as far as the input reaches.
+  `field_value_string` is the `url` field of a `sendHttpRequest` scene action;
+  [`EZPI_scenes_populate_fields_get_value`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_populate.c#L494)
+  allocates it at `strlen(valuestring) + 1` with no cap, so its length is
+  whatever the request said.
+
+  **Why eight correct arms above it did not make it safe**, which is the
+  interesting part and the reason it survived review. Every other arm is
+  width-bounded — the author plainly knew to write `%99[^:]` and `%199[^\n]` —
+  and the last one reads as a corner nobody can reach. It is reachable. Arms
+  one to eight each open with a literal `http://` or `https://`, and arms seven
+  and eight are catch-alls for those two prefixes, so a 599-character host
+  behind an `http://` prefix lands on arm seven and is bounded at 99 there.
+  Give the URL any third scheme and all eight literals fail, leaving the one
+  arm with no widths.
+
+  **Measured, not reasoned about.** The ladder was reproduced verbatim in a
+  host program and run under AddressSanitizer. `http://` + 599 characters +
+  `:80/x` lands on arm seven with `host_len=99`, confirming the catch-all does
+  its job. `ftp://` + 599 characters + `:80/x` reaches arm nine and ASan
+  reports a `stack-buffer-overflow` write beginning at the first byte past
+  `host`; `ftp://h:80/` + 599 characters gives a **601-byte** write past the
+  end of `page`.
+
+  **Why this is [bug] and not [sec].** Both transports that can deliver a
+  scene action are authenticated: the local websocket server admits only
+  `hub.offline.login.ui` until the connection is logged in, and the cloud link
+  is the device's own TLS session. It is still a stack smash whose length the
+  caller picks, and it needs no scene to be stored —
+  `hub.scenes.action.block.test` runs this parse on a block taken straight out
+  of the request.
+
+  Fixed by giving both conversions the width the rest of the ladder already
+  uses, `%99[^:]` and `%199s`. A host longer than 99 now fails the `:` that
+  follows, so the arm returns 1 instead of 3 and the URL is reported
+  unparseable — which is the right answer rather than a regression, because
+  silently truncating a host would send the request to a different host than
+  the action named.
+
+  **Found by the header-aware `cppcheck` sweep**, as `invalidscanf`, in the
+  course of testing whether a compilation database raises the null-dereference
+  checker's recall. It does not — see *Known gaps* — but the sweep that
+  answered the question surfaced this on the way past, in the category the
+  committed check filters out.
+
+  **Guarded by
+  [`check_scanf_field_width.py`](tests/ci/check_scanf_field_width.py)**, the
+  eighteenth check and the fifteenth the `hygiene` job invokes. A host test
+  was considered first and rejected: this translation unit cannot be compiled
+  in `tests/host/` without stubbing seven ESP-IDF headers and four enum
+  families, the only in-process oracle for a stack overflow is an ASan abort —
+  which the harness has no pattern for, since nothing in it forks — and a test
+  would cover the inputs somebody thought to write down. Whether a conversion
+  carries a width is purely syntactic, so a check covers the whole class
+  instead.
+
+  **Measured teeth.** Against this tree it scans **603 files**, finds **11**
+  scanf-family calls and reports nothing; against `git archive HEAD` with the
+  same script copied in, it fails and names both conversions at `:195`
+  separately. **24 fixtures** run before either, 12 of which must be reported
+  and 12 of which must not. The decoys are the ones that matter: a check
+  looking for an unbounded `%s` in any string literal would report most of the
+  tree, so `SELF_TEST['decoy_trace_printf']` is the `TRACE_S("host = '%s'",
+  host)` eleven lines below the defect, and `decoy_wrapper_name` is a call to a
+  function whose name merely ends in `scanf`. Assignment-suppressed
+  conversions — `%*[^:]`, the first two in the defect itself — write nothing
+  and must stay quiet, and a leading `]` inside a scanset is a literal `]`
+  rather than the end of the set, so `bad_scanset_literal_bracket` guards a
+  parser that would otherwise read the conversion as finished and miss the
+  missing width.
+
+  Unlike its sibling above, this one also scans `ezlopi-components`, and the
+  cost was measured before the directory was added rather than after: all 107
+  `.c` and `.h` files under it hold exactly one scanf-family call,
+  `cjext.c:546`, which converts with `%lg` into a `double`. A format held in a
+  variable rather than written as a literal is reported rather than skipped —
+  no call in the tree does that today, so the branch costs nothing until it is
+  needed.
 
 ### Build and configuration — [infra]
 
@@ -6191,7 +6284,7 @@ enumerators — so the live half of this component was never affected.
   | Job | What it does |
   | --- | --- |
   | `host-tests` | `make -C tests/host` under ASan + UBSan |
-  | `hygiene` | the static checks, 14 of them, each a `tests/ci/check_*.py` named in the job rather than a glob — so a check that exists and is never invoked shows up as an orphan. Started as five subjects (no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes) and every entry added since is described where its fix is, not here, so that this row cannot drift out of date again |
+  | `hygiene` | the static checks, 15 of them, each a `tests/ci/check_*.py` named in the job rather than a glob — so a check that exists and is never invoked shows up as an orphan. Started as five subjects (no hard-coded Ezlo telemetry endpoint; telemetry not enabled in committed defaults; base and per-target `sdkconfig.defaults` all present; JSON string destinations initialised; no pinned `sdkconfig.h` includes) and every entry added since is described where its fix is, not here, so that this row cannot drift out of date again |
   | `firmware` | builds all four targets in `espressif/idf:v4.4.6`, asserts the generated config was actually inherited from the per-target defaults, merges and verifies a flashable image, uploads `bin`/`elf`/`map`/`sdkconfig` |
   | `firmware-outdir` | builds esp32 with `idf.py -B /tmp/...`, outside the workspace, and asserts the image landed there and that **no `./build` was created at all** — so the tree cannot regress to a build directory it only builds in by default |
   | `firmware-ota` | builds esp32 with `CONFIG_EZPI_ENABLE_OTA=y`, which no committed default sets, and asserts the symbol really got enabled, that the pinned header is still the default CA source, and that `ca_mios` reached the ELF |
