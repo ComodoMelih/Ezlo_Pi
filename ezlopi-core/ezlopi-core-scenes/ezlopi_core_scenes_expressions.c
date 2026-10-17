@@ -792,7 +792,10 @@ static int __edit_expression_ll(s_ezlopi_expressions_t *expn_node, cJSON *cj_new
                 expn_node->code = (char *)ezlopi_malloc(__FUNCTION__, cj_code->str_value_len + 1);
                 if (expn_node->code)
                 {
-                    snprintf(expn_node->code, cj_code->str_value_len + 1, "%.*s", cj_code->str_value_len, cj_code->valuestring);
+                    /* (int) because "%.*s" reads its precision as an int and
+                    ** str_value_len is a size_t; see the note in
+                    ** ezlopi_core_cjson_macros.c. */
+                    snprintf(expn_node->code, cj_code->str_value_len + 1, "%.*s", (int)cj_code->str_value_len, cj_code->valuestring);
                 }
             }
         }
@@ -1292,7 +1295,7 @@ static s_ezlopi_expressions_t *__expressions_create_node(uint32_t exp_id, cJSON 
             new_exp_node->code = ezlopi_malloc(__FUNCTION__, cj_code->str_value_len + 1);
             if (new_exp_node->code)
             {
-                snprintf(new_exp_node->code, cj_code->str_value_len + 1, "%.*s", cj_code->str_value_len, cj_code->valuestring);
+                snprintf(new_exp_node->code, cj_code->str_value_len + 1, "%.*s", (int)cj_code->str_value_len, cj_code->valuestring);
             }
         }
 

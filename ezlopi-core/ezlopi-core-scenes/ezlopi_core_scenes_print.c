@@ -378,7 +378,9 @@ void EZPI_print_action_blocks(l_action_block_v2_t *action_block)
         TRACE_D("\t|-- %s: ", (SCENE_BLOCK_TYPE_THEN == action_block->block_type) ? ezlopi_then_str : ezlopi_else_str);
         EZPI_print_block_options(&action_block->block_options, action_block->fields, NULL);
         TRACE_D("\t\t|-- blockType: then");
-        TRACE_D("\t\t|-- _tempId: %.*s", sizeof(action_block->_tempId), action_block->_tempId);
+        /* (int) because "%.*s" reads its precision as an int and sizeof yields a
+        ** size_t; see the note in ezlopi_core_cjson_macros.c. */
+        TRACE_D("\t\t|-- _tempId: %.*s", (int)sizeof(action_block->_tempId), action_block->_tempId);
 
         TRACE_D("\t\t|-- Delay:: days: %d, hours: %d, minutes: %d, seconds: %d", action_block->delay.days, action_block->delay.hours, action_block->delay.minutes, action_block->delay.seconds);
 

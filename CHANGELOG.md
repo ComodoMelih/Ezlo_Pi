@@ -3920,6 +3920,155 @@ enumerators — so the live half of this component was never affected.
   After the fixes a clean `--platform=unix32` run reports **6 findings, all in
   `ezlopi_core_heap.c`** — 15 minus the 9 fixed, with nothing new appearing.
 
+- **Eighteen places where a `*` field width or precision was handed a
+  `size_t`.** A `*` reads one argument of type `int` — C11 7.21.6.1p5 says so
+  for both the width and the precision — so
+
+  ```c
+  TRACE_D("name: %.*s", sizeof(node->name), node->name);
+  ```
+
+  passes a `size_t` where an `int` is read. Where `size_t` is wider than `int`,
+  `vfprintf` takes four bytes off a `va_list` holding eight and every later
+  argument is misaligned, which here is the pointer that was meant to be
+  printed.
+
+  **Why no build in this project reports it.** Measured with a two-compiler
+  probe rather than assumed, because the answer is the reason the sites
+  survived:
+
+  | compiler | `sizeof(size_t)` | `-Wall -Wformat` precision complaints |
+  |---|---|---|
+  | `xtensa-esp32-elf-gcc` 8.4.0 | `== sizeof(int)` | 0 |
+  | `riscv32-esp-elf-gcc` 8.4.0 | `== sizeof(int)` | 0 |
+  | host `gcc` (x86-64) | 8, `int` is 4 | 2 |
+
+  `size_t` is `int`-sized on every ESP target, so `-Wformat` has nothing to
+  object to and the whole class is invisible to all four target builds — this
+  being not a `TRACE_*` blind spot of the sort the entry above describes, since
+  `TRACE_*` does carry a printf format attribute and the project builds with
+  `-Werror=format`. Confirmed against the logs: **0 format warnings on esp32,
+  esp32s2, esp32s3 and esp32c3.** The class is visible only where `size_t` is
+  wider, which is a 64-bit host build — and that is exactly how the two sites
+  in `ezlopi_core_cjson_macros.c` were found earlier. The other sixteen were
+  found by nothing.
+
+  So **no device has ever misprinted any of these**, and they will not until
+  someone builds for a 64-bit target. What they do break today is host
+  testability, which is the thing this tree has been adding.
+
+  **Not all of them are diagnostics**, which is what separates this from the
+  558 `%d`-against-`uint32_t` `TRACE_*` sites deliberately left alone above.
+  Five of the eight live sites use the conversion to *construct stored data*,
+  not to print: `ezlopi_core_scenes_expressions.c` and
+  `ezlopi_core_scenes_then_methods_helper_func.c` build the `code` string a
+  scene expression is evaluated from, and `ezlopi_service_otel.c` builds the
+  id, error and method strings that leave the device for an OpenTelemetry
+  collector. The remaining three are console output.
+
+  How the eighteen were disposed of:
+
+  | sites | where | what was done |
+  |---|---|---|
+  | 2 | `ezlopi_core_cjson_macros.c` | cast earlier, found by the host tests |
+  | 8 | scenes ×5, otel, ws-server, meshbot | cast — the live sites |
+  | 4 | `ezlopi_core_devices.c` | cast, though inside `#if 0` |
+  | 4 | `ezlopi_service_broadcast.c` | the enclosing `#if 0` block removed |
+
+  The last two rows were a judgement call in two directions, and the `#if 0`
+  is why. Code behind `#if 0` is text, not a defect, and "fixing" it makes a
+  diff look like repairs it is not. But a check that has to carve out a
+  preprocessor state is a check with a hole in it, so the dead sites could not
+  simply be left:
+
+  - `ezlopi_core_devices.c` holds a controller-information dump kept behind
+    `#if 0 // Defined but not used`. It is retained deliberately for
+    debugging, and the whole point of retaining it is that it works when
+    switched on, so it was corrected in place.
+  - `ezlopi_service_broadcast.c` was the opposite: its `#if 0` block was a
+    superseded hand-rolled copy of the four reads **three lines above it**,
+    which now go through `ezlopi_service_otel_fetch_string_value_from_cjson()`.
+    It was removed rather than corrected, because it could not have been
+    re-enabled as it stood. It assigned over `id_str`..`msg_subclass_str`,
+    leaking the four buffers the live calls had just allocated, and its second
+    guard tested `cj_id->str_value_len` where `cj_error` was meant — so with an
+    `error` field present and `id` absent it dereferenced a null `cj_id`. Two
+    defects that had sat in plain sight; dead text does not get reviewed, which
+    is how both survived.
+
+  **What is deliberately *not* changed.** Only `size_t` is wrong here.
+  `uint16_t` and `unsigned short` promote to `int` before the call, and
+  `uint32_t` is the same width as `int` with C11 6.2.5p9 making the two
+  interchange without reinterpretation. The tree relies on exactly that:
+  `ezlopi_core_http.c` passes an `int`, the BLE services pass a `uint32_t`
+  `copy_size`, and `ezlopi_service_ble_provisioning.c` passes a `uint16_t`
+  `param->write.len`. None are defects and none were touched. The probe agrees
+  — the 64-bit host warns on the `size_t` and `strlen` cases and **not** on the
+  `unsigned int` one.
+
+  **Verified as behaviour-neutral, and the one way it is not.** An A/B built by
+  reverse-applying this diff inside the build mirror gives **the same image size
+  on all four targets** — esp32 1 683 072, esp32s2 1 373 488, esp32s3
+  1 697 872, esp32c3 1 756 320 — with `.flash.rodata`, `.dram0.data` and
+  `.iram0.text` **byte-identical**.
+
+  `.flash.text` is not byte-identical: **67 bytes differ**, same total size. The
+  expected explanation — that an `(int)` cast of an already-32-bit value is a
+  no-op — does not account for that, so it was tracked down rather than waved
+  through. `TRACE_*` expands `__FILE__` and `__LINE__` into every call
+  (`ezlopi_util_trace.h:172`), so inserting the explanatory comments renumbers
+  every trace site below them: same instruction, same width, a different
+  line-number immediate. `addr2line` over all 67 offsets puts **every one of
+  them inside five of the edited files** and **none anywhere else** —
+  `ezlopi_core_devices.c` 21, `ezlopi_core_scenes_expressions.c` 20,
+  `ezlopi_service_ws_server.c` 18, `ezlopi_service_meshbot.c` 4,
+  `ezlopi_core_scenes_then_methods_helper_func.c` 4.
+
+  That attribution is only safe because of the control: two builds of
+  *identical* source give **0** `.flash.text` differences, so the section is
+  deterministic and the 67 bytes are genuinely this change. The same control
+  also retires `md5` of the `.bin` as an A/B instrument here — two builds of
+  identical source differ in 67 `.bin` bytes too, in the app descriptor and the
+  appended image hash, because `CONFIG_APP_REPRODUCIBLE_BUILD` is off. Comparing
+  whole-image checksums across any change in this tree reports a difference that
+  means nothing.
+
+- **New check: `tests/ci/check_printf_star_int.py`.** The only check in the
+  hygiene job whose subject no compiler in the pipeline can report, which is
+  why it is a check and not a flag.
+
+  It parses each format string, counts how many variadic arguments every
+  specifier consumes — a `*` takes one, `%%` takes none — and inspects only the
+  argument that actually lands on the star. That machinery is not decoration.
+  The cheap version of this check, "a line with `%.*s` that also mentions
+  `sizeof`", reports `ezlopi_service_ble_dynamic_config.c:475`:
+
+  ```c
+  snprintf(data_buffer, sizeof(data_buffer), "%.*s", copy_size, ...);
+  ```
+
+  where the `sizeof` is `snprintf`'s own size parameter — correctly a `size_t`
+  — and the precision beside it is a `uint32_t` and fine. A check that reports
+  working code gets switched off, so that line is now
+  `SELF_TEST['decoy_dest_size']`. Comment stripping is literal-aware for the
+  same reason: the tree contains URLs with `//` in them, and a stripper that
+  treats those as comments deletes the rest of the line.
+
+  **Measured teeth, in both directions.** Stripping the `(int)` casts back out
+  of all fourteen corrected sites makes it report **13**. Separately, making
+  `%%` consume an argument — a one-line mutation that silently shifts every
+  index after it — trips the self-test on `bad_percent_percent`. On the tree as
+  it stands it scans **494 files** and reports nothing.
+
+  **The one it misses is the thirteenth-of-fourteen**, and it is recorded in
+  the check's own docstring rather than left to be discovered. Recognition is
+  by spelling — `sizeof`, `strlen`, `->str_value_len` — so
+  `ezlopi_service_ws_server.c`, which prints the `size_t` field `ws_pkt.len`,
+  is corrected but unguarded. Widening the spelling list to catch `.len` is the
+  wrong trade: `.len` is an `int` in `ezlopi_core_http.c` and a `uint32_t` in
+  the BLE services, both correct. A 64-bit host build of the file remains the
+  complete check; this is the cheap guard that runs on every commit.
+
 ### Build and configuration — [infra]
 
 - **Four `#endif` comments that named the wrong macro.** Comments on a closing

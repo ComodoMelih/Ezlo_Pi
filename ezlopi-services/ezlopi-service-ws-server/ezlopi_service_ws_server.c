@@ -689,12 +689,16 @@ static esp_err_t ezpi_msg_handler(httpd_req_t *req)
                                 ** it fails silently the moment a new method
                                 ** adds a secret field nobody added to the
                                 ** list. A switch cannot drift. */
+                                /* (int) on both: ws_pkt.len is a size_t, "%d"
+                                ** reads an int and "%.*s" reads its precision as
+                                ** an int; see the note in
+                                ** ezlopi_core_cjson_macros.c. */
 #ifdef CONFIG_EZPI_WS_LOG_PAYLOADS
-                                TRACE_D("payload[len: %d]:\r\n%.*s", ws_pkt.len, ws_pkt.len, (char *)ws_pkt.payload);
+                                TRACE_D("payload[len: %d]:\r\n%.*s", (int)ws_pkt.len, (int)ws_pkt.len, (char *)ws_pkt.payload);
 #else
                                 TRACE_D("payload[len: %d] (body withheld; "
                                         "CONFIG_EZPI_WS_LOG_PAYLOADS is off)",
-                                        ws_pkt.len);
+                                        (int)ws_pkt.len);
 #endif
                                 __message_upcall(req, (char *)ws_pkt.payload, (uint32_t)ws_pkt.len);
                             }

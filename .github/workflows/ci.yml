@@ -177,6 +177,22 @@ jobs:
       - name: Target guards leave no call or prototype unbacked
         run: python3 tests/ci/check_target_guard_symmetry.py
 
+      # A "*" width or precision reads an int. Eighteen sites handed it a
+      # size_t -- fourteen now cast, four removed with the dead block they sat
+      # in -- and no build this project runs can see that: size_t is int-sized
+      # on all four ESP targets, so -Wformat has nothing to object to even
+      # through TRACE_*, which does carry a printf format attribute, and even
+      # under -Werror=format. Measured: 0 format warnings on esp32, esp32s2,
+      # esp32s3 and esp32c3. The sites break only where size_t is wider than
+      # int, which is a 64-bit host build -- so the two found before this check
+      # existed were found by the host unit tests, and the other sixteen were
+      # not found by anything.
+      #
+      # This is the only check in this job whose subject no compiler in the
+      # pipeline can report, which is why it is a check and not a flag.
+      - name: No printf "*" width or precision is given a size_t
+        run: python3 tests/ci/check_printf_star_int.py
+
       # Eight lines across seven files printed a credential: the local API key
       # twice, the Wi-Fi PSK twice, the cloud provisioning token, the device's
       # SSL private key, and two whole request-body dumps -- one of which

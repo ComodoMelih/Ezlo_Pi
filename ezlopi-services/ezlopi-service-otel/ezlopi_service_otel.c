@@ -102,7 +102,10 @@ char *ezlopi_service_otel_fetch_string_value_from_cjson(cJSON *cj_root, const ch
             ret = ezlopi_malloc(__FUNCTION__, cj_item->str_value_len + 1);
             if (ret)
             {
-                snprintf(ret, cj_item->str_value_len + 1, "%.*s", cj_item->str_value_len, cj_item->valuestring);
+                /* (int) because "%.*s" reads its precision as an int and
+                ** str_value_len is a size_t; see the note in
+                ** ezlopi_core_cjson_macros.c. */
+                snprintf(ret, cj_item->str_value_len + 1, "%.*s", (int)cj_item->str_value_len, cj_item->valuestring);
             }
         }
     }

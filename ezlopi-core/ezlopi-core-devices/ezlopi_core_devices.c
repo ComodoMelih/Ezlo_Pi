@@ -739,12 +739,17 @@ static void ezlopi_device_print_controller_cloud_information_v3(void)
 {
     TRACE_I("Armed: %d", s_controller_information.armed);
     TRACE_I("Battery Powered: %d", s_controller_information.battery_powered);
-    TRACE_I("Device Type Id: %.*s", sizeof(s_controller_information.device_type_id), s_controller_information.device_type_id);
-    TRACE_I("Gateway Id: %.*s", sizeof(s_controller_information.gateway_id), s_controller_information.gateway_id);
-    TRACE_I("Parent Device Id: %.*s", sizeof(s_controller_information.parent_device_id), s_controller_information.parent_device_id);
+    /* (int) on each precision below because "%.*s" reads it as an int and
+    ** sizeof yields a size_t; see the note in ezlopi_core_cjson_macros.c. This
+    ** function is behind "#if 0" and so is not a live defect, but it is kept
+    ** deliberately for debugging, and the point of keeping it is that it works
+    ** when switched on. */
+    TRACE_I("Device Type Id: %.*s", (int)sizeof(s_controller_information.device_type_id), s_controller_information.device_type_id);
+    TRACE_I("Gateway Id: %.*s", (int)sizeof(s_controller_information.gateway_id), s_controller_information.gateway_id);
+    TRACE_I("Parent Device Id: %.*s", (int)sizeof(s_controller_information.parent_device_id), s_controller_information.parent_device_id);
     TRACE_I("Persistent: %d", s_controller_information.persistent);
     TRACE_I("Reachable: %d", s_controller_information.reachable);
-    TRACE_I("Room Id: %.*s", sizeof(s_controller_information.room_id), s_controller_information.room_id);
+    TRACE_I("Room Id: %.*s", (int)sizeof(s_controller_information.room_id), s_controller_information.room_id);
     TRACE_I("Security: %s", s_controller_information.security ? s_controller_information.security : ezlopi_null_str);
     TRACE_I("Service Notification: %d", s_controller_information.service_notification);
     TRACE_I("Ready: %d", s_controller_information.ready);

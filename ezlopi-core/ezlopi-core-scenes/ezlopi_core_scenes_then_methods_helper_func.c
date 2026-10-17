@@ -382,7 +382,9 @@ ezlopi_error_t EZPI_core_scenes_then_helper_set_expn_var(char *expression_name, 
             curr_expr->code = ezlopi_malloc(__FUNCTION__, strlen(code_str) + 1);
             if (curr_expr->code)
             {
-                snprintf(curr_expr->code, strlen(code_str) + 1, "%.*s", strlen(code_str), code_str);
+                /* (int) because "%.*s" reads its precision as an int and strlen
+                ** yields a size_t; see the note in ezlopi_core_cjson_macros.c. */
+                snprintf(curr_expr->code, strlen(code_str) + 1, "%.*s", (int)strlen(code_str), code_str);
             }
         }
 
@@ -461,7 +463,7 @@ ezlopi_error_t EZPI_core_scenes_then_helper_set_expn_var(char *expression_name, 
                     curr_expr->exp_value.u_value.str_value = ezlopi_malloc(__FUNCTION__, strlen(variable_str) + 1);
                     if (curr_expr->exp_value.u_value.str_value)
                     {
-                        snprintf(curr_expr->exp_value.u_value.str_value, strlen(variable_str) + 1, "%.*s", strlen(variable_str), variable_str);
+                        snprintf(curr_expr->exp_value.u_value.str_value, strlen(variable_str) + 1, "%.*s", (int)strlen(variable_str), variable_str);
                     }
                 }
                 break;

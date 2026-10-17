@@ -142,47 +142,17 @@ static void __broadcast_loop(void *arg)
                 char *method_str = ezlopi_service_otel_fetch_string_value_from_cjson(__broadcast_data->cj_broadcast_data, ezlopi_method_str);
                 char *msg_subclass_str = ezlopi_service_otel_fetch_string_value_from_cjson(__broadcast_data->cj_broadcast_data, ezlopi_msg_subclass_str);
 
-#if 0
-                cJSON *cj_id = cJSON_GetObjectItem(__FUNCTION__, __broadcast_data->cj_broadcast_data, ezlopi_id_str);
-                if (cj_id && cj_id->valuestring && (cj_id->type == cJSON_String) && cj_id->str_value_len)
-                {
-                    id_str = ezlopi_malloc(__FUNCTION__, cj_id->str_value_len + 1);
-                    if (id_str)
-                    {
-                        snprintf(id_str, cj_id->str_value_len + 1, "%.*s", cj_id->str_value_len, cj_id->valuestring);
-                    }
-                }
-
-                cJSON *cj_error = cJSON_GetObjectItem(__FUNCTION__, __broadcast_data->cj_broadcast_data, ezlopi_error_str);
-                if (cj_error && cj_error->valuestring && (cj_error->type == cJSON_String) && cj_id->str_value_len)
-                {
-                    error_str = ezlopi_malloc(__FUNCTION__, cj_error->str_value_len + 1);
-                    if (error_str)
-                    {
-                        snprintf(error_str, cj_error->str_value_len + 1, "%.*s", cj_error->str_value_len, cj_error->valuestring);
-                    }
-                }
-
-                cJSON *cj_msg_subclass = cJSON_GetObjectItem(__FUNCTION__, __broadcast_data->cj_broadcast_data, ezlopi_msg_subclass_str);
-                if (cj_msg_subclass && cj_msg_subclass->valuestring && (cj_msg_subclass->type == cJSON_String) && cj_msg_subclass->str_value_len)
-                {
-                    msg_subclass_str = ezlopi_malloc(__FUNCTION__, cj_msg_subclass->str_value_len + 1);
-                    if (msg_subclass_str)
-                    {
-                        snprintf(msg_subclass_str, cj_msg_subclass->str_value_len + 1, "%.*s", cj_msg_subclass->str_value_len, cj_msg_subclass->valuestring);
-                    }
-                }
-
-                cJSON *cj_method = cJSON_GetObjectItem(__FUNCTION__, __broadcast_data->cj_broadcast_data, ezlopi_method_str);
-                if (cj_method)
-                {
-                    method_str = ezlopi_malloc(__FUNCTION__, cj_method->str_value_len + 1);
-                    if (method_str)
-                    {
-                        snprintf(method_str, cj_method->str_value_len + 1, "%.*s", cj_method->str_value_len, cj_method->valuestring);
-                    }
-                }
-#endif
+                /* The hand-rolled version of the four reads above used to sit
+                ** here under "#if 0". Removed rather than kept: the four calls
+                ** above do the same job through
+                ** ezlopi_service_otel_fetch_string_value_from_cjson(), and the
+                ** old copy could not be re-enabled as it stood. It assigned
+                ** over id_str..msg_subclass_str, leaking the four buffers the
+                ** live calls had just allocated, and its second guard tested
+                ** cj_id->str_value_len where cj_error was meant -- so with an
+                ** "error" field present but "id" absent it dereferenced a null
+                ** cj_id. Dead text does not get reviewed, which is how both
+                ** survived. */
 
 #endif
                 EZPI_core_broadcast_cjson(__broadcast_data->cj_broadcast_data);

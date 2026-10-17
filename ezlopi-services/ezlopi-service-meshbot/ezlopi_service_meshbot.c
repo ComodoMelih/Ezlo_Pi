@@ -399,7 +399,10 @@ PT_THREAD(ezpi_scene_proto_thread(l_scenes_list_v2_t *scene_node, uint32_t routi
                         if (else_method)
                         {
                             else_method(scene_node, (void *)else_block_node);
-                            TRACE_OTEL(ENUM_EZLOPI_TRACE_SEVERITY_INFO, "meshbot[%.*s]: else condition.", sizeof(scene_node->name), scene_node->name);
+                            /* (int) because "%.*s" reads its precision as an int
+                            ** and sizeof yields a size_t; see the note in
+                            ** ezlopi_core_cjson_macros.c. */
+                            TRACE_OTEL(ENUM_EZLOPI_TRACE_SEVERITY_INFO, "meshbot[%.*s]: else condition.", (int)sizeof(scene_node->name), scene_node->name);
                         }
 
                         ctx->delay_ms = 10;
