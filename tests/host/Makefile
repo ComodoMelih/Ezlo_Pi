@@ -71,7 +71,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
-           test_i2c_shared_bus test_api_envelope test_cjsongpio
+           test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -515,6 +515,86 @@ $(BUILD)/test_scenefields: test_scenefields.c $(SCENES_DIR)/ezlopi_core_scenes_d
 	$(CC) $(SCENEFIELDS_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/scenefields_cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_scenefields_main.o $(BUILD)/scenefields_subject.o \
 	      $(BUILD)/scenefields_cjext.o $(LDFLAGS) -lm
+
+# The nine-arm sscanf ladder in EZPI_parse_http_url(), which turns a
+# sendHttpRequest action's `url` field into a host, a port and a page. A URL
+# carrying credentials falls through to the arm whose conversion is the whole
+# authority, so `host` -- and from there web_server and the `Host:` header --
+# used to contain "user:pass@example.com".
+#
+# WHY THIS RULE IS LARGER THAN THE OTHERS
+#
+# It compiles a whole firmware translation unit that was previously assumed
+# unreachable from a host. check_scanf_field_width.py's docstring says as much:
+# "the host test suite cannot compile this translation unit without stubbing
+# seven IDF headers and four enum families". The seven is right -- measured, and
+# they are in stubs-httpurl/. The second half is not: what is actually missing
+# after those seven is six type names, two of them from esp_http_client and
+# three gpio enums that now live in stubs/driver/gpio.h beside gpio_num_t.
+#
+# The rest of the cost is at the link. The object carries an undefined symbol
+# for every function the file calls, including the ones reached only from the
+# eight exported functions this test never touches: 22 of them, of which three
+# are glibc's own renames, six are string constants, and thirteen are functions
+# that stub_httpurl.c supplies. Ten of those thirteen abort() instead of
+# returning something plausible -- see the note at the top of that file.
+#
+# THE SIX CONSTANTS ARE REAL SOURCES, NOT STUBS
+#
+# ezlopi__id_str and five others are `extern const char *` in
+# ezlopi_cloud_constants.h, and they are supplied by compiling the real
+# ezlopi_cloud_keywords.c and ezlopi_cloud_value_type_str.c rather than by
+# redeclaring them here. Both are self-contained -- keywords.c includes only
+# stdio.h and value_type_str.c includes nothing -- so there is no reason to
+# accept a copy. A stubbed string constant is the kind of copy that goes wrong
+# quietly: a test asserting on a JSON key would then be asserting on the key
+# this directory invented.
+#
+# -D_GNU_SOURCE is needed because the subject calls bzero(), which glibc hides
+# under -std=c99 alone.
+#
+# stubs-httpurl/ comes before stubs/ so the private headers win, and
+# stubs-scenes/ supplies CONFIG_EZPI_SERV_ENABLE_MESHBOTS -- the same macro
+# test_scenefields needs, for the same reason, which is why that stub is shared
+# rather than copied.
+#
+# The nm check is the same guard as test_scenefields', and for a sharper reason
+# here: this translation unit is wrapped in the same #ifdef, so without the
+# macro it preprocesses to nothing, the link still succeeds, and every
+# assertion below would be asserting about a function that was never compiled.
+HTTPURL_INC := -I$(SCENES_DIR) -I$(ERRORS_DIR) -I$(CJEXT_DIR) \
+               -I$(CONSTANTS_DIR) -I$(ACTIONS_DIR) -I$(COREEZLOPI_DIR) \
+               -I$(I2C_HAL_DIR) -I$(UART_HAL_DIR) \
+               -I../../ezlopi-core/ezlopi-core-http \
+               -I../../ezlopi-core/ezlopi-core-nvs \
+               -I../../ezlopi-core/ezlopi-core-devices \
+               -I../../ezlopi-core/ezlopi-core-cloud \
+               -I../../ezlopi-core/ezlopi-core-settings \
+               -I../../ezlopi-core/ezlopi-core-protect \
+               -I../../ezlopi-hal/ezlopi-hal-adc \
+               -I../../ezlopi-hal/ezlopi-hal-pwm \
+               -I../../ezlopi-hal/ezlopi-hal-gpio \
+               -I../../ezlopi-hal/ezlopi-hal-onewire \
+               -I../../ezlopi-hal/ezlopi-hal-spi \
+               -I stubs-httpurl -I stubs-scenes -I$(STUBS_DIR)
+$(BUILD)/test_httpurl: HTTPURL_CFLAGS := -std=c99 -O1 -g -D_GNU_SOURCE \
+                                         $(HTTPURL_INC) $(SANITIZERS)
+$(BUILD)/test_httpurl: test_httpurl.c stub_httpurl.c \
+                       $(SCENES_DIR)/ezlopi_core_scenes_then_methods_helper_func.c \
+                       $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                       $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c \
+                       $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(HTTPURL_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_httpurl_main.o test_httpurl.c
+	$(CC) $(HTTPURL_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/httpurl_stub.o stub_httpurl.c
+	$(CC) $(HTTPURL_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/httpurl_subject.o $(SCENES_DIR)/ezlopi_core_scenes_then_methods_helper_func.c
+	@nm $(BUILD)/httpurl_subject.o | grep -q ' T EZPI_parse_http_url' \
+	  || { echo "ezlopi_core_scenes_then_methods_helper_func.c compiled to an object without EZPI_parse_http_url in it -- CONFIG_EZPI_SERV_ENABLE_MESHBOTS is not reaching it"; exit 1; }
+	$(CC) $(HTTPURL_CFLAGS) -c -o $(BUILD)/httpurl_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(HTTPURL_CFLAGS) -c -o $(BUILD)/httpurl_valuetypes.o $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c
+	$(CC) $(HTTPURL_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/httpurl_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_httpurl_main.o $(BUILD)/httpurl_stub.o \
+	      $(BUILD)/httpurl_subject.o $(BUILD)/httpurl_keywords.o \
+	      $(BUILD)/httpurl_valuetypes.o $(BUILD)/httpurl_cjext.o $(LDFLAGS) -lm
 
 # The BLE chunk accumulator: the linked list that holds a payload too large for
 # one ATT write until the last chunk arrives. Four characteristics use it and

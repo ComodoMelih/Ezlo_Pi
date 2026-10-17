@@ -34,7 +34,9 @@
  * the value it describes; test 9 is what pins that down, and it is the one
  * test here an assert is the right adjudicator for, being a layout claim.
  *
- * Run: make -C tests/host run-scenefields
+ * Run: make -C tests/host build/test_scenefields && tests/host/build/test_scenefields
+ * ...or `make -C tests/host test` for the whole suite. This line used to name a
+ * `run-scenefields` target, which the Makefile has never had.
  */
 
 /* sdkconfig.h first, as every firmware translation unit does: the scenes

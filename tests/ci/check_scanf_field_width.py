@@ -45,9 +45,21 @@ WHY NO BUILD AND NO SANITIZER CATCHES IT
 format is well-formed, and the compiler cannot know how large the destination
 is. glibc's _FORTIFY_SOURCE does not cover it either. AddressSanitizer does
 catch it, but only when an input long enough to overflow actually runs, which
-on a target build means never: the host test suite cannot compile this
-translation unit without stubbing seven IDF headers and four enum families,
-and even then a test only covers the inputs somebody thought to write down.
+on a target build means never. This paragraph used to continue "the host test
+suite cannot compile this translation unit without stubbing seven IDF headers
+and four enum families" -- which was true of the suite at the time and is no
+longer true of anything. tests/host/test_httpurl.c compiles the real
+ezlopi_core_scenes_then_methods_helper_func.c under
+-fsanitize=address,undefined. The seven headers were right (they are in
+tests/host/stubs-httpurl/, five of them header guards and nothing more); the
+"four enum families" were not. What those headers supply beyond existing is six
+type names, five enums and one void * typedef, and three of the five live in
+tests/host/stubs/driver/gpio.h rather than in that directory.
+
+What survives the correction is the reason this is a check: a test only covers
+the inputs somebody thought to write down. test_httpurl exercises nine arms of
+one ladder in one file. A width missing from a different arm of a different
+sscanf, in a file nobody has written a host test for, is still invisible to it.
 
 The property being checked here is purely syntactic -- a conversion either
 carries a width or it does not -- so a static check covers the whole class

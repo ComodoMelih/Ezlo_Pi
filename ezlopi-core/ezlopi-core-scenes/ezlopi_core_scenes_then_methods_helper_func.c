@@ -91,6 +91,7 @@
 static int __ezlopi_core_scenes_then_sendhttp_relloc_header(s_ezlopi_core_http_mbedtls_t *tmp_http_data, int append_size, const char *append_str);
 static int __ezlopi_core_scenes_then_create_fresh_header(s_ezlopi_core_http_mbedtls_t *tmp_http_data);
 static void __ezlopi_core_scenes_then_append_to_header(s_ezlopi_core_http_mbedtls_t *tmp_http_data, const char *str1, const char *str2);
+static char *__ezlopi_core_scenes_then_split_authority(char *authority, char **user_out, char **pass_out, int *port_io);
 /*******************************************************************************
  *                          Static Data Definitions
  *******************************************************************************/
@@ -237,12 +238,70 @@ void EZPI_parse_http_url(s_ezlopi_core_http_mbedtls_t *tmp_http_data, l_fields_v
 
             if (succ_parsing)
             {
-                TRACE_D("*source = '%s'", field_value_string);
-                TRACE_S("host = '%s'", host);
-                TRACE_S("port = '%d'", port);
-                TRACE_S("page = '%s'", page);
+                /* Arms five to eight scan the whole authority into 'host',
+                ** credentials and port included: their conversions are
+                ** %99[^/] and %99[^\n], and neither stops at an '@' or at the
+                ** ':' before a port. So "http://user:pass@example.com:8080/x"
+                ** reaches arm five and leaves host = "user:pass@example.com:8080",
+                ** which then became the web_server, the "Host:" header value
+                ** and the subject of the traces below -- while web_port stayed
+                ** at the scheme default, because arm five never looks for one.
+                **
+                ** The split is done here rather than inside the ladder because
+                ** every arm's output has the same shape. Arms one to four and
+                ** nine consume the port themselves and cannot put a ':' or an
+                ** '@' in host -- their conversion is %99[^:] -- so for those
+                ** this is a no-op and 'port' keeps the value they scanned. */
+                char *url_user = NULL;
+                char *url_pass = NULL;
+                char *bare_host = __ezlopi_core_scenes_then_split_authority(host, &url_user, &url_pass, &port);
 
-                tmp_http_data->web_server_maxlen = (uint16_t)EZPI_core_http_mem_malloc(&(tmp_http_data->web_server), host);
+                /* Only when the 'credential' field has not already supplied
+                ** them. Field order is whatever the request listed, so this is
+                ** the rule that makes the outcome independent of it: an
+                ** explicit credential always wins over one embedded in the
+                ** URL, in either order. */
+                if ((NULL != url_user) && (NULL == tmp_http_data->username))
+                {
+                    tmp_http_data->username_maxlen = (uint16_t)EZPI_core_http_mem_malloc(&(tmp_http_data->username), url_user);
+                }
+                if ((NULL != url_pass) && (NULL == tmp_http_data->password))
+                {
+                    tmp_http_data->password_maxlen = (uint16_t)EZPI_core_http_mem_malloc(&(tmp_http_data->password), url_pass);
+                }
+
+                /* Two of these four print request-supplied text that can carry
+                ** a secret, and they are gated the same way
+                ** ezlopi_core_http.c:248 gates the assembled request and the
+                ** server's reply -- this log is readable over the serial
+                ** console and ends up in any captured boot log.
+                **
+                ** '*source' is the URL verbatim, userinfo included, so before
+                ** the split above it was one of three traces here that printed
+                ** a password and it is now the only one left. 'page' is the
+                ** second: arms one, two, five and six put everything after the
+                ** host into it, query string and all, and a URL of the form
+                ** ".../v1/thing?api_key=..." is an ordinary way to authenticate
+                ** an HTTP request. The generated query is already withheld at
+                ** ezlopi_core_http.c:249, so printing the action's own here
+                ** would have left the back door open.
+                **
+                ** 'host' and 'port' stay. They are the two facts a reader needs
+                ** to tell a parse that worked from one that aimed somewhere
+                ** unexpected, and after the split neither can carry userinfo.
+                ** The withheld page's length is still printed, for the same
+                ** reason the request's is: that there was a path, and how long
+                ** it was, is most of what the trace was being read for. */
+#ifdef CONFIG_EZPI_HTTP_LOG_PAYLOADS
+                TRACE_D("*source = '%s'", field_value_string);
+                TRACE_S("page = '%s'", page);
+#else
+                TRACE_S("page = [len: %d] (withheld; CONFIG_EZPI_HTTP_LOG_PAYLOADS is off)", (int)strlen(page));
+#endif
+                TRACE_S("host = '%s'", bare_host);
+                TRACE_S("port = '%d'", port);
+
+                tmp_http_data->web_server_maxlen = (uint16_t)EZPI_core_http_mem_malloc(&(tmp_http_data->web_server), bare_host);
                 tmp_http_data->targe_page_maxlen = (uint16_t)EZPI_core_http_mem_malloc(&(tmp_http_data->target_page), page);
                 tmp_http_data->web_port = port;
 
@@ -257,7 +316,7 @@ void EZPI_parse_http_url(s_ezlopi_core_http_mbedtls_t *tmp_http_data, l_fields_v
                 {
                     // 1. adding 'host' to header-buffer
                     // TRACE_W("Appending!! webserver -> header");
-                    __ezlopi_core_scenes_then_append_to_header(tmp_http_data, "Host", host);
+                    __ezlopi_core_scenes_then_append_to_header(tmp_http_data, "Host", bare_host);
                 }
                 else
                 {
@@ -773,6 +832,105 @@ static void __ezlopi_core_scenes_then_append_to_header(s_ezlopi_core_http_mbedtl
             ezlopi_free(__FUNCTION__, append_str);
         }
     }
+}
+
+/**
+ * @brief Splits an authority -- the "[userinfo@]host[:port]" that arms five to
+ * eight of the ladder in EZPI_parse_http_url scan whole -- into its parts.
+ *
+ * In place, by writing terminators into 'authority' and returning a pointer
+ * into it. Nothing is copied and nothing is moved: the returned host points
+ * past the userinfo rather than having the userinfo shifted out from under it,
+ * which is what keeps '*user_out' and '*pass_out' valid -- they point at the
+ * front of the same buffer. All three pointers are therefore only good for as
+ * long as the caller's buffer is, which is why the caller copies out of them
+ * through EZPI_core_http_mem_malloc before the buffer leaves scope.
+ *
+ * @param authority [ The scanned authority, modified in place. ]
+ * @param user_out  [ Set to the username, or left NULL if there is no
+ *                    userinfo or the part before its ':' is empty. ]
+ * @param pass_out  [ Set to the password, or left NULL if the userinfo has no
+ *                    ':' at all. An empty string here means "a ':' with
+ *                    nothing after it", which is not the same answer. ]
+ * @param port_io   [ Overwritten only when an explicit port is found, so an
+ *                    arm that scanned its own port, or that set the https
+ *                    default of 443, keeps it. ]
+ * @return char* [ The bare host, inside 'authority'. Never NULL. ]
+ */
+static char *__ezlopi_core_scenes_then_split_authority(char *authority, char **user_out, char **pass_out, int *port_io)
+{
+    char *host = authority;
+    *user_out = NULL;
+    *pass_out = NULL;
+
+    /* The last '@' and not the first. RFC 3986 section 3.2.1 lets a userinfo
+    ** carry sub-delims, '@' among the characters a password is percent-encoded
+    ** to avoid but not required to be, so "a:b@c@example.com" has the userinfo
+    ** "a:b@c". Splitting at the first '@' would make the host "c@example.com",
+    ** which is not a host at all. */
+    char *at_ptr = strrchr(host, '@');
+    if (NULL != at_ptr)
+    {
+        char *userinfo = host;
+        *at_ptr = '\0';
+        host = at_ptr + 1;
+
+        /* And the first ':' here, for the mirror-image reason: a password may
+        ** contain one, a username may not. */
+        char *cred_sep = strchr(userinfo, ':');
+        if (NULL != cred_sep)
+        {
+            *cred_sep = '\0';
+            *pass_out = cred_sep + 1;
+        }
+        if ('\0' != *userinfo)
+        {
+            *user_out = userinfo;
+        }
+    }
+
+    /* The port, when the arm that produced this authority did not take one.
+    **
+    ** The last ':' rather than the first, because an unbracketed IPv6 address
+    ** has several and the port is after all of them. Two conditions guard the
+    ** split, and each is here because of an input that would otherwise be made
+    ** worse than it is today:
+    **
+    **   - the tail must be entirely digits denoting 1..65535. This is what
+    **     leaves a bracketed IPv6 literal alone: "http://[::1]/x" reaches arm
+    **     five and leaves host = "[::1]", whose last ':' is inside the
+    **     address and whose tail is "1]". Splitting there would hand mbedtls
+    **     "[:" as a host.
+    **   - the host must contain no '?' or '#'. Arms seven and eight are
+    **     catch-alls -- %99[^\n] -- so a URL with a query and no path, like
+    **     "http://example.com?q=a:5", arrives here whole. Leaving that one
+    **     alone keeps it exactly as broken as it is today rather than
+    **     inventing a port 5 for it; fixing it means parsing the query out,
+    **     which is a separate change.
+    **
+    ** There was a third, rejecting a tail containing ']'. It was removed as
+    ** dead: ']' is not a digit, so no string the all-digits test accepts can
+    ** contain one, and a mutation that deleted the ']' test changed no
+    ** observable behaviour -- which is how it was found. */
+    char *port_sep = strrchr(host, ':');
+    if ((NULL != port_sep) && (NULL == strpbrk(host, "?#")))
+    {
+        const char *digits = port_sep + 1;
+        long value = 0;
+        int idx = 0;
+        while ((digits[idx] >= '0') && (digits[idx] <= '9') && (value <= 65535))
+        {
+            value = (value * 10) + (digits[idx] - '0');
+            idx++;
+        }
+        if (('\0' == digits[idx]) && (idx > 0) && (value > 0) && (value <= 65535))
+        {
+            *port_sep = '\0';
+            *port_io = (int)value;
+        }
+    }
+
+    return host;
 }
 
 #endif // CONFIG_EZPI_SERV_ENABLE_MESHBOTS

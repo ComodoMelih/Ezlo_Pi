@@ -2146,7 +2146,7 @@ of reading the serial console would have revealed it.
   `Authorization` header the action set is
   [appended](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L781) to the same
   buffer a few lines later — the credentials being
-  [parsed out of an `EZLOPI_VALUE_TYPE_CREDENTIAL` field](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L376).
+  [parsed out of an `EZLOPI_VALUE_TYPE_CREDENTIAL` field](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L438).
   So this was not "an opaque header might be in there"; a user and password were
   logged in the clear, in a query string. The response is withheld on the same
   switch because it is the chosen server's reply, `Set-Cookie` included.
@@ -5454,7 +5454,7 @@ enumerators — so the live half of this component was never affected.
 
 - **A `sscanf` that let the caller choose the length of a stack write.** The
   last arm of the URL-parsing ladder in
-  [`EZPI_parse_http_url()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L133)
+  [`EZPI_parse_http_url()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L134)
   was
 
   ```c
@@ -5569,7 +5569,7 @@ enumerators — so the live half of this component was never affected.
   and
   [`hub.scenes.action.block.test`](ezlopi-cloud/ezlopi-cloud-scenes/ezlopi_cloud_scenes.c#L592)
   both `memset` the struct to zero and then let
-  [`EZPI_parse_http_url()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L133)
+  [`EZPI_parse_http_url()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L134)
   fill it. That function allocates `web_server` only inside its
   `if (succ_parsing)` branch, so a `url` that matches none of the nine arms —
   or an action carrying no `url` field at all — leaves the field as the zero it
@@ -5578,7 +5578,7 @@ enumerators — so the live half of this component was never affected.
   returns the size it wanted even when `ezlopi_malloc` returned nothing, so an
   allocation failure leaves `web_server_maxlen` positive beside a NULL
   `web_server`, and the
-  [`web_port = port`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L247)
+  [`web_port = port`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L306)
   on the next line still runs with the real port. The third caller,
   [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1695),
   was never at risk: its `web_server` is a `char` array initialised from a
@@ -5608,19 +5608,19 @@ enumerators — so the live half of this component was never affected.
 
 - **The same parse failure also emitted a literal `Host: \r\n`.** In
   `EZPI_parse_http_url()` the header creation and the
-  [`Host` append](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L260)
+  [`Host` append](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L319)
   sat *after* the `if (succ_parsing) ... else` rather than inside the success
   arm, so they ran on both paths — and on the failing path `host` is still the
   `char host[100] = {0}` it was declared as. Both are now inside the success
   branch. Nothing downstream lost its header as a result: the other four
   functions that append to this buffer —
-  [`EZPI_parse_http_content_type()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L274),
-  [`EZPI_parse_http_content()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L300),
-  [`EZPI_parse_http_headers()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L330)
+  [`EZPI_parse_http_content_type()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L333),
+  [`EZPI_parse_http_content()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L359),
+  [`EZPI_parse_http_headers()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L389)
   and
-  [`EZPI_parse_http_skipsecurity()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L357)
+  [`EZPI_parse_http_skipsecurity()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L416)
   — open by calling
-  [`__ezlopi_core_scenes_then_create_fresh_header()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L735)
+  [`__ezlopi_core_scenes_then_create_fresh_header()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L794)
   themselves, and that function allocates only when `header` is still NULL and
   otherwise returns the existing length, so it is idempotent and the move
   cannot starve a later append.
@@ -5673,17 +5673,24 @@ enumerators — so the live half of this component was never affected.
   compile to nothing and still link. `ezlopi_core_http.c` carries no such
   wrapper, so the chokepoint half ships whatever that option is set to.
 
-  **Two things deliberately not done.** There is no host test, and the reason
-  was measured rather than assumed: compiling `ezlopi_core_http.c` under
-  `tests/host/` needs **12** headers that do not exist in this repo, **8** of
-  them `mbedtls/`, so the test would stand in for the TLS stack and stop
-  testing the thing it names. The scenes helper is no better at **7** — which
-  independently confirms the count already recorded in
+  **Two things deliberately not done.** There is no host test for *this* guard,
+  and the reason was measured rather than assumed: compiling
+  `ezlopi_core_http.c` under `tests/host/` needs **10** headers that do not
+  exist in this repo, **9** of them `mbedtls/` and `esp_tls/`, so the test would
+  stand in for the TLS stack and stop testing the thing it names. (That count
+  was recorded as **12** when this entry was written and is corrected here; it
+  was re-measured, not re-remembered, while building the test described at the
+  end of this section.) The scenes helper needs **7** — which independently
+  confirms the count already recorded in
   [`check_scanf_field_width.py`](tests/ci/check_scanf_field_width.py)'s
-  docstring. There is also no new CI check: the invariant is one condition in
-  one function, and unlike a missing `scanf` width there is no syntactic class
-  for a check to cover, so a check here would guard a single line and claim to
-  be more.
+  docstring, and which turned out to be *cheap* enough to pay: the last entry in
+  this section is a host test that compiles that file for real. Whether a
+  translation unit is hostable is two measurements, not one — how many absent
+  headers the preprocessor wants, and how many undefined symbols the link
+  leaves — and only the first had been taken here. There is also no new CI
+  check: the invariant is one condition in one function, and unlike a missing
+  `scanf` width there is no syntactic class for a check to cover, so a check
+  here would guard a single line and claim to be more.
 
   A third thing was deliberately not done at the time and has since been done
   as its own change: `target_page`, the field this guard does *not* cover,
@@ -5750,7 +5757,7 @@ enumerators — so the live half of this component was never affected.
 
   That immediately activates a guard that was already written and could not
   previously fail:
-  [`if (tmp_http_data->url_maxlen > 0)`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L140)
+  [`if (tmp_http_data->url_maxlen > 0)`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L141)
   in `EZPI_parse_http_url()`. A failed `url` allocation now skips the nine-arm
   parse instead of running it and leaving the struct half-filled. Worth being
   precise about what the old return value cost here, because it is sharper than
@@ -5799,9 +5806,11 @@ enumerators — so the live half of this component was never affected.
   **Two things deliberately not done, and one harness bug worth recording.**
   There is no committed host test, for the reason the previous entry measured
   and this one inherits: `__ezlopi_http_generate_request` is `static` in a file
-  that needs 12 absent headers, 8 of them `mbedtls/`, so a test would exercise
-  a *copy* of the ladder — the drift `tests/host/Makefile`'s own header argues
-  against. And the sunstate request is still functionally wrong: its path
+  that needs **10** absent headers, 9 of them `mbedtls/` and `esp_tls/`, so a
+  test would exercise a *copy* of the ladder — the drift
+  `tests/host/Makefile`'s own header argues against. That remains true of
+  `ezlopi_core_http.c`; it did *not* remain true of the scenes helper, which the
+  last entry in this section now tests for real. And the sunstate request is still functionally wrong: its path
   should be the `json?lat=…` it built into `tmp_url`, not the root. That is a
   different defect in a function with several, and it is recorded under *Known
   gaps* rather than guessed at here. The harness bug: two of the sweep's
@@ -5812,6 +5821,199 @@ enumerators — so the live half of this component was never affected.
   patterns. Both affected lines were *descriptive*, not gating, so no result
   above rested on them; the sweep is kept rather than discarded for the same
   reason.
+
+- **A URL with credentials in it no longer puts them in `web_server`, in the
+  `Host:` header or on the console, and the port it asks for is no longer
+  swallowed.** This closes a *Known gaps* entry, and the entry's own
+  recommendation was followed rather than its first draft: the fix is not only a
+  logging switch, because the root cause was that `host` contained credentials
+  at all.
+
+  `http://user:pass@example.com:8080/x` is a legal URL. It reaches the **fifth**
+  arm of the ladder, `http://%99[^/]/%199[^\n]`, whose conversion stops only at
+  a `/` — so `host` came back as the whole `user:pass@example.com:8080`, and
+  `port` stayed at the **80** it was initialised to. That string was then the
+  `web_server`, the `Host:` header value, and the subject of a `TRACE_S`. Arms
+  **6**, **7** and **8** have the same shape and the same outcome.
+
+  **The split is one new leaf function,**
+  [`__ezlopi_core_scenes_then_split_authority()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L860),
+  [called once](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L257)
+  on whatever the ladder produced. It works in place and returns a pointer into
+  the caller's `host[100]`: nothing is moved, which is what keeps the username
+  and password pointers — which point at the front of that same buffer — valid
+  while they are copied out. Three decisions in it are not arbitrary:
+
+  - the authority splits at the **last** `@`
+    ([`strrchr`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L871)),
+    because RFC 3986 §3.2.1 allows `@` inside a userinfo, so `a:b@c@example.com`
+    has the userinfo `a:b@c`;
+  - the userinfo splits at the **first** `:`
+    ([`strchr`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L880)),
+    for the mirror-image reason — a password may contain one, a username may
+    not;
+  - the port is taken from the last `:` only when the tail is **entirely digits
+    denoting 1..65535** and the host contains no `?` or `#`
+    ([the acceptance test](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L926)).
+    The digits rule is what leaves `http://[::1]/x` alone, whose last colon is
+    inside the address and whose tail is `1]`. The `?#` rule is what leaves
+    `http://example.com?q=a:5` exactly as broken as it already was, rather than
+    inventing a port 5 for it — arms 7 and 8 are `%99[^\n]` catch-alls, so a
+    URL with a query and no path arrives whole.
+
+  Arms **1-4** and **9** convert with `%99[^:]`, so they cannot put a `:` or an
+  `@` into `host` and cannot reach any of this; for them the call is a no-op and
+  the port they scanned themselves survives, because the helper overwrites the
+  port only when it finds one.
+
+  **An explicit `credential` field still wins, in either field order.** The
+  action's fields are walked in whatever order the request listed them and
+  dispatched by name, so `credential` may be parsed before `url` or after it.
+  The URL's userinfo fills `username` and `password`
+  [only while they are still NULL](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L264),
+  and
+  [`EZPI_parse_http_creds()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L435)
+  overwrites unconditionally as it always has, which makes the two orders agree.
+
+  **Two of the function's four traces are now behind
+  `CONFIG_EZPI_HTTP_LOG_PAYLOADS`,** the switch
+  [`ezlopi_core_http.c:248`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L248)
+  already uses for the assembled request and the server's reply. `*source` is
+  the URL verbatim and is the only trace here that can still print a password.
+  `page` is the second one, and that is a correction to the gap entry's
+  reasoning rather than a copy of it: arms 1, 2, 5 and 6 put everything after
+  the host into `page`, query string and all, and `…/v1/thing?api_key=…` is an
+  ordinary way to authenticate an HTTP request — so withholding the *generated*
+  `?username=…&password=…` at `ezlopi_core_http.c:249` while printing the
+  action's own query would have left the same door open. `host` and `port` stay
+  unconditional: they are what distinguishes a parse that worked from one that
+  aimed somewhere unexpected, and after the split neither can carry userinfo.
+  The withheld page's
+  [length is still printed](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L299).
+
+  So the gap entry's "three live `%s` traces, gate all three" became **two
+  gated and one made safe at the source**, which is the better arrangement: a
+  switch nobody turns on protects nothing, and `host` is the field a reader
+  actually needs.
+
+  **This is the first fix in this file with a host test, and the measurement
+  that said one was impossible was wrong.** Two earlier entries in this section
+  record that there is no host test because the file needs absent headers; that
+  claim was re-measured rather than inherited, and the subject translation unit
+  does compile on a host. It needs **7** stub headers — independently confirming
+  the number recorded in
+  [`check_scanf_field_width.py`](tests/ci/check_scanf_field_width.py)'s
+  docstring — and produces a **204128**-byte object with **0** errors and
+  **10** exported functions. Of its **63** undefined symbols, 21 are the
+  sanitizer runtime and 8 are libc, leaving **22**: three are glibc's own
+  renames of `sscanf`, `strtoul` and `memset`, six are string constants, and
+  **13** are firmware functions.
+
+  **That docstring is edited, not just contradicted.** Its sentence read "the
+  host test suite cannot compile this translation unit without stubbing seven
+  IDF headers and four enum families" — the premise is what made this file look
+  untestable in two earlier entries in this section, so leaving it standing
+  would keep inviting the same wrong conclusion. The seven was right. The rest
+  was not, in two ways. The suite now *does* compile the file, so "cannot
+  compile" is simply dead. And what the seven headers supply beyond merely
+  existing is **six type names**, of which **five** are enums and one is not:
+  `esp_http_client_method_t` and `HttpStatus_Code` in
+  [`stubs-httpurl/esp_http_client.h`](tests/host/stubs-httpurl/esp_http_client.h),
+  `spi_device_handle_t` — a `void *` — in
+  [`stubs-httpurl/driver/spi_master.h`](tests/host/stubs-httpurl/driver/spi_master.h),
+  and `gpio_mode_t`, `gpio_pull_mode_t` and `gpio_int_type_t`, which are **not
+  in that directory at all**: they went into the suite's pre-existing
+  [`stubs/driver/gpio.h`](tests/host/stubs/driver/gpio.h) beside the `gpio_num_t`
+  already there, because a second GPIO stub is a copy that can drift. The other
+  **five** of the seven headers are header guards and nothing else — they exist
+  so an `#include` resolves.
+
+  What the rewritten paragraph keeps is the argument the docstring was actually
+  making, which the correction does not touch: a host test covers the inputs
+  somebody wrote down. `test_httpurl` drives nine arms of one ladder in one
+  file; a missing width in a different `sscanf`, in a file with no host test,
+  is still invisible to it. That is why the static check earns its place — not
+  because the file could not be compiled.
+
+  [`tests/host/test_httpurl.c`](tests/host/test_httpurl.c) therefore compiles
+  the **real** translation unit under `-fsanitize=address,undefined`, not a
+  transcription of the ladder — the drift that `tests/host/Makefile`'s own
+  header argues against at length.
+  [`tests/host/stub_httpurl.c`](tests/host/stub_httpurl.c) supplies the 13, in
+  two kinds: **10** are unreachable from the subject and `abort()` with a
+  message naming themselves rather than returning a plausible value, so a future
+  test that wanders into the expression engine stops instead of passing on a
+  stub's invention. The other **3** are on the hot path and are
+  reimplementations carrying the line ranges they came from —
+  `EZPI_core_http_mem_malloc` (`ezlopi_core_http.c:116-157`),
+  `EZPI_core_http_calc_empty_bufsize` (`:105-114`) and
+  `EZPI_core_http_dyna_relloc` (`:159-176`). Linking the real file instead was
+  measured and rejected: it needs **10** absent headers, nine of them `mbedtls/`
+  and `esp_tls/`, and leaves **44** further diagnostics, most of them designated
+  initializers against `esp_http_client_config_t` — a stub reproducing the IDF's
+  HTTP-client config layout field for field is a far worse copy than three leaf
+  functions. The six string constants are **not** stubbed: the real
+  `ezlopi_cloud_keywords.c` and `ezlopi_cloud_value_type_str.c` are linked,
+  because both are self-contained and a stubbed string constant is the kind of
+  copy that goes wrong quietly.
+
+  Because the three copies sit on the path the test exercises, the test asserts
+  on **two** independent surfaces: the struct the subject fills, and a recorded
+  log of every `(destination, string)` pair the subject handed the allocator.
+  The second does not pass through the copies at all, so a copy that drifts
+  cannot make a parsing assertion pass wrongly.
+
+  **Non-vacuity, shown before the fix was written.** Against the unfixed
+  subject, all **nine** ordinary URL shapes pass and the first credentialed case
+  fails with `web_server 'example.com' (got 'user:pass@example.com')` — the
+  defect demonstrated by running the firmware's own code, which the gap entry's
+  copied-ladder measurement could not do. After the fix the suite reports
+  **153** checks and the whole of `tests/host` reports **4967** checks across
+  **23** binaries, **0** failures.
+
+  **Then the assertions written *with* the fix were checked the same way,
+  because passing tests had not yet been shown capable of failing.** The suite
+  exits at its first failure, so everything after the credentialed table had
+  never run against a wrong subject. Six mutations of the new helper were built
+  and run. Two were caught at once. **Three survived** — splitting the userinfo
+  at the last colon instead of the first, splitting the authority at the first
+  `@` instead of the last, and dropping the `NULL ==` test that gives an
+  explicit credential precedence — and each survivor bought a new assertion: two
+  table rows (`user:pa:ss@…` and `user:p@ss@…`) and
+  `test_explicit_credential_beats_the_url_userinfo`, which drives the
+  `credential` and `url` fields together in both orders. All six are now caught.
+
+  **A mutation also found dead code in the fix itself.** The port split
+  originally carried a third guard rejecting a tail containing `]`. Deleting it
+  changed no observable behaviour, for a reason that is obvious once stated:
+  `]` is not a digit, so no string the all-digits test accepts can contain one.
+  It is removed rather than kept as an unreachable condition with a comment.
+
+  **Verified on four targets, baseline against fixed,** and the probe is rodata
+  rather than instruction counts because this change removes two format strings
+  and adds one. `esp32`, `esp32s2`, `esp32s3` and `esp32c3` all build with **0**
+  warnings in the subject on both sides, and on every one of them `*source =
+  '%s'` goes **1 → 0**, `page = '%s'` goes **1 → 0**, and the withheld-page
+  message goes **0 → 1**. The fourth count is the one that makes the first three
+  mean anything: `host = '%s'` stays **1 → 1**. Without it, a translation unit
+  that had vanished entirely — `CONFIG_EZPI_SERV_ENABLE_MESHBOTS` off, the trap
+  the host suite's `nm` guard exists for — would have produced the same two
+  zeros and looked like a success. Image size moves by **+256, +256, +240 and
+  +272** bytes.
+
+  **A fifth build turns the switch on,** because the four above cannot tell a
+  working gate from a misspelled macro. A typo in the `#ifdef` makes it
+  permanently false, compiles the `#else`, and produces *exactly* the four
+  counts reported above — the `host` control does not help, since it rules out
+  the translation unit vanishing and nothing else. With
+  `CONFIG_EZPI_HTTP_LOG_PAYLOADS=y` on esp32 both dumps come back (**1** and
+  **1**), the withheld message goes (**0**), and `host` is unmoved (**1**). The
+  three esp32 images are **1684080** baseline, **1684336** fixed with the
+  switch at its default, and **1684176** fixed with it on: switch-on sits
+  **+96** above baseline, which is the new helper's code, and **−160** below
+  switch-off, which is the withheld message's string and its `strlen` minus the
+  two short format strings they replaced. The switch moves the image in both
+  directions, so the name in the `.c` is the name in `Kconfig.projbuild`.
 
 ### Build and configuration — [infra]
 
@@ -7422,27 +7624,63 @@ Listed because a changelog that only mentions what was finished is misleading.
   can be validated without the hardware this audit has no access to. Recording
   it with the measurements attached is the useful half.
 
-- **`EZPI_parse_http_url()` traces the whole URL at `TRACE_D`, which can carry
-  credentials.** The
-  [`TRACE_D("*source = '%s'", field_value_string)`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L240)
-  prints the action's `url` field verbatim on every successful parse, and
-  `http://user:pass@host/path` is a legal URL that the first arm of the ladder
-  will accept — the `%99[^:]` conversion stops at the colon in `user:pass`, so
-  such a URL parses "successfully" into a nonsense host and still gets printed
-  whole. That is the same class as the three HTTP body dumps now behind
-  `CONFIG_EZPI_HTTP_LOG_PAYLOADS` under *Credentials*, and the fix is probably
-  the same switch.
+- **Arm nine of the URL ladder puts a leading slash on the path and truncates a
+  long one in silence.** The credentialed-URL defect this gap used to hold open
+  is fixed — see *Scene HTTP requests* — and building the host test for it found
+  two smaller defects in the one arm the fix does not touch.
 
-  Not folded into that change because the blast radius is different and
-  unmeasured. This is in the scenes helper, not `ezlopi_core_http.c`, and the
-  three dumps that switch covers were all in one function whose callers were
-  enumerated first. The surrounding
-  [`TRACE_S` lines for host, port and page](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L241)
-  have the same question hanging over them, and so does every other trace in
-  that file; picking one line out of it would look like the problem had been
-  addressed. What is needed first is a count of how many traces in the scenes
-  sources print a field that came from a cloud or local-API request, and that
-  sweep has not been run.
+  Arm nine is the fallback for a scheme that is neither `http://` nor `https://`,
+  [`"%*[^:]%*[:/]%99[^:]:%d%199s"`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L228).
+  Arms 1, 2, 5 and 6 consume the `/` that separates host from path themselves,
+  so `page` comes out without it. Arm nine's `%d` stops *at* the slash and
+  `%199s` then takes it along with the rest, so `page` begins with one — and
+  [`__ezlopi_http_generate_request()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L701)
+  emits `GET /%s`. Measured, by running the real translation unit:
+  `ftp://example.com:21/x` produces a request line reading `GET //x HTTP/1.1`.
+
+  The second is the other half of the same conversion. A host longer than its
+  `%99` width is *rejected*, because the `:` that follows the conversion then
+  fails and the arm returns 1 instead of 3 — which is the right answer, since
+  truncating a host would aim the request at a different machine. `%199s` is the
+  arm's **last** conversion, so there is no following literal to fail: a
+  599-character path is cut to **199** characters, the arm returns 3, and the
+  request goes out for a resource nobody asked for. Both are asserted as they
+  behave, not as they ought to, in
+  [`test_httpurl.c`](tests/host/test_httpurl.c) — the alternative, leaving two
+  assertions red, would make this suite's green mean "except for the parts we
+  have decided to ignore", which is worth less than a recorded defect.
+
+  Neither is fixed here because the fix is not local. Giving arm nine the same
+  shape as arms 1 and 2 means deciding what a non-http scheme should do at all:
+  this code only ever speaks HTTP, so `ftp://` reaching the ladder is already a
+  request that cannot be served, and the honest change may be to reject a scheme
+  it does not implement rather than to parse it more carefully. That is a
+  behaviour decision about an error path, and the host test now exists to hold
+  whichever answer is chosen.
+
+- **The URL ladder still does not understand IPv6 literals or a query string in
+  place of a path, and the authority split deliberately does not pretend to.**
+  `http://[::1]:8080/x` works by accident and is pinned as such: arm 5 leaves
+  `host` as `[::1]:8080`, and the port split takes the tail after the last colon
+  because it is all digits, so the address survives whole. `http://[::1]/x` is
+  left alone for the same reason in reverse — its tail is `1]`, so no split
+  happens. An **unbracketed** literal has no answer at all: `http://::1:8080/x`
+  cannot be told from a host named `::1` on port 8080 without knowing the
+  scheme's authority grammar, which this ladder does not.
+
+  `http://example.com?q=a:5` is the matching case on the path side. With no `/`
+  it falls to arm 7's `%99[^\n]` catch-all, so `host` becomes
+  `example.com?q=a:5` whole — query string and all — and the split
+  [refuses to touch it](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L915)
+  rather than reading `5` as a port. Leaving it exactly as broken as it was is
+  the conservative half of a fix whose job was credentials; reading a query out
+  of an authority is a different change.
+
+  What both cost is bounded by the same thing: a URL the ladder mis-parses
+  produces a `Host:` header and a `web_server` that do not resolve, so the
+  request fails rather than going somewhere unintended. The one case that *would*
+  be worse than a failure — credentials travelling in the host — is the one that
+  is now fixed.
 
 - **The sweep's other 18 findings were read and deliberately not acted on, and
   one more category appears only once the platform model is right.** The sweep
