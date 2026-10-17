@@ -43,6 +43,8 @@
 
 #ifdef CONFIG_EZPI_SERV_MDNS_EN
 
+#include <stdbool.h>
+
 #include "mdns.h"
 #include "ezlopi_core_errors.h"
 
@@ -64,6 +66,27 @@ extern "C"
     typedef struct l_ezlopi_mdns_context
     {
         mdns_txt_item_t *mdns_context;
+
+        /* Whether mdns_context->value points at heap and must be freed.
+         *
+         * Some TXT values are strings this file allocated (the serial, and
+         * whatever the factory-info getters return) and some are string
+         * literals -- "ezlopi_generic" from
+         * EZPI_core_factory_info_v3_get_device_type(), and the "null" that
+         * stands in when a getter returns nothing. The free routine used to
+         * tell the two apart by comparing the value's *contents* against
+         * "ezlopi_generic", which is right only for the one literal somebody
+         * thought of: with the extra services enabled, a getter returning NULL
+         * put "null" in a node that was then freed. Ownership is a property of
+         * how the pointer was obtained, not of what it spells, so it is
+         * recorded here at the point where that is known.
+         *
+         * Every node is memset at allocation, so an unset flag reads false and
+         * the value is left alone. That is the safe direction to default in:
+         * forgetting to set it leaks a string, whereas defaulting to true would
+         * free a literal -- the defect this field exists to prevent. */
+        bool value_is_heap;
+
         struct l_ezlopi_mdns_context *next;
     } l_ezlopi_mdns_context_t;
 

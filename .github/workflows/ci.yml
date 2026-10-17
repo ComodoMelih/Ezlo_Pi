@@ -991,6 +991,122 @@ jobs:
           fi
           echo "no _ezlo._tcp advert in this build, and hostname resolution is retained"
 
+  # The only job that compiles four blocks of ezlopi_core_mdns.c at all.
+  #
+  # CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES is "default n" in Kconfig and
+  # "is not set" in all four sdkconfig.defaults.* files, and the four
+  # per-service symbols depend on it. So the manufacturer, brand, model and
+  # name TXT records are built by no configuration in this repository: the
+  # four-target matrix, the OTA jobs, the Improv job and the MQTT job above all
+  # preprocess them away. A fully green run said nothing whatever about them.
+  #
+  # That is not a hypothetical worry. Those blocks are where the
+  # free-of-a-string-literal fixed in CHANGELOG's "Ownership of an mDNS TXT
+  # value was decided by comparing the string" entry lived -- a factory-info
+  # getter returning NULL put the literal "null" into a node that the free
+  # routine then handed to free(). The two unconditional nodes cannot reach
+  # that, so the defect sat in exactly the code CI did not compile, for as long
+  # as the file has existed.
+  #
+  # The fragment is appended here only. The shipped defaults are untouched, so
+  # the extra services stay off in every image anyone flashes.
+  firmware-mdns-extra:
+    name: Build esp32 (mDNS extra services)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v4.4.6
+    steps:
+      - uses: actions/checkout@v4
+
+      # Appended to the per-target defaults rather than passed via
+      # -DSDKCONFIG_DEFAULTS, for the same reason the OTA, Improv and MQTT jobs
+      # do it: the latter builds fine but leaves the symbol unset, which would
+      # make this job compile exactly as little as the other five.
+      - name: Enable the four optional mDNS TXT services
+        shell: bash
+        run: |
+          cat tests/ci/sdkconfig.mdns_extra_services >> sdkconfig.defaults.esp32
+          echo "--- tail of sdkconfig.defaults.esp32 ---"
+          tail -6 sdkconfig.defaults.esp32
+
+      - name: Build with the extra mDNS services enabled
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32
+          idf.py build
+
+      - name: Confirm the configuration is the one this job claims to build
+        shell: bash
+        run: |
+          # Checked in two places, because they can disagree and only one of
+          # them decides what the compiler sees. A symbol can be present in
+          # sdkconfig and still be absent from the generated header if confgen
+          # drops it for an unmet dependency -- and it is the header that the
+          # #ifdefs in ezlopi_core_mdns.c are resolved against. Asserting only
+          # the sdkconfig side would let this job report success over a build
+          # in which all four blocks were still preprocessed away, which is the
+          # precise failure it exists to prevent.
+          fail=0
+          for sym in CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES \
+                     CONFIG_EZPI_MDNS_ENABLE_MANUFACTURER_SERVICE \
+                     CONFIG_EZPI_MDNS_ENABLE_BRAND_SERVICE \
+                     CONFIG_EZPI_MDNS_ENABLE_MODEL_SERVICE \
+                     CONFIG_EZPI_MDNS_ENABLE_NAME_SERVICE; do
+            grep -q "^$sym=y" sdkconfig || {
+              echo "::error::$sym did not get enabled in sdkconfig."
+              fail=1
+            }
+            grep -q "^#define $sym 1" build/config/sdkconfig.h || {
+              echo "::error::$sym is absent from the generated header, so its block was not compiled."
+              fail=1
+            }
+          done
+
+          # All four, not one. Each service is a separate #ifdef block with its
+          # own allocation, its own getter call and its own ownership flag, so
+          # a configuration that enabled one and silently dropped three would
+          # leave three quarters of this job's subject uncompiled while still
+          # going green.
+          #
+          # And the non-vacuity guard: every symbol above depends on
+          # CONFIG_EZPI_SERV_MDNS_EN, so if mDNS itself were ever turned off in
+          # the defaults, confgen would drop all five and the loop above would
+          # fail with five identical errors that named the wrong cause.
+          grep -q '^CONFIG_EZPI_SERV_MDNS_EN=y' sdkconfig || {
+            echo "::error::CONFIG_EZPI_SERV_MDNS_EN is off; the five symbols above cannot be set at all."
+            fail=1
+          }
+
+          if [ $fail -ne 0 ]; then
+            echo "--- every EZPI_MDNS line in the generated sdkconfig ---"
+            grep -n 'EZPI_MDNS\|EZPI_SERV_MDNS' sdkconfig || echo "(no matching lines at all)"
+            echo "--- and in the generated header ---"
+            grep -n 'EZPI_MDNS\|EZPI_SERV_MDNS' build/config/sdkconfig.h || echo "(no matching lines at all)"
+            exit 1
+          fi
+          echo "all four extra mDNS services compiled, with mDNS itself enabled"
+
+      # There is deliberately no nm assertion here, unlike the OTA, Improv and
+      # MQTT jobs above. Every symbol those four blocks reference is already in
+      # every image. EZPI_core_factory_info_v3_get_manufacturer is called from
+      # six places besides ezlopi_core_mdns.c -- core_getters_api.c, twice in
+      # ezlopi_service_ble_device_info.c, ezlopi_service_ble_provisioning.c,
+      # ezlopi_service_uart.c, and EZPI_print_factory_info_v3 in its own module
+      # (that last one behind ENABLE_TRACE, so five that are unconditional).
+      # get_brand and get_model have the same six; get_name has five, by way of
+      # ezlopi_service_improv.c instead of one of the BLE pair. The
+      # ezlopi_*_str key literals are no better off.
+      #
+      # So an nm check over any of them would pass on the plain esp32 build
+      # too, where all four blocks are preprocessed away -- a check that cannot
+      # fail, which is worse than no check at all because it reads like
+      # evidence.
+      #
+      # So the proof here is the pair of config assertions above plus the
+      # compile itself: the symbols reached sdkconfig.h, therefore the #ifdefs
+      # opened, therefore the compiler saw the four blocks and the build
+      # succeeding means they are valid C that links.
+
   # Assembles install/ into a publishable directory: the static page plus the
   # merged image from each of the four firmware builds. See install/README.md.
   #

@@ -89,7 +89,7 @@ static ezlopi_error_t __ezlopi_mdns_init_service_context();
  * build without one does not carry an unused static function. */
 static mdns_txt_item_t *__prepare_mdns_item_service_context(int *service_size);
 #endif // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
-static void __ezlopi_free_mdns_service_context(l_ezlopi_mdns_context_t *mdns_context_head);
+static void __ezlopi_free_mdns_service_context(void);
 static void __mdns_init(void *pv);
 
 /*******************************************************************************
@@ -167,7 +167,21 @@ static ezlopi_error_t __ezlopi_mdns_init_service_context()
         {
             memset(service_cntx_device_type, 0, sizeof(mdns_txt_item_t));
             service_cntx_device_type->key = ezlopi_ezlopi_device_type_str;
-            service_cntx_device_type->value = (NULL == EZPI_core_factory_info_v3_get_device_type() ? "null" : EZPI_core_factory_info_v3_get_device_type());
+            /* Both arms are string literals, so the flag is false either way:
+            ** EZPI_core_factory_info_v3_get_device_type() is a
+            ** `return "ezlopi_generic"` and does not allocate, which is why
+            ** the free routine used to single that one string out by name.
+            ** Recognising a literal by its contents is what let the "null"
+            ** below it through, so the node carries the answer instead.
+            **
+            ** The NULL arm is kept rather than dropped -- it cannot be taken
+            ** today, but removing it would make this the one node that hands
+            ** mdns_service_add a NULL value if that getter ever changes. The
+            ** getter is called once now; it used to be called twice, once to
+            ** test and once to use. */
+            const char *device_type = EZPI_core_factory_info_v3_get_device_type();
+            service_cntx_device_type->value = (NULL == device_type) ? "null" : device_type;
+            ezlopi_mdns_service_cntx_device_type->value_is_heap = false;
 
             ezlopi_mdns_service_cntx_device_type->mdns_context = service_cntx_device_type;
 
@@ -210,7 +224,13 @@ static ezlopi_error_t __ezlopi_mdns_init_service_context()
                     ** but this string is the Serial TXT record every discovery
                     ** client reads. */
                     snprintf(id_val_str, EZPI_MDNS_SERIAL_SIZE, "%llu", id_val);
-                    service_cntx_device_id->value = (NULL == id_val_str ? "null" : id_val_str);
+                    /* id_val_str was NULL-checked by the enclosing if, so the
+                    ** "null" arm this assignment used to carry was dead. It is
+                    ** gone because it would have contradicted the flag below:
+                    ** the one case in which the value is not heap is the one
+                    ** that cannot happen here. */
+                    service_cntx_device_id->value = id_val_str;
+                    ezlopi_mdns_service_cntx_device_id->value_is_heap = true;
 
                     ezlopi_mdns_service_cntx_device_id->mdns_context = service_cntx_device_id;
                     error = __ezlopi_mdns_add_service_context(ezlopi_mdns_service_cntx_device_id);
@@ -251,7 +271,24 @@ static ezlopi_error_t __ezlopi_mdns_init_service_context()
         {
             memset(service_cntx_manufacturer, 0, sizeof(mdns_txt_item_t));
             service_cntx_manufacturer->key = ezlopi_manufacturer_str;
-            service_cntx_manufacturer->value = (NULL == EZPI_core_factory_info_v3_get_manufacturer() ? "null" : EZPI_core_factory_info_v3_get_manufacturer());
+            /* One call, not two -- and this is the pattern the three nodes
+            ** below follow as well. The assignment used to read
+            **
+            **   NULL == get_manufacturer() ? "null" : get_manufacturer()
+            **
+            ** and every one of these getters reads the factory partition into a
+            ** fresh ezlopi_malloc on each call. So the first call's string was
+            ** allocated, tested for NULL and then dropped unreferenced, and the
+            ** second call's string was the one stored: one allocation leaked
+            ** per node, on every boot that advertises the extra services.
+            **
+            ** Holding the result in a local also makes the ownership flag
+            ** derivable instead of guessed: the value is heap exactly when the
+            ** getter returned something, and the "null" stand-in is the one
+            ** case where it is not. */
+            char *manufacturer = EZPI_core_factory_info_v3_get_manufacturer();
+            service_cntx_manufacturer->value = (NULL == manufacturer) ? "null" : manufacturer;
+            ezlopi_mdns_service_cntx_manufacturer->value_is_heap = (NULL != manufacturer);
 
             ezlopi_mdns_service_cntx_manufacturer->mdns_context = service_cntx_manufacturer;
 
@@ -280,7 +317,10 @@ static ezlopi_error_t __ezlopi_mdns_init_service_context()
         {
             memset(service_cntx_brand, 0, sizeof(mdns_txt_item_t));
             service_cntx_brand->key = ezlopi_brand_str;
-            service_cntx_brand->value = (NULL == EZPI_core_factory_info_v3_get_brand() ? "null" : EZPI_core_factory_info_v3_get_brand());
+            /* One call, flag derived from it -- see the manufacturer node. */
+            char *brand = EZPI_core_factory_info_v3_get_brand();
+            service_cntx_brand->value = (NULL == brand) ? "null" : brand;
+            ezlopi_mdns_service_cntx_brand->value_is_heap = (NULL != brand);
 
             ezlopi_mdns_service_cntx_brand->mdns_context = service_cntx_brand;
 
@@ -309,7 +349,10 @@ static ezlopi_error_t __ezlopi_mdns_init_service_context()
         {
             memset(service_cntx_model, 0, sizeof(mdns_txt_item_t));
             service_cntx_model->key = ezlopi_model_str;
-            service_cntx_model->value = (NULL == EZPI_core_factory_info_v3_get_model() ? "null" : EZPI_core_factory_info_v3_get_model());
+            /* One call, flag derived from it -- see the manufacturer node. */
+            char *model = EZPI_core_factory_info_v3_get_model();
+            service_cntx_model->value = (NULL == model) ? "null" : model;
+            ezlopi_mdns_service_cntx_model->value_is_heap = (NULL != model);
 
             ezlopi_mdns_service_cntx_model->mdns_context = service_cntx_model;
 
@@ -338,7 +381,10 @@ static ezlopi_error_t __ezlopi_mdns_init_service_context()
         {
             memset(service_cntx_name, 0, sizeof(mdns_txt_item_t));
             service_cntx_name->key = ezlopi_name_str;
-            service_cntx_name->value = (NULL == EZPI_core_factory_info_v3_get_name() ? "null" : EZPI_core_factory_info_v3_get_name());
+            /* One call, flag derived from it -- see the manufacturer node. */
+            char *name = EZPI_core_factory_info_v3_get_name();
+            service_cntx_name->value = (NULL == name) ? "null" : name;
+            ezlopi_mdns_service_cntx_name->value_is_heap = (NULL != name);
 
             ezlopi_mdns_service_cntx_name->mdns_context = service_cntx_name;
 
@@ -399,25 +445,49 @@ static mdns_txt_item_t *__prepare_mdns_item_service_context(int *service_size)
 }
 #endif // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
 
-static void __ezlopi_free_mdns_service_context(l_ezlopi_mdns_context_t *mdns_context_head)
+/* Three things changed here, all of them on the path every boot takes: this
+** function is reached from the success case below, not only from the retry
+** exhaustion case.
+**
+** It freed the TXT value whenever the value was not the string
+** "ezlopi_generic", which identified a literal by its contents. That covered
+** the one literal somebody had in mind and missed the other: with
+** CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES on, a factory-info getter returning
+** NULL put the literal "null" into a node, and this passed it to free().
+** Ownership is now carried on the node as value_is_heap, set where the
+** pointer is obtained.
+**
+** It also never freed the nodes themselves, only the mdns_txt_item_t each one
+** points at -- two nodes in the committed configurations, six with the extra
+** services -- and it left ezlopi_mdns_service_cntx pointing at them, so the
+** list head outlived the contents it described. The walk is now iterative and
+** frees the node, and the head is cleared. */
+static void __ezlopi_free_mdns_service_context(void)
 {
-    if (!mdns_context_head)
-    {
-        return;
-    }
+    l_ezlopi_mdns_context_t *node = __ezlopi_mdns_get_service_context();
 
-    if (mdns_context_head->next)
-    {
-        __ezlopi_free_mdns_service_context(mdns_context_head->next);
-    }
+    /* Cleared before the walk rather than after it, so that there is no window
+    ** in which the head names memory that has already been freed. */
+    ezlopi_mdns_service_cntx = NULL;
 
-    if (mdns_context_head->mdns_context->value && 0 != strncmp(mdns_context_head->mdns_context->value, "ezlopi_generic", 14))
+    while (node)
     {
-        TRACE_E("Freering key: %s and value: %s", mdns_context_head->mdns_context->key, mdns_context_head->mdns_context->value);
-        ezlopi_free(__FUNCTION__, (char *)mdns_context_head->mdns_context->value);
-    }
+        l_ezlopi_mdns_context_t *next = node->next;
 
-    ezlopi_free(__FUNCTION__, mdns_context_head->mdns_context);
+        if (node->mdns_context)
+        {
+            if (node->value_is_heap)
+            {
+                TRACE_E("Freering key: %s and value: %s", node->mdns_context->key, node->mdns_context->value);
+                ezlopi_free(__FUNCTION__, (char *)node->mdns_context->value);
+            }
+
+            ezlopi_free(__FUNCTION__, node->mdns_context);
+        }
+
+        ezlopi_free(__FUNCTION__, node);
+        node = next;
+    }
 }
 
 static void __mdns_init(void *pv)
@@ -432,7 +502,7 @@ static void __mdns_init(void *pv)
         mdns_retries++;
         if (mdns_retries > 5)
         {
-            __ezlopi_free_mdns_service_context(__ezlopi_mdns_get_service_context());
+            __ezlopi_free_mdns_service_context();
             break;
         }
 
@@ -521,12 +591,12 @@ static void __mdns_init(void *pv)
         ezlopi_free(__FUNCTION__, mdns_context);
         if (ESP_OK == err)
         {
-            __ezlopi_free_mdns_service_context(__ezlopi_mdns_get_service_context());
+            __ezlopi_free_mdns_service_context();
             break;
         }
 #else  // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
         TRACE_I("No local websocket server in this build, so no _ezlo._tcp record is advertised; hostname resolution only.");
-        __ezlopi_free_mdns_service_context(__ezlopi_mdns_get_service_context());
+        __ezlopi_free_mdns_service_context();
         break;
 #endif // CONFIG_EZPI_LOCAL_WEBSOCKET_SERVER
 

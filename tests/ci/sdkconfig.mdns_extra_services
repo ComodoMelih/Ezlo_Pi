@@ -1,0 +1,28 @@
+# Config fragment used only by the "Build esp32 (mDNS extra services)" CI job.
+#
+# Why this exists: CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES is "default n" in
+# Kconfig and "is not set" in all four committed sdkconfig.defaults.* files,
+# and the four per-service symbols below "depend on" it. So four blocks of
+# ezlopi_core_mdns.c -- the manufacturer, brand, model and name TXT records --
+# are compiled by no configuration in this repository. Nothing stops them from
+# rotting, and a green four-target run says nothing whatever about them.
+#
+# That is not hypothetical. Those four blocks are where the free-of-a-literal
+# fixed in the "Ownership of an mDNS TXT value was decided by comparing the
+# string" entry lived: a factory-info getter returning NULL put the literal
+# "null" into a node that the free routine then passed to free(). The two
+# unconditional nodes could not reach that, so the defect sat in precisely the
+# code CI did not compile.
+#
+# This fragment is not applied to the normal builds, so the shipped
+# configuration is unchanged: the extra services stay off unless someone turns
+# them on.
+CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES=y
+
+# All four, not one. Each service is a separate #ifdef block with its own
+# allocation, its own getter call and its own ownership flag, so enabling one
+# would leave three uncompiled -- which is the state this job exists to end.
+CONFIG_EZPI_MDNS_ENABLE_MANUFACTURER_SERVICE=y
+CONFIG_EZPI_MDNS_ENABLE_BRAND_SERVICE=y
+CONFIG_EZPI_MDNS_ENABLE_MODEL_SERVICE=y
+CONFIG_EZPI_MDNS_ENABLE_NAME_SERVICE=y

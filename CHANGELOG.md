@@ -460,6 +460,121 @@ None of these have been exercised on physical hardware; see Known gaps.
   fixed path on a board. The repair is on the free path, and nothing has been
   flashed.
 
+- **Ownership of an mDNS TXT value was decided by comparing the string, which
+  worked for the one literal somebody thought of.** The mDNS advert builds a
+  list of TXT records, each node holding an `mdns_txt_item_t` whose `value` is
+  sometimes a heap string this code allocated and sometimes a string literal.
+  The free routine told them apart like this
+  ([`ezlopi_core_mdns.c`](ezlopi-core/ezlopi-core-mdns/ezlopi_core_mdns.c)):
+
+  ```c
+  if (mdns_context_head->mdns_context->value && 0 != strncmp(mdns_context_head->mdns_context->value, "ezlopi_generic", 14))
+  {
+      ezlopi_free(__FUNCTION__, (char *)mdns_context_head->mdns_context->value);
+  }
+  ```
+
+  `"ezlopi_generic"` is what `EZPI_core_factory_info_v3_get_device_type()`
+  returns — it is a `return "ezlopi_generic";` with no allocation behind it —
+  so the comparison is a literal being recognised by name. There is a second
+  literal in the same list. Every other node assigns its value as
+
+  ```c
+  service_cntx_name->value = (NULL == EZPI_core_factory_info_v3_get_name() ? "null" : EZPI_core_factory_info_v3_get_name());
+  ```
+
+  and a getter that returns `NULL` therefore puts `"null"` in the node, which
+  the comparison does not recognise and the routine passes to `free()`.
+
+  That is the same mistake as the `user_arg` entry above in a different place:
+  **whether a pointer must be freed is a property of how it was obtained, not
+  of what it contains**, and inferring it after the fact gets the cases nobody
+  enumerated. The node now carries a `value_is_heap` flag set where the pointer
+  is obtained, and the flag is documented at its declaration.
+
+  Three more defects were in the same lines:
+
+  - **Each getter was called twice** — once to test for `NULL`, once to use —
+    and `__EZPI_core_factory_info_v3_read_string()` reads the partition into a
+    fresh `ezlopi_malloc` on every call. So the first call's string was
+    allocated, tested and dropped unreferenced: one leaked allocation per node,
+    per boot. Fixed by holding the result in a local, which is also what makes
+    the ownership flag derivable rather than guessed.
+
+  - **The list nodes were never freed** — only the `mdns_txt_item_t` each node
+    points at. Two nodes in the committed configurations, six with the extra
+    services.
+
+  - **`ezlopi_mdns_service_cntx` was never cleared**, so the static head
+    outlived the contents it described. It is now cleared *before* the walk
+    rather than after, so there is no window in which the head names freed
+    memory.
+
+  The free routine is reached from the **success** path, not only from retry
+  exhaustion, so the node leak and the double-call leak ran on every boot that
+  got as far as advertising. Only the free-of-a-literal needed
+  `CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES`. The Known-gaps entry that had
+  deferred this said the whole thing was unreachable in every shipped
+  configuration; that is corrected where it stands.
+
+  **Verified by compiling both configurations, because one of them compiles
+  nothing.** `CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES` is `default n` in Kconfig
+  and `is not set` in all four `sdkconfig.defaults.*`, so the four
+  extra-service blocks — four of the six edited — are built by no configuration
+  in the repository. A green four-target run would have said nothing about
+  them.
+
+  The four committed configurations, against the sizes measured at the previous
+  commit, and then `esp32` with all five symbols forced on, which is the only
+  way to compile the other four blocks:
+
+  | target | `Ezlo_Pi_v4x.bin` | was | delta |
+  | --- | --- | --- | --- |
+  | esp32 | 1,683,856 | 1,683,856 | 0 |
+  | esp32s2 | 1,374,192 | 1,374,192 | 0 |
+  | esp32s3 | 1,698,720 | 1,698,720 | 0 |
+  | esp32c3 | 1,757,104 | 1,757,120 | −16 |
+  | esp32 + extra services | 1,684,208 | — | — |
+
+  All five `rc=0`, and zero warnings naming `ezlopi_core_mdns.c` or its header
+  once the file's two pre-existing `#warning` directives are excluded — they are
+  `-Wcpp`, they predate this change, and counting them would have masked a real
+  warning behind a nonzero baseline. **The 16 bytes off esp32c3 are not
+  attributed to any one edit.** Three of the changes are compiled by the
+  committed configurations and all three move code: the `device_type` getter
+  going from two calls to one, the dead `"null"` arm dropped from the serial
+  node, and the rewritten free routine, which is longer than what it replaced
+  because it now frees the nodes as well as the items. None was measured in
+  isolation. Every size in the table is a multiple of 16, so a net change smaller
+  than the padding quantum would show as zero — which is the likeliest reason
+  the three Xtensa targets did not move, and a reason not to read their `0`
+  as "no code changed". Size is the instrument here rather than a hash because
+  `CONFIG_APP_REPRODUCIBLE_BUILD` is off, so identical sizes are not a claim
+  that the images are byte-identical either.
+
+  The extra-services pass asserts that the five symbols actually reached the
+  generated `sdkconfig.h`, because a configuration that silently failed to apply
+  would have produced the same `rc=0`.
+
+  **A CI job now builds that configuration**, so these four blocks stop being
+  code that nothing compiles — `firmware-mdns-extra`, appending
+  [`tests/ci/sdkconfig.mdns_extra_services`](tests/ci/sdkconfig.mdns_extra_services)
+  to `sdkconfig.defaults.esp32`. It asserts each of the five symbols in both
+  `sdkconfig` *and* `build/config/sdkconfig.h`, since those can disagree and it
+  is the header the `#ifdef`s are resolved against. Unlike the OTA, Improv and
+  MQTT jobs it carries **no `nm` assertion**, deliberately: every symbol those
+  blocks reference is already in every image — `get_manufacturer` alone has six
+  other call sites — so an `nm` check would pass on the plain `esp32` build too,
+  and a check that cannot fail is worse than none because it reads as evidence.
+  The job's own mechanism was verified by running its assertion twice: it passes
+  with the fragment appended and fails with it absent.
+
+  **Not verified:** any of it on hardware. The `"null"` free needs a factory
+  partition with an unset field *and* the extra services enabled, and neither
+  the leak nor the fix has been observed on a board — the argument that the
+  values are heap is from reading `__EZPI_core_factory_info_v3_read_string()`,
+  not from watching a heap.
+
 - **Plaintext Wi-Fi PSK written to the serial console.**
   `hub.network.get` reports the Wi-Fi password as `key`
   ([`ezlopi_cloud_network.c:174`](ezlopi-cloud/ezlopi-cloud-network/ezlopi_cloud_network.c#L174)),
@@ -5341,15 +5456,24 @@ enumerators — so the live half of this component was never affected.
   | `firmware-ota-bundle` | builds esp32 with OTA on and `CONFIG_EZPI_OTA_CA_BUNDLE=y`, from a tree with **no `ca_mios.h`**, and asserts the header is absent, `ca_mios` is *not* in the ELF, and `esp_https_ota` still is |
   | `firmware-improv` | builds esp32 with `CONFIG_EZPI_BLE_ENABLE_IMPROV=y` and asserts both that the symbol got enabled and that the service is in the ELF |
   | `firmware-mqtt` | builds esp32 with `CONFIG_EZPI_ENABLE_MQTT=y` and **both websocket transports off** — the local-only Home Assistant configuration — and asserts the broadcast queue is still installed and that no mDNS service is advertised on a port with no listener |
+  | `firmware-mdns-extra` | builds esp32 with all five `CONFIG_EZPI_MDNS_ENABLE_*` symbols on, the only configuration that compiles the manufacturer, brand, model and name TXT blocks of `ezlopi_core_mdns.c` at all, and asserts each symbol in both `sdkconfig` and the generated header. Described under *Ownership of an mDNS TXT value* above |
   | `install-page` | assembles and verifies [`install/`](install/) from the firmware artifacts |
   | `deploy-install-page` | publishes it, once a maintainer opts in |
 
 - **Several jobs exist only to compile code the other builds skip.**
-  `ezlopi_core_ota.c` is wrapped in `#ifdef CONFIG_EZPI_ENABLE_OTA`, and the
-  Improv service and advertisement sit behind `CONFIG_EZPI_BLE_ENABLE_IMPROV`.
-  Neither symbol is set in any committed `sdkconfig.defaults.*`, so the four
-  target builds compile *none* of either and a green run said nothing about
-  them. Each job turns one feature on for one target.
+  `ezlopi_core_ota.c` is wrapped in `#ifdef CONFIG_EZPI_ENABLE_OTA`, the Improv
+  service and advertisement sit behind `CONFIG_EZPI_BLE_ENABLE_IMPROV`, and four
+  of the TXT-record blocks in `ezlopi_core_mdns.c` sit behind
+  `CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES`. None of those symbols is set in any
+  committed `sdkconfig.defaults.*`, so the four target builds compile *none* of
+  them and a green run said nothing about them. Each job turns one feature on
+  for one target.
+
+  The mDNS one is the clearest demonstration that this matters rather than being
+  tidiness: the free-of-a-string-literal fixed under *Ownership of an mDNS TXT
+  value* above lived in those four blocks specifically, and could not be reached
+  by the two blocks that every build does compile. The defect sat in exactly the
+  code CI did not compile, for as long as the file had existed.
 
   They assert afterwards that the symbol was actually enabled, because the
   first attempt at this used `-DSDKCONFIG_DEFAULTS`, which builds perfectly and
@@ -6276,14 +6400,29 @@ Listed because a changelog that only mentions what was finished is misleading.
   `ezlopi-cloud` plus the MQTT announce path added here. Fixing it means adding
   a lock to the core and taking it in all of them at once; doing it in one new
   caller alone would look like a fix without being one.
-- **One latent free-of-a-literal in the mDNS path, unreachable in every shipped
-  configuration.** When a factory-info getter returns `NULL` the free routine
-  can call `ezlopi_free()` on the string literal `"null"`. It is only reachable
-  with `CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES` on, which is off in all four
-  committed defaults. The same routine also never frees the list nodes
-  themselves and never `NULL`s `ezlopi_mdns_service_cntx`. Recorded rather than
-  changed, because the fix is unverifiable without a configuration nothing
-  currently builds.
+- **RESOLVED, and this entry was wrong about which half was reachable.** It read
+  *"One latent free-of-a-literal in the mDNS path, unreachable in every shipped
+  configuration"*, and said the fix was unverifiable without a configuration
+  nothing currently builds. The free-of-a-literal part was right: it needs
+  `CONFIG_EZPI_MDNS_ENABLE_EXTRA_SERVICES`, which is `default n` in Kconfig and
+  `is not set` in all four committed defaults, and the one unconditional node
+  whose value could in principle be the `"null"` literal takes it from
+  `EZPI_core_factory_info_v3_get_device_type()`, which is a
+  `return "ezlopi_generic"` and cannot return `NULL`.
+
+  The rest of the entry was filed under that same heading and is not gated on
+  anything. The free routine is reached from the *success* path — not only from
+  retry exhaustion — so every boot that advertises `_ezlo._tcp` ran it, and it
+  never freed the list nodes and never cleared the head. A fifth defect this
+  entry did not mention was in the same function's callers: each TXT value was
+  assigned by `NULL == getter() ? "null" : getter()`, and every one of those
+  getters reads the factory partition into a fresh `ezlopi_malloc`, so the first
+  call's string was allocated, tested and dropped unreferenced.
+
+  Fixed under *Ownership of an mDNS TXT value was decided by comparing the
+  string* above. The reason the deferral held for as long as it did is the
+  claim in its own last sentence, and that claim was not true of the parts of
+  the defect that ship.
 - **The PSK is still sent to the cloud as `key`** in `hub.network.get`. Only
   the local trace is masked. See the README privacy note.
 - **The local API is plain `ws://`, and the per-connection session fix does not
