@@ -38,6 +38,8 @@ CONSTANTS_DIR := ../../ezlopi-cloud/ezlopi-cloud-constants
 BLEBUF_DIR   := ../../ezlopi-core/ezlopi-core-ble
 I2C_HAL_DIR  := ../../ezlopi-hal/ezlopi-hal-i2c
 HTTP_DIR     := ../../ezlopi-core/ezlopi-core-http
+COORDS_DIR   := ../../ezlopi-cloud/ezlopi-cloud-coordinates
+NVS_DIR      := ../../ezlopi-core/ezlopi-core-nvs
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -73,7 +75,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
-           test_httpresp test_suntime
+           test_httpresp test_suntime test_coords
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -686,6 +688,86 @@ $(BUILD)/test_suntime: test_suntime.c $(SCENES_DIR)/ezlopi_core_scenes_suntime.c
 	$(CC) $(SUNTIME_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/suntime_cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_suntime_main.o $(BUILD)/suntime_subject.o \
 	      $(BUILD)/suntime_keywords.o $(BUILD)/suntime_cjext.o $(LDFLAGS) -lm
+
+# The hub's stored location: hub.coordinates.set, hub.coordinates.get, and the
+# in-RAM pair that hub.info.get reports.
+#
+# This is a two-reader problem, and that is why it is worth a rule. The same
+# datum is read two ways -- EZPI_cloud_get_latitude()/longitude(), which return
+# file statics, and EZPI_hub_coordinates_get(), which reads NVS -- and nothing
+# loaded the statics at boot. So they were zero from reset until a
+# hub.coordinates.set arrived, while the NVS reader reported the real stored
+# pair. Both answers were served to clients, and the wrong one was the one
+# hub.info.get uses.
+#
+# A host process is the right instrument for that, not an awkward substitute
+# for a board. A freshly started process has its file statics at zero for
+# exactly the reason a freshly reset chip does, so "reboot" here is
+# fake_nvs_preload() followed by EZPI_cloud_coordinates_init() -- the two halves
+# of a power cycle, with the flash contents kept and the RAM lost. On hardware
+# this needs a flash, a set, a reset and two API calls per case; there are 2701
+# coordinates swept here.
+#
+# The second property is the negative one, and it is the reason the write
+# ordering in the subject is what it is: a request that is refused must leave
+# the stored value alone, and a write that fails must not leave the cache
+# claiming it succeeded. Either mistake recreates the disagreement the rest of
+# this work removes, and neither is visible in the error reply -- which looks
+# identical whether or not the cache moved. So every refusal case asserts the
+# fake's write count, and test_set_when_the_write_fails asserts both readers
+# afterwards rather than just the reply.
+#
+# ezlopi_cloud_keywords.c is compiled rather than stubbed, for the reason given
+# at length in the test_httpurl rule: "latitude" and "longitude" are the member
+# names the pair is stored under, so a stubbed copy of those constants would let
+# this file pass against key names the firmware does not use -- and the stored
+# form is read back by ezlopi_core_scenes_suntime.c, which gets them from the
+# same place.
+#
+# The NVS surface is two functions, both defined in test_coords.c as recording
+# fakes. The read fake returns strdup() because the real one returns an
+# allocation the caller owns; a fake handing back a pointer into its own buffer
+# would hide a missing or double free from ASan, which is most of what this
+# suite is for.
+#
+# stubs-httpurl/ is on the path for one empty header, nvs_flash.h, which
+# ezlopi_core_nvs.h includes and nothing here names a type from -- shared with
+# test_httpurl rather than copied.
+#
+# -D_GNU_SOURCE is here for strdup(), which is POSIX rather than C99 and so is
+# hidden by -std=c99 alone -- the same reason the test_httpurl rule defines it
+# for bzero(). It is additive, so nothing the vendored cjext.c expects to find
+# gets hidden by it; -D_POSIX_C_SOURCE would be the narrower choice but can
+# subtract.
+#
+# -Wno-unused-parameter is on the subject only, not on the test, and it buys
+# exactly one thing: EZPI_hub_coordinates_get() takes a cj_request it does not
+# read, because every method in the table has that signature whether or not it
+# has params to look at. The test file is still compiled with the warning on,
+# so an argument this file stops using is still an error here.
+#
+# The nm guard is not load-bearing here: no #ifdef wraps this translation unit,
+# so there is no macro whose absence could empty the object. It is the same
+# cheap guard as test_i2c_shared_bus', kept for the other way an object goes
+# empty, and it names the init function specifically because that is the symbol
+# whose absence is the defect -- against the tree before this change the link
+# fails rather than the test, which is the loudest a detection gets.
+COORDS_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror -D_GNU_SOURCE \
+                 -I$(COORDS_DIR) -I$(NVS_DIR) -I$(ERRORS_DIR) \
+                 -I$(CJEXT_DIR) -I$(CONSTANTS_DIR) \
+                 -I stubs-httpurl -I$(STUBS_DIR) \
+                 $(SANITIZERS)
+$(BUILD)/test_coords: test_coords.c $(COORDS_DIR)/ezlopi_cloud_coordinates.c \
+                      $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                      $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(COORDS_CFLAGS) -c -o $(BUILD)/test_coords_main.o test_coords.c
+	$(CC) $(COORDS_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/coords_subject.o $(COORDS_DIR)/ezlopi_cloud_coordinates.c
+	@nm $(BUILD)/coords_subject.o | grep -q ' T EZPI_cloud_coordinates_init' \
+	  || { echo "ezlopi_cloud_coordinates.c compiled to an object without EZPI_cloud_coordinates_init in it"; exit 1; }
+	$(CC) $(COORDS_CFLAGS) -c -o $(BUILD)/coords_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(COORDS_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/coords_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_coords_main.o $(BUILD)/coords_subject.o \
+	      $(BUILD)/coords_keywords.o $(BUILD)/coords_cjext.o $(LDFLAGS) -lm
 
 # The BLE chunk accumulator: the linked list that holds a payload too large for
 # one ATT write until the last chunk arrives. Four characteristics use it and

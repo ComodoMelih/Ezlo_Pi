@@ -6381,7 +6381,7 @@ enumerators — so the live half of this component was never affected.
   link successfully, and report "build: OK". No new warning appears in any of
   the three touched files on any target.
 
-  The full host suite is **5252** checks across **25** binaries, 0 failures.
+  The full host suite is **5510** checks across **26** binaries, 0 failures.
 
   **Untested on hardware.** No board has fetched a sunrise time. Nothing here
   has made a TLS connection to `api.sunrisesunset.io`, so the reply this parses
@@ -6394,6 +6394,223 @@ enumerators — so the live half of this component was never affected.
   anything this cannot account for leaves `curr_tm_day` cleared, so an
   isSunState scene that cannot reach the service does not fire at all, where
   before the fix it fired at the wrong time with complete confidence.
+
+### Hub location — [bug]
+
+- **`hub.info.get` reported the hub at latitude 0, longitude 0 after every
+  reboot, while `hub.coordinates.get` reported the real stored location.** Two
+  methods, one datum, two different answers, both served to clients.
+
+  The stored pair has a cache in RAM —
+  [`sg_latitude` and `sg_longitude`](ezlopi-cloud/ezlopi-cloud-coordinates/ezlopi_cloud_coordinates.c#L97)
+  — and
+  [`EZPI_cloud_get_latitude`](ezlopi-cloud/ezlopi-cloud-coordinates/ezlopi_cloud_coordinates.c#L268)
+  returns it to `hub.info.get`. Nothing loaded it at boot. It was zero from
+  reset until a `hub.coordinates.set` arrived, whereas
+  [`EZPI_hub_coordinates_get`](ezlopi-cloud/ezlopi-cloud-coordinates/ezlopi_cloud_coordinates.c#L258)
+  reads NVS directly and so was right all along. A hub configured once and then
+  power-cycled therefore told you where it was and that it was at the origin,
+  depending which method you asked.
+
+  **Zero is the failure that looks like data.** 0,0 is a real point in the Gulf
+  of Guinea, so nothing downstream can tell it from a location the user chose.
+  Which is why the fix does not substitute a default when nothing is stored:
+  [`EZPI_cloud_coordinates_init`](ezlopi-cloud/ezlopi-cloud-coordinates/ezlopi_cloud_coordinates.c#L165)
+  leaves the cache at zero and traces a line naming `hub.coordinates.set`. A
+  location the user never chose produces answers that look right — a sunrise
+  time, correct for somewhere else.
+
+  It is called from
+  [`EZPI_init`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L112),
+  at [the point just after the stored settings are read](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L123) —
+  after NVS is up and before anything that reads the location back. An explicit
+  init rather than a lazy load inside the getters, and that choice was checked
+  rather than taken on taste: the worry was a layering inversion, a core
+  component calling into a cloud one. Both `CMakeLists.txt` files say the cycle
+  is already there — `ezlopi-core-ezlopi` requires `ezlopi-cloud-coordinates`
+  and `ezlopi-cloud-coordinates` requires `ezlopi-core-ezlopi` — so the call
+  adds no edge that did not exist, and an explicit `*_init()` that reads NVS is
+  what the rest of this tree does.
+
+- **`EZPI_core_nvs_write_latitude_longitude` logged "Error writing" on every
+  successful write, and said nothing at all when the write failed.** The test
+  in [`ezlopi_core_nvs.c`](ezlopi-core/ezlopi-core-nvs/ezlopi_core_nvs.c#L877)
+  was `if (EZPI_SUCCESS == error)`. Both halves were wrong and the silent half
+  was the worse one: a failed write is precisely the case where the cache and
+  flash are about to disagree, and it was the case that produced no output.
+
+  **The rest of the tree was swept for the same copy-paste and has none.**
+  Every other `if (EZPI_SUCCESS == error)` in the repository guards a success
+  path correctly. Recorded as a measured non-finding rather than left as an
+  open suspicion.
+
+- **`hub.coordinates.set` stored whatever it was sent, including coordinates
+  that are not coordinates, and stored the caller's whole request object to do
+  it.** Three coupled problems in six lines, all now closed in
+  [`EZPI_hub_coordinates_set`](ezlopi-cloud/ezlopi-cloud-coordinates/ezlopi_cloud_coordinates.c#L196).
+
+  There was no validation. `CJSON_GET_VALUE_DOUBLE` assigned the request's
+  numbers straight into the statics, so a latitude of 500, of −1e9, or of
+  infinity — `1e999` parses to infinity through `strtod`, and a client can send
+  that — was accepted and persisted.
+  [`__coords_in_range`](ezlopi-cloud/ezlopi-cloud-coordinates/ezlopi_cloud_coordinates.c#L282)
+  now bounds latitude to [−90, 90] and longitude to [−180, 180]. It rejects NaN
+  and the infinities by arithmetic rather than by testing for them: every
+  comparison against NaN is false, and an infinity fails a bound. There is no
+  `isnan` or `isinf` in the component.
+
+  The statics were assigned *before* the write, and the write's return value
+  was discarded. So a failed or impossible write left the cache reporting a
+  value that was not in flash — the same disagreement as the first defect
+  above, arriving from the other direction and lasting until the next reboot
+  flipped the answer back. The cache is now assigned only once
+  `EZPI_core_nvs_write_latitude_longitude` has returned success, and a refusal
+  gets an error object in the reply instead of silence.
+
+  And the whole thing stored was
+  `cJSON_PrintPreallocated(cj_params, …, 256, …)` — the request's `params`
+  printed wholesale into a 256-byte buffer. Two consequences. Whatever else the
+  caller put in that object went into flash under a key named for coordinates.
+  And because the statics had already been assigned by the time the print was
+  attempted, a `params` too large for 256 bytes updated the cache and wrote
+  nothing, which is the desynchronisation again — reachable from a single
+  oversized request. What is stored now is a canonical two-member object built
+  from the two numbers that were accepted, rendered with
+  [`COORDINATES_JSON_MAX`](ezlopi-cloud/ezlopi-cloud-coordinates/ezlopi_cloud_coordinates.h#L84)
+  bytes of room and the `snprintf` return checked. The widest pair it can
+  produce is `{"latitude":-90.000000,"longitude":-180.000000}` — measured at
+  **47** bytes, **48** with the terminator, against a bound of **64**. Canonical
+  storage is what makes the two readers agree by construction rather than by
+  both being careful.
+
+  **One guess of mine about this code was wrong, and the record says so.** I
+  expected a `hub.coordinates.set` carrying only a latitude to leave the
+  previous longitude in place. It does not: `CJSON_GET_VALUE_DOUBLE` zeroes its
+  output first and overwrites only if the key is present and numeric, so the
+  missing member became 0 rather than stale. Milder than predicted, and it is
+  still refused now — a pair with one member missing is not a location. That
+  macro's zeroing is also why the new reader does not use it: it cannot tell
+  "longitude was 0" from "longitude was not sent", and those need different
+  answers. `ezlopi_core_cjson_macros.h` became a dead include as a result and
+  is gone, which was checked rather than assumed — no `CJSON_` macro remains in
+  the file, and both of that header's own includes were already direct.
+
+- **The two properties, and a test that was wrong about one of them.**
+  [`tests/host/test_coords.c`](tests/host/test_coords.c) compiles the real
+  component against the real `cjext.c` and the real `ezlopi_cloud_keywords.c`
+  and makes **258** assertions under AddressSanitizer and
+  UndefinedBehaviorSanitizer, 0 failures. The NVS surface is two functions,
+  supplied as recording fakes; the read fake returns a fresh allocation because
+  the real one does, so a missing or double free in the subject is visible to
+  the sanitizer rather than hidden by the fake.
+
+  A host process is the right instrument here rather than a substitute for a
+  board: a freshly started process has its file statics at zero for the same
+  reason a freshly reset chip does. **But the first draft of the test faked the
+  reboot and did not notice.** It called init a second time after a successful
+  `set` — at which point the cache already held the right answer, so the
+  re-init had nothing to prove and the check passed no matter what init did.
+  The mutation sweep is what exposed it: an init with an empty body scored 2
+  failures where it should have scored 16, and the gap between those numbers
+  was a bug in the test, not in the subject. The test now poisons the cache
+  through the real setter before each simulated reboot, so an init that loads
+  nothing leaves the sentinel visible and the assertion fails. The same mutant
+  now scores **16**.
+
+  The round-trip property is swept rather than sampled: **2701** coordinates —
+  a 37×73 grid at 5° steps, offset so the values are not binary-representable —
+  are set, read back out of the fake flash the way `hub.coordinates.get` reads
+  it, and compared against what `hub.info.get` would report. **0** mismatches.
+  Comparison is to 1e-6, which is the resolution six decimal places actually
+  has, about 11 cm; asserting tighter would be asserting about `snprintf`.
+
+  **Twenty mutations plus a control row. The control sits at 0 failures and
+  19 of the 20 were detected.** Including the original defect reproduced as an
+  init with an empty body, the cache assigned before the write instead of
+  after, init assigning on parse failure instead of success, each of the four
+  range bounds moved or loosened one at a time, the `cJSON_Number` type check
+  dropped, the two members' stored precision cut to two decimals, latitude and
+  longitude swapped in the stored form, and the outputs written before the
+  range test. Two are caught by the sanitizers rather than by an assertion —
+  not requiring `longitude` to be present dereferences a null `cJSON` at
+  `ezlopi_cloud_coordinates.c:136`, and dropping the null-output check stores
+  through a null `double *` at line 138 — and two by LeakSanitizer, which is
+  the only instrument in this repository that would see a dropped
+  `cJSON_Delete`.
+
+  **The twentieth is an equivalent mutant and is recorded as one rather than
+  chased.** Deleting the `snprintf` return check changes no observable
+  behaviour, because the bound that makes it unreachable is the range check
+  upstream of it: 47 bytes of worst case against 64 of buffer is 16 bytes of
+  headroom, so the format cannot truncate. The check stays, and the header says
+  why — a buffer whose safety depends on a bound enforced somewhere else is one
+  edit away from not being safe. A twenty-first mutation, a double free in
+  `hub.coordinates.get`, was caught by the compiler under
+  `-Werror=use-after-free` and never reached the test at all; it is counted as
+  detected by the build rather than credited to the suite.
+
+  **What the sweep proves and what it does not.** Compiling this test against
+  the tree as it was stops at four compile errors — the three new functions
+  undeclared and `COORDINATES_JSON_MAX` undefined. That is loud, and it is
+  shallow: it proves the functions are new, not that the test can see the
+  behaviour go wrong. The mutant that proves the second thing is the empty init,
+  which compiles, links, and reproduces the shipped defect exactly.
+
+- **Built on four targets against a baseline from `git archive HEAD`.** The
+  component is host-compilable, so unlike the previous section a target build is
+  not the first thing that compiles it — but `EZPI_init` is not host-compilable,
+  and the call placed there is.
+
+  | target | baseline | fixed | delta | `.flash.text` | `.flash.rodata` | sum | vs image |
+  |---|---|---|---|---|---|---|---|
+  | esp32   | 1688224 | 1689616 | +1392 | +800 | +592 | 1392 | exact |
+  | esp32s2 | 1378528 | 1379872 | +1344 | +748 | +600 | 1348 | +4 |
+  | esp32s3 | 1703312 | 1704672 | +1360 | +752 | +608 | 1360 | exact |
+  | esp32c3 | 1761856 | 1763376 | +1520 | +882 | +632 | 1514 | −6 |
+
+  The two flash sections account for the whole image delta exactly on esp32 and
+  esp32s3, and to within 4 and 6 bytes on esp32s2 and esp32c3 — segment
+  alignment padding in the image container. Reported rather than rounded away,
+  for the same reason as the table above it: a reconciliation forced to balance
+  exactly stops being a check.
+
+  **`.flash.rodata` does not move by the same amount on every target here**
+  — +592, +600, +608, +632 — which is a difference worth naming because the
+  previous section's entry *did* see a uniform figure across the three Xtensa
+  targets and explained it by the added constant data being identical
+  everywhere. That reasoning does not transfer, and it has not been borrowed:
+  these four numbers are what was measured.
+
+  All three new functions are absent from the baseline ELF and present in the
+  fixed one on all four targets — **12** of 12 checks in the expected
+  direction, none in the other. Absence is the half that matters; presence
+  alone would prove only that something compiled.
+
+  **A cross-check that mostly passed, and the part that did not.** This entry's
+  baseline is HEAD, which is the commit the previous section describes, so the
+  baseline column here should equal that entry's *fixed* column. It does
+  exactly on esp32s2, esp32s3 and esp32c3. On esp32 it reads 1688224 against
+  1688208 recorded there — **16 bytes apart, and I do not know why.** Both
+  figures are from the same toolchain and the same build command on trees that
+  should be identical. It is recorded unexplained rather than quietly dropped
+  or attributed to a cause that was not measured; the delta within each sweep
+  is a paired comparison and is unaffected either way, which is why each entry
+  carries its own baseline rather than reusing a previous one.
+
+- **The isSunState fix in the previous section was not affected by any of
+  this**, which was established by reading the call site rather than assumed
+  from the shared subject matter:
+  [`ezlopi_core_scenes_when_methods_helper_functions.c#L1738`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1738)
+  calls `EZPI_core_nvs_read_latidtude_longitude()` directly and never touches
+  the cache. The blast radius of the stale-cache defect was `hub.info.get`
+  alone.
+
+- **Untested on hardware.** Nothing has been flashed. No board has rebooted
+  with a stored location and been asked for it over either websocket. What is
+  covered is the decision-making and the persistence round trip; what is
+  unverified is that `EZPI_cloud_coordinates_init` runs where it was placed in
+  the real boot order, and that NVS on a real partition returns what the fake
+  returns.
 
 ### Build and configuration — [infra]
 

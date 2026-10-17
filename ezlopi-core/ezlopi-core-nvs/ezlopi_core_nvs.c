@@ -880,9 +880,14 @@ ezlopi_error_t EZPI_core_nvs_write_latitude_longitude(char *data)
     if (data)
     {
         error = EZPI_core_nvs_write_str(data, strlen(data), ezlopi_coordinates_nvs_name);
-        if (EZPI_SUCCESS == error)
+        /* The sense of this test was inverted: it logged "Error writing" on
+        ** every successful write and said nothing at all when the write
+        ** actually failed. Both halves mattered, and the quiet half more --
+        ** a failed write is the case where the caller's cache and flash are
+        ** about to disagree. */
+        if (EZPI_SUCCESS != error)
         {
-            TRACE_E("Error writing latitude an longitude in nvs.");
+            TRACE_E("Error writing latitude and longitude in nvs.");
         }
     }
     return error;

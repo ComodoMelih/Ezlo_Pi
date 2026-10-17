@@ -66,6 +66,8 @@
 #include "ezlopi_core_log.h"
 // #include "ezlopi_core_errors.h"
 
+#include "ezlopi_cloud_coordinates.h"
+
 /* CONFIG_EZPI_CORE_ENABLE_ETH, not CONFIG_EZPI_CORE_ETHERNET_EN. The latter is
  * declared by no Kconfig file anywhere in the tree, so this include was never
  * compiled -- while the call to EZPI_ethernet_init() further down is guarded by
@@ -112,6 +114,13 @@ void EZPI_init(void)
     // Init memories
     EZPI_nvs_init();
     EZPI_core_setting_commands_read_settings();
+
+    /* Must follow EZPI_nvs_init() and must precede anything that reads the
+    ** coordinates back -- hub.info.get over either websocket, and the
+    ** isSunState scene evaluator. Placed here rather than next to the other
+    ** *_init() calls below for that reason: everything after this point may
+    ** ask for the hub's location. */
+    EZPI_cloud_coordinates_init();
 
 #ifdef CONFIG_EZPI_UTIL_TRACE_EN
     EZPI_core_read_set_log_severities();
