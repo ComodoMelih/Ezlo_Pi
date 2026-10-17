@@ -122,6 +122,15 @@ void EZPI_init(void)
     ** ask for the hub's location. */
     EZPI_cloud_coordinates_init();
 
+    /* Same reason, for the other half of "where and when is this hub": TZ is
+    ** process-global, every localtime() caller in the firmware shares it, and
+    ** the time-of-day scene evaluators start below. Deliberately not folded
+    ** into EZPI_core_sntp_init(), which is both gated on
+    ** CONFIG_EZPI_ENABLE_WIFI/ETH and called after EZPI_scenes_init_v2() --
+    ** resolving a stored zone name is a table lookup that needs no network, so
+    ** there is no reason for it to wait for one. */
+    EZPI_core_sntp_apply_stored_timezone();
+
 #ifdef CONFIG_EZPI_UTIL_TRACE_EN
     EZPI_core_read_set_log_severities();
     // #warning "remove this in release"

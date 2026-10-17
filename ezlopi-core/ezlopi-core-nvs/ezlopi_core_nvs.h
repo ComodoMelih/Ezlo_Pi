@@ -42,6 +42,16 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
+/* <stdbool.h> is here because this header's own API needs it:
+** EZPI_core_nvs_write_bool and EZPI_core_nvs_read_bool are declared in terms
+** of bool. It arrived by accident until now -- every translation unit that
+** includes this file happened to pick up stdbool from somewhere else first --
+** which is not a property of this header and not one it should rely on. The
+** first include that did not make that true was a host test compiling
+** ezlopi_core_sntp.c, where nvs_flash.h is an empty stub and the two
+** declarations became "unknown type name 'bool'". */
+#include <stdbool.h>
+
 #include "nvs_flash.h"
 #include "ezlopi_core_errors.h"
 

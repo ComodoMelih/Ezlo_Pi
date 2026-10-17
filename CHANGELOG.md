@@ -6612,6 +6612,296 @@ enumerators — so the live half of this component was never affected.
   the real boot order, and that NVS on a real partition returns what the fake
   returns.
 
+### Hub timezone — [bug]
+
+- **The hub never applied its stored timezone. Scheduled scenes ran on UTC
+  until some client happened to call `hub.info.get`.** `TZ` is process-global
+  and there was exactly one place in the firmware that set it:
+  [`EZPI_core_sntp_get_local_time`](ezlopi-core/ezlopi-core-sntp/ezlopi_core_sntp.c#L211),
+  which read NVS, resolved the zone and called `setenv`+`tzset` as a side
+  effect of formatting a string for a reply. Nothing called it at boot.
+  `EZPI_core_sntp_set_location` resolved the name, traced it, and never
+  installed it.
+
+  So the zone was installed by whoever asked for the time first. The four
+  `localtime()` calls that decide whether a time-of-day scene should fire —
+  [561](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods.c#L561),
+  [616](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods.c#L616),
+  [672](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods.c#L672),
+  [727](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods.c#L727)
+  — read whatever was in effect at the time. On a freshly booted hub that is
+  UTC, so a scene set for 7am fired at 7am UTC; after a client called
+  `hub.info.get` ([`ezlopi_cloud_info.c#L146`](ezlopi-cloud/ezlopi-cloud-info/ezlopi_cloud_info.c#L146))
+  the same scene started firing at 7am local. **The bug is not that the hub
+  used the wrong zone. It is that a read-only query mutated global state that
+  scheduling depends on**, so the behaviour changed underneath a user who did
+  nothing, and changed back on the next reboot.
+
+  There is now one installer,
+  [`__install_tz`](ezlopi-core/ezlopi-core-sntp/ezlopi_core_sntp.c#L320), and
+  two callers of it: a new
+  [`EZPI_core_sntp_apply_stored_timezone`](ezlopi-core/ezlopi-core-sntp/ezlopi_core_sntp.c#L133)
+  at boot, and
+  [`EZPI_core_sntp_set_location`](ezlopi-core/ezlopi-core-sntp/ezlopi_core_sntp.c#L166)
+  on a successful set. `get_local_time` now only formats. `setenv` without
+  `tzset` would have been the plausible half-fix, and it does not work: libc
+  caches the parsed zone and re-reads the variable only in `tzset`. Both calls
+  live in the one function so neither can be done without the other.
+
+  The boot call sits in
+  [`EZPI_init`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L112) at
+  [line 132](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L132), after
+  the coordinate load added in the section above and before
+  `EZPI_scenes_init_v2`. Ordering matters in one direction only: the zone must
+  be installed before anything evaluates a scene, and it does not depend on the
+  clock being synchronised, since `tzset` parses a string.
+
+  **When nothing resolves, GMT0 is applied and announced rather than applied
+  silently.** A hub quietly on UTC reports plausible times for the wrong place,
+  which is the same failure as the 0,0 coordinates above: wrong data that
+  cannot be told from a choice. The trace names `hub.location.set` and
+  distinguishes "none stored" from "stored location is not in the zone table",
+  and the function returns `EZPI_ERR_SNTP_LOCATION_SET_FAILED` even though it
+  installed something.
+
+- **`hub.location.set` stored unknown timezones, then reported success.** It
+  wrote NVS first and resolved the name afterwards, so a name not in the table
+  was persisted anyway. After that `hub.location.get` reported the bogus name
+  while every `localtime()` caller ran on the fallback — one datum, two
+  readers, two answers, which is the same shape as the coordinate defect in the
+  section above. The name is now resolved first and stored only if it resolves.
+
+  A failed NVS write is deliberately *not* followed by installing the zone, so
+  the active `TZ` stays with what is still in flash and the two keep agreeing.
+
+  And the cloud handler discarded the result.
+  [`EZPI_CLOUD_location_set`](ezlopi-cloud/ezlopi-cloud-location/ezlopi_cloud_location.c#L172)
+  called `EZPI_core_sntp_set_location(location_str)` as a statement and then
+  echoed the requested name back under `result.location` whatever happened. The
+  name a client got back was the one it had just sent, which reads as
+  confirmation. It now returns an error object distinguishing a rejected name
+  from a failed write, and the rejection names `hub.location.list`, because the
+  set of acceptable names is exactly what that method returns and is not
+  guessable from the refusal.
+
+- **`hub.location.list` offered 51 of the 425 zones, and the correct loop was
+  sitting commented out directly above the wrong one.**
+  [`EZPI_CLOUD_location_list`](ezlopi-cloud/ezlopi-cloud-location/ezlopi_cloud_location.c#L84)
+  ran `while (i <= 50)` with `// while (tz_list[i].name != NULL)` on the line
+  before it. The 51 published were Africa/Abidjan through Africa/Tunis,
+  stopping one short of Africa/Windhoek: every zone in the Americas, Asia,
+  Australia, Europe and the Pacific was absent. For most of the world the hub
+  offered nothing selectable, and with `set` unable to accept a name the list
+  never returned, the timezone was effectively unconfigurable from the app.
+  The loop now [ends at the terminator the table actually has](ezlopi-cloud/ezlopi-cloud-location/ezlopi_cloud_location.c#L130).
+
+  **Whether the full table fits was measured, because the failure mode if it
+  did not is silence.** Both websocket paths serialise a reply with
+  `cJSON_PrintPreallocated` into the single 10240-byte buffer from
+  `EZPI_core_buffer_acquire`, and that returns false rather than truncating,
+  after which neither path sends anything at all. All 425 names plus the
+  envelope serialise to **8006** bytes — **2234** under the buffer.
+
+  That headroom is partly the client's to spend: `sender` is
+  `cJSON_Duplicate`d straight from the request, so part of the reply size is
+  chosen by the caller. At 51 entries a **9230**-character sender still fit; at
+  425 the limit is **2248**. Both are far past any real sender, and the margin
+  did narrow — stated rather than left out, because it is the kind of number
+  that matters later.
+
+  The per-entry `TRACE_E` and `vTaskDelay(1)` went with it. The trace logged
+  every zone name at error severity to announce that a loop was looping, and
+  the delay cost one tick each — 1 ms on all four targets, which pin
+  `CONFIG_FREERTOS_HZ=1000` in their `sdkconfig.defaults.*` — so the complete
+  list would have spent **425 ms** yielding to build a few hundred small
+  strings.
+
+- **A fifty-year upper bound on the clock sanity check that no target could
+  ever satisfy.**
+  [`EZPI_core_sntp_get_current_time_sec_abc`](ezlopi-core/ezlopi-core-sntp/ezlopi_core_sntp.c#L267)
+  tested `now > BUILD_DATE && now < BUILD_DATE + 1576800000lu`. The upper bound
+  is 3315120733, and `time_t` is 4-byte signed on every target this project
+  builds for — measured with a `_Static_assert` compiled under all four of
+  `xtensa-esp32-elf-gcc`, `xtensa-esp32s2-elf-gcc`, `xtensa-esp32s3-elf-gcc`
+  and `riscv32-esp-elf-gcc`, not assumed from the architecture. The largest
+  representable value is 2147483647, so the bound sat 1.17 billion seconds
+  past it.
+
+  Worse than merely unreachable: the literal was unsigned, so `now` was
+  converted to `unsigned long` for the comparison, which made the test true for
+  *every* input rather than false. A negative clock wraps to at least
+  2147483648 and still compares below 3315120733. The left-hand test is what
+  rejected those.
+
+  [What is left](ezlopi-core/ezlopi-core-sntp/ezlopi_core_sntp.c#L298) is the
+  half that worked — reject a clock predating the firmware, which is what an
+  unsynchronised ESP32 reports. **No replacement bound was invented.** A
+  representable one would be new policy rather than a repair, and a short-lived
+  one: a signed 32-bit `time_t` expires in January 2038, about thirteen years
+  past this `BUILD_DATE`.
+
+- **Three dependencies that had been arriving by accident, and a fourth that
+  broke four target builds.** `ezlopi_core_sntp.c` included
+  `ezlopi_core_wifi.h` without naming a single wifi or netif symbol. Removing
+  it on that evidence alone would have broken the build, which is the point
+  worth recording: behind that one line came `freertos/task.h` for `vTaskDelay`
+  and the port tick macros, and — via `cjext.h` — `ezlopi_util_trace.h` for the
+  `TRACE_*` macros and `EZLOPI_USER_CONFIG.h` for `ezlopi_free`. All four are
+  now included directly.
+
+  **An ESP-IDF `REQUIRES` entry can be load-bearing for a header it never
+  mentions.** `ezlopi-util-version` had to be *added* to
+  `ezlopi-core-sntp`'s requirements when `ezlopi-core-wifi` came out, because
+  `BUILD_DATE` — defined in exactly one header in the tree — was only on the
+  include path by way of
+  `ezlopi-core-sntp → ezlopi-core-wifi → ezlopi-service-uart → ezlopi-core-info`.
+
+  The fourth surfaced only on hardware builds and is the reason this section
+  has a build sweep that failed once. All four targets stopped at
+  `ezlopi_cloud_protect.c: fatal error: ezlopi_core_cjson_macros.h: No such
+  file or directory` — a component two edges downstream, which had been
+  reaching that header through
+  `ezlopi-cloud-protect → ezlopi-core-sntp → ezlopi-core-wifi → ezlopi-service-uart → ezlopi-core-ezlopi`.
+  It uses **none** of that header's 13 macros, so the include was dead and is
+  gone. Naming `ezlopi-core-ezlopi` in that component's requirements would also
+  have worked and was rejected: it closes a cycle
+  (`ezlopi-core-ezlopi → ezlopi-cloud-data → ezlopi-core-devices → ezlopi-core-protect → ezlopi-cloud-protect`)
+  to supply a header nobody reads.
+
+  The tree was then swept for the same class of breakage rather than fixed one
+  error at a time: for every component, the set reachable through `REQUIRES`
+  before and after the change, and every `#include "…"` whose every owner fell
+  out of that set. Four components lost reachability —
+  `ezlopi-cloud-protect`, `ezlopi-core-http`, `ezlopi-core-protect` and
+  `ezlopi-core-sntp` — and only the first included anything affected.
+  **The check was then confirmed able to fail**, by re-injecting the deleted
+  include in memory: it reports exactly the failure the four real builds
+  produced, and goes quiet once the include is gone. An analysis that cannot
+  fail is not evidence.
+
+- **`ezlopi_core_nvs.h` declared two functions in terms of `bool` without
+  including `<stdbool.h>`.**
+  [It does now](ezlopi-core/ezlopi-core-nvs/ezlopi_core_nvs.h#L53).
+  [`EZPI_core_nvs_write_bool`](ezlopi-core/ezlopi-core-nvs/ezlopi_core_nvs.h#L266)
+  and its reader had been compiling only because every translation unit that
+  includes this header happened to pick up `stdbool` from somewhere else first
+  — a property of its callers, not of the header. The first include that did
+  not make it true was a host test, where `nvs_flash.h` is an empty stub and
+  the two declarations became `unknown type name 'bool'`.
+
+- **The test, and what it has been seen to catch.**
+  [`tests/host/test_tz.c`](tests/host/test_tz.c) compiles the real
+  `ezlopi_core_sntp.c` against the real `zones.c` — the 425-entry table is
+  compiled in, not stubbed — and makes **151** assertions under
+  AddressSanitizer and UndefinedBehaviorSanitizer, 0 failures.
+
+  A host process is the right instrument rather than a substitute for a board,
+  because the defect is about `TZ`, and a host has a real `TZ`, a real `tzset`
+  and a real `localtime_r`. The test asserts on the wall clock the subject
+  produces, not on whether a string was passed to `setenv`.
+
+  The fixture poisons `TZ` to a deliberately absurd zone before each case, and
+  the poison has a self-check that calls `exit(2)` if the poison did not take.
+  **That self-check earned its place during development**: it caught
+  `FIXED_EPOCH` being set to a constant one day off the date its comment
+  claimed.
+
+  **Every published zone is swept, not sampled.** All **425** are set through
+  the real `hub.location.set` path and the resulting wall clock compared
+  against the table's own `posix_str` installed directly by the test —
+  425 accepted, 425 matching, asserted as three separate equalities so that a
+  table that silently shrank would fail rather than pass vacuously.
+
+  **Nineteen mutations plus a control row at 0 failures. Eighteen were
+  caught** — seventeen by the test, the eighteenth by the compiler. Both halves
+  of the original defect fail loudly: a boot that resolves but never installs
+  fails 19 checks, a set that resolves but never installs fails 18. **Dropping
+  `tzset()` while keeping `setenv()` fails 37, the largest of any mutant**,
+  which is the right shape, since that is the mistake most likely to be made by
+  someone who thinks setting the variable is enough. Restoring the original
+  store-before-validate ordering does not merely fail, it faults: the unknown
+  name reaches `setenv` as a NULL and ASan reports a SEGV at address zero.
+  Dropping the `free` is caught by LeakSanitizer, and doubling it never reaches
+  the test at all — GCC rejects it under `-Werror=use-after-free`, counted as
+  detected by the build rather than credited to the suite.
+
+  **One mutant is caught by the sanitizers alone and could not be caught any
+  other way.** Dropping the NULL/length guard from `get_local_time` is
+  invisible to assertions: glibc declares `strftime` `nonnull` and, handed a
+  NULL destination, returns the length it would have written without writing
+  anything — measured, not inferred from the declaration. UBSan's "null pointer
+  passed as argument 1" is the whole of the evidence. Newlib makes no such
+  promise, so on hardware this is not a benign mutation.
+
+  **The nineteenth survived, and it is an equivalent mutant rather than a
+  gap.** Removing the NULL guard from `EZPI_core_sntp_set_location` changes
+  nothing observable, because `tz_name_cmp` guards both its arguments
+  explicitly, so a NULL name resolves to NULL without a dereference and the
+  function returns the same error the guard would have produced. The guard is
+  kept anyway, and the reason it survived here is exactly why: `stubs-sntp`'s
+  `sdkconfig.h` leaves `CONFIG_EZPI_UTIL_TRACE_EN` undefined, which compiles
+  `TRACE_W` away. All four `sdkconfig.defaults.*` pin it to `y`, so on hardware
+  that line hands a NULL to a `%s` conversion.
+
+  **The mutation harness itself had to be rewritten, and the first version was
+  dangerous.** It used `perl -i`, which renames rather than truncates; this
+  checkout is OneDrive-backed and denied the rename, so edits silently did not
+  apply and several mutants reported "0 failures" while being unmutated. Then a
+  crash mid-sweep left the subject mutated in the working tree, and the next
+  run read that mutant as its own baseline — producing a control row at 19
+  failures and a table in which every row was void. The rewrite writes in place
+  by truncation, restores the subject on *any* exit including an exception,
+  asserts each pattern matched exactly once so an unapplied edit is reported as
+  unapplied rather than as a surviving mutant, treats the control row as a hard
+  gate that aborts the sweep if it is not clean, and finally checks the subject
+  byte-identical to the original. It also counts a sanitizer report as a
+  detection independently of the printed tally, which it did not at first:
+  UBSan recovers by default, so the `strftime` mutant tripped a runtime error
+  and still printed "0 failures".
+
+  The whole host suite is **27** binaries, **5661** checks, 0 failures, with
+  the per-binary totals summed by the script rather than by hand — three
+  different tally wordings exist in this suite and a regex matching only one of
+  them had previously undercounted it.
+
+- **Built on four targets against a baseline from `git archive HEAD`.**
+
+  | target | baseline | fixed | delta | `.flash.text` | `.flash.rodata` | sum | vs image |
+  |---|---|---|---|---|---|---|---|
+  | esp32   | 1689616 | 1690336 | +720 | +496 | +224 | 720 | exact |
+  | esp32s2 | 1379872 | 1380048 | +176 | −36 | +216 | 180 | +4 |
+  | esp32s3 | 1704672 | 1705600 | +928 | +716 | +208 | 924 | −4 |
+  | esp32c3 | 1763376 | 1763792 | +416 | +180 | +240 | 420 | +4 |
+
+  **`.flash.text` goes *down* by 36 bytes on esp32s2** while the image grows,
+  and that is not noise worth smoothing over: `get_local_time` lost an NVS
+  read, a table lookup, a `setenv` and a `tzset`, and on that target the
+  removal very nearly pays for the new function. The other three grew. Four
+  targets, four different code deltas from one source change.
+
+  The two flash sections account for the image delta exactly on esp32, and to
+  within 4 bytes on the other three — segment alignment padding in the image
+  container. Reported rather than rounded away.
+
+  `EZPI_core_sntp_apply_stored_timezone` is absent from the baseline ELF and
+  present in the fixed one on all four targets: **8** checks in the expected
+  direction, none in the other. Absence is the half that matters.
+
+  **The cross-check the previous entry could not quite make, this one can.**
+  This baseline is HEAD, which is the commit that section describes, so these
+  baseline figures should equal its *fixed* column — and all four match
+  exactly: 1689616, 1379872, 1704672, 1763376. The unexplained 16-byte esp32
+  discrepancy recorded there did not recur.
+
+- **Untested on hardware.** Nothing has been flashed. No board has booted with
+  a stored zone, evaluated a time-of-day scene, and been checked for firing at
+  the right local hour — which is the behaviour this section is about. What is
+  established is that the zone is installed from one place at boot and on set,
+  that the install is what libc actually reads, and that all 425 published
+  zones round-trip. What is unverified is newlib's `tzset` agreeing with
+  glibc's on the table's POSIX strings, and the boot ordering holding on a real
+  device.
+
 ### Build and configuration — [infra]
 
 - **Shadowed locals are now a build error, in this project's components and

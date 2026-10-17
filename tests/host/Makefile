@@ -40,6 +40,8 @@ I2C_HAL_DIR  := ../../ezlopi-hal/ezlopi-hal-i2c
 HTTP_DIR     := ../../ezlopi-core/ezlopi-core-http
 COORDS_DIR   := ../../ezlopi-cloud/ezlopi-cloud-coordinates
 NVS_DIR      := ../../ezlopi-core/ezlopi-core-nvs
+TZDB_DIR     := ../../ezlopi-components/micro_tz_db
+VERSION_DIR  := ../../ezlopi-util/ezlopi-util-version
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -75,7 +77,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
-           test_httpresp test_suntime test_coords
+           test_httpresp test_suntime test_coords test_tz
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -768,6 +770,86 @@ $(BUILD)/test_coords: test_coords.c $(COORDS_DIR)/ezlopi_cloud_coordinates.c \
 	$(CC) $(COORDS_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/coords_cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_coords_main.o $(BUILD)/coords_subject.o \
 	      $(BUILD)/coords_keywords.o $(BUILD)/coords_cjext.o $(LDFLAGS) -lm
+
+# The timezone, and the reason a host is not a compromise here but the better
+# instrument.
+#
+# setenv("TZ")/tzset()/localtime_r() are C library functions, and the firmware
+# calls the same ones -- newlib's on an ESP32, glibc's here. So this rule
+# asserts a real conversion of a real epoch: store "Australia/Eucla", boot, and
+# 1782993600 must read back as 2026-07-01T20:45:00+0845. Not that setenv was
+# called with a particular string, which is all a mock could say, and which
+# would pass just as happily against a POSIX TZ string that libc rejects. A
+# board would prove the same thing more slowly and for one zone at a time;
+# test_every_published_zone_is_settable sweeps all 425 in the table.
+#
+# What is being regression-tested is a two-reader disagreement, like
+# test_coords', but with the shared datum being process state rather than a
+# file static. setenv("TZ")+tzset() lived in exactly one place in the firmware:
+# inside EZPI_core_sntp_get_local_time(), whose only caller is hub.info.get. So
+# TZ was installed as a side effect of a client asking what time it was, and
+# until one did, the four time-of-day scene evaluators in
+# ezlopi_core_scenes_when_methods.c ran on UTC. EZPI_core_sntp_set_location()
+# did not install it either, so changing the timezone did not move them.
+#
+# A host process is the right shape for that for the same reason it was for the
+# coordinates: a fresh process has an unset TZ for the reason a fresh chip
+# does. "Reboot" is fake_nvs_preload() followed by
+# EZPI_core_sntp_apply_stored_timezone(). And poison_the_timezone() -- which
+# installs NPT-5:45 and asserts it took -- is what makes the fallback cases
+# mean something: without it, "falls back to UTC" is indistinguishable from
+# "did nothing at all", because an untouched process is already on UTC.
+#
+# zones.c is compiled, not stubbed, and that is the point of the sweep. The
+# names the table publishes through hub.location.list are the names
+# hub.location.set has to accept; a stubbed table would let this file agree
+# with itself about a set of zones the firmware does not have. It also costs
+# nothing -- the file is a sorted array of 425 name/POSIX pairs and a binary
+# search over it.
+#
+# The NVS surface is the same two functions as test_coords, again as recording
+# fakes in the test file, and the read fake again returns strdup() because the
+# real one returns an allocation the caller owns -- here that matters more than
+# usual, since EZPI_core_sntp_apply_stored_timezone() frees it on every path
+# including the fallback, and a fake handing out an interior pointer would hide
+# that from ASan.
+#
+# stubs-sntp/ is two headers and both are documented in place: an esp_sntp.h
+# whose sntp_get_sync_status() returns RESET forever, so EZPI_core_sntp_init()
+# runs its retry loop to exhaustion and returns a failure a test can assert
+# instead of a fiction about a server that replied, and a deliberately empty
+# sdkconfig.h. stubs/ supplies the rest, including the freertos/task.h that now
+# carries a no-op vTaskDelay and both spellings of the tick-period macro --
+# portTICK_PERIOD_MS and portTICK_RATE_MS, because this one translation unit
+# uses both.
+#
+# -D_GNU_SOURCE is for strdup(), hidden by -std=c99 alone, as in test_coords.
+#
+# -Wno-unused-parameter is on the subject only:
+# EZPI_core_sntp_get_current_time_sec_abc() takes a function_name it no longer
+# traces. The test file keeps the warning on.
+#
+# The nm guard IS load-bearing here, unlike test_coords'. ezlopi_core_sntp.c
+# includes sdkconfig.h, and stubs-sntp/sdkconfig.h is empty -- so the failure
+# mode this guards is a future CONFIG_ gate preprocessing the file down to
+# nothing and the compiler agreeing with an empty object. It names
+# EZPI_core_sntp_apply_stored_timezone because that function not existing is
+# the defect: against the tree before this change the link fails rather than
+# the test, which is the loudest a detection gets.
+TZ_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror -D_GNU_SOURCE \
+             -I$(SNTP_DIR) -I$(NVS_DIR) -I$(ERRORS_DIR) \
+             -I$(TZDB_DIR) -I$(VERSION_DIR) \
+             -I stubs-sntp -I stubs-httpurl -I$(STUBS_DIR) \
+             $(SANITIZERS)
+$(BUILD)/test_tz: test_tz.c $(SNTP_DIR)/ezlopi_core_sntp.c \
+                  $(TZDB_DIR)/zones.c | $(BUILD)
+	$(CC) $(TZ_CFLAGS) -c -o $(BUILD)/test_tz_main.o test_tz.c
+	$(CC) $(TZ_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/tz_subject.o $(SNTP_DIR)/ezlopi_core_sntp.c
+	@nm $(BUILD)/tz_subject.o | grep -q ' T EZPI_core_sntp_apply_stored_timezone' \
+	  || { echo "ezlopi_core_sntp.c compiled to an object without EZPI_core_sntp_apply_stored_timezone in it"; exit 1; }
+	$(CC) $(TZ_CFLAGS) -c -o $(BUILD)/tz_zones.o $(TZDB_DIR)/zones.c
+	$(CC) -o $@ $(BUILD)/test_tz_main.o $(BUILD)/tz_subject.o \
+	      $(BUILD)/tz_zones.o $(LDFLAGS) -lm
 
 # The BLE chunk accumulator: the linked list that holds a payload too large for
 # one ATT write until the last chunk arrives. Four characteristics use it and
