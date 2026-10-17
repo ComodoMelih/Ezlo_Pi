@@ -128,6 +128,26 @@ int EZPI_core_http_mem_malloc(char **__dest_ptr, const char *src_ptr)
             snprintf(tmp_ptr, ret, "%s", src_ptr);
             *__dest_ptr = tmp_ptr; // old gets replaced by new address
         }
+        else
+        {
+            /* Report 0 rather than the capacity that was wanted. Every caller
+            ** assigns this straight into a `*_maxlen` field, so returning
+            ** strlen(src)+5 for an allocation that did not happen advertised a
+            ** capacity beside a pointer that FREE_IF_NOT_NULL above had just
+            ** set to NULL.
+            **
+            ** The caller that this matters most to is already written:
+            ** EZPI_parse_http_url tests `if (tmp_http_data->url_maxlen > 0)`
+            ** before parsing, which was a guard that could not fail. With 0
+            ** here it can, and a failed `url` allocation now skips the parse
+            ** instead of running it and leaving the struct half-filled.
+            **
+            ** 0 was already this function's answer for a NULL `src_ptr`, which
+            ** is the other way to get no buffer, so this makes the two
+            ** agree rather than inventing a convention. */
+            TRACE_E(" Error !!, allocation of %d bytes failed .... ", ret);
+            ret = 0;
+        }
     }
     else
     {
@@ -171,11 +191,13 @@ void EZPI_core_http_mbedtls_req(s_ezlopi_core_http_mbedtls_t *config)
     ** EZPI_SERV_WS_SERVER_PORT (17001), so nothing answers on the port that
     ** gets used -- 0 when the URL did not parse, or the URL's own port in the
     ** allocation-failure case below. The damage is upstream of the connect. The
-    ** whole request is assembled first, and the TRACE_I below logs it in full,
-    ** including any Authorization header the caller put in `header`. So a
+    ** whole request is assembled first, and the TRACE_I below printed it in
+    ** full, including any Authorization header the caller put in `header`. So a
     ** request that could never be delivered was still built and printed, and
     ** the resolver quietly aimed at the loopback interface instead of saying
-    ** the host was missing.
+    ** the host was missing. (That dump is now behind
+    ** CONFIG_EZPI_HTTP_LOG_PAYLOADS, so only its length is printed by default;
+    ** the request is still assembled, which is what this guard stops.)
     **
     ** Two of the three callers could arrive that way, by two routes. Both build
     ** the struct with memset(0) and let EZPI_parse_http_url fill it, so a
@@ -183,17 +205,21 @@ void EZPI_core_http_mbedtls_req(s_ezlopi_core_http_mbedtls_t *config)
     ** which is the same parse on a block taken straight off the wire -- whose
     ** `url` does not parse or is absent leaves the field NULL. The second route
     ** is a successful parse with a failed allocation: EZPI_core_http_mem_malloc
-    ** returns the size it wanted even when ezlopi_malloc gave it nothing, so
-    ** web_server_maxlen ends up positive beside a NULL web_server, and
-    ** web_port ends up the real port. (The third caller,
-    ** __issunsate_update_sunstate_tm, is safe by construction: its web_server
-    ** is a char array initialised from a literal.)
+    ** used to return the size it wanted even when ezlopi_malloc gave it
+    ** nothing, so web_server_maxlen ended up positive beside a NULL
+    ** web_server, and web_port ended up the real port. That function now
+    ** returns 0 on a failed allocation, which also makes the
+    ** `if (url_maxlen > 0)` test in EZPI_parse_http_url mean something.
     **
-    ** Guarding here covers all three callers and any added later, which a guard
-    ** repeated at each call site would not. It does not cover `target_page`,
-    ** which the same allocation failure can leave NULL and which reaches a
-    ** "%s" in __ezlopi_http_generate_request; that is a separate pre-existing
-    ** case and is recorded in the CHANGELOG rather than fixed here. */
+    ** The third caller, __issunsate_update_sunstate_tm, passes this guard by
+    ** construction -- its web_server is a char array initialised from a
+    ** literal. Only this guard, though: the same initializer omits
+    ** target_page, so that caller was the one route to a NULL target_page that
+    ** needed no allocation failure at all. It is handled in
+    ** __ezlopi_http_generate_request, at the four "%s" that read the field.
+    **
+    ** Guarding here covers all three callers and any added later, which a
+    ** guard repeated at each call site would not. */
     if (config && config->web_server)
     {
         int request_len = (config->url_maxlen) + (config->header_maxlen) + (config->content_maxlen) + 100; // [>25] ; for "skipSecurity: true"
@@ -676,6 +702,37 @@ static void __ezlopi_http_generate_request(s_ezlopi_core_http_mbedtls_t *config,
 {
     if ((NULL != config) && (NULL != *request) && (request_len > 0))
     {
+        /* `target_page` is read by a "%s" on four of the arms below and it can
+        ** be NULL on arrival, so it is funnelled through one local instead of
+        ** being guarded four times.
+        **
+        ** It is NULL for a more ordinary reason than an allocation failure.
+        ** The field is assigned in exactly one place in the tree --
+        ** EZPI_parse_http_url, from the `page` the URL ladder scanned -- and
+        ** __issunsate_update_sunstate_tm does not go through that parse. It
+        ** builds its s_ezlopi_core_http_mbedtls_t with a designated
+        ** initializer that names 10 of the struct's 20 members and not this
+        ** one, so C zero-initializes it along with the other 9 it omits. Its
+        ** method is HTTP_METHOD_GET and it sets no username or password, so it
+        ** takes the arm below that reads target_page.
+        ** Every isSunState condition evaluation therefore sent
+        ** "GET /(null) HTTP/1.1" -- measured, not inferred: the target's libc.a
+        ** carries the "(null)" literal, so newlib renders it rather than
+        ** faulting, which is why this never showed up as a crash.
+        **
+        ** The empty string is the right substitute and not merely a safe one:
+        ** "GET / HTTP/1.1" is the request for the root path, and a legitimately
+        ** empty page already arrives here as "" -- a URL with no path takes the
+        ** seventh arm of the ladder, leaving `page` as the {0} it was
+        ** initialised to. So NULL and "" now produce the same well-formed
+        ** request line, which is what the caller meant in both cases.
+        **
+        ** Note this does not make the sunstate request correct -- its path
+        ** should be "json?lat=...&lng=..." from the url it built. That is a
+        ** separate defect in a function that also discards the response and
+        ** hardcodes the time it returns; see Known gaps. */
+        const char *target_page = (NULL != config->target_page) ? config->target_page : "";
+
         // 1. Identify Http-Method
         switch (config->method)
         {
@@ -688,23 +745,23 @@ static void __ezlopi_http_generate_request(s_ezlopi_core_http_mbedtls_t *config,
             }
             else
             {
-                snprintf(*request, request_len, "GET /%s HTTP/1.1\r\nUser-Agent: esp-idf/1.0 esp32\r\n", config->target_page);
+                snprintf(*request, request_len, "GET /%s HTTP/1.1\r\nUser-Agent: esp-idf/1.0 esp32\r\n", target_page);
             }
             break;
         }
         case HTTP_METHOD_POST:
         {
-            snprintf(*request, request_len, "POST /%s HTTP/1.1\r\nUser-Agent: esp-idf/1.0 esp32\r\n", config->target_page);
+            snprintf(*request, request_len, "POST /%s HTTP/1.1\r\nUser-Agent: esp-idf/1.0 esp32\r\n", target_page);
             break;
         }
         case HTTP_METHOD_PUT:
         {
-            snprintf(*request, request_len, "PUT /%s HTTP/1.1\r\nUser-Agent: esp-idf/1.0 esp32\r\n", config->target_page);
+            snprintf(*request, request_len, "PUT /%s HTTP/1.1\r\nUser-Agent: esp-idf/1.0 esp32\r\n", target_page);
             break;
         }
         case HTTP_METHOD_DELETE:
         {
-            snprintf(*request, request_len, "DELETE /%s HTTP/1.1\r\nUser-Agent: esp-idf/1.0 esp32\r\n", config->target_page);
+            snprintf(*request, request_len, "DELETE /%s HTTP/1.1\r\nUser-Agent: esp-idf/1.0 esp32\r\n", target_page);
             break;
         }
         default:

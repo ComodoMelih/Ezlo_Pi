@@ -1165,7 +1165,7 @@ None of these have been exercised on physical hardware; see Known gaps.
 ### I²C sensor bus — [bug]
 
 - **The second I²C sensor in a configuration never initialised.**
-  [`EZPI_hal_i2c_master_init()`](ezlopi-hal/ezlopi-hal-i2c/ezlopi_hal_i2c_master.c#L84)
+  [`EZPI_hal_i2c_master_init()`](ezlopi-hal/ezlopi-hal-i2c/ezlopi_hal_i2c_master.c#L90)
   installs the IDF driver only the first time a channel is used, which is
   correct: I²C is a bus, every sensor on it shares SDA and SCL, and the device
   is chosen by address at transfer time. But `ret = EZPI_SUCCESS` was assigned
@@ -2117,10 +2117,10 @@ of reading the serial console would have revealed it.
   and "a reply came back" still reach the console.
 
   The worst of the four is not the request. It is
-  [`HTTP_EVENT_ON_DATA`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L808),
+  [`HTTP_EVENT_ON_DATA`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L845),
   which printed every chunk of every `esp_http_client` response body. Both live
   callers of that handler are
-  [`EZPI_core_http_get_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L246)
+  [`EZPI_core_http_get_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L272)
   calls in `ezlopi_service_webprov.c`, and the second is
   [provision-sync](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L583)
   — whose reply `__provision_update()` reads
@@ -2137,14 +2137,14 @@ of reading the serial console would have revealed it.
 
   The other two live sites are the request/response pair in
   `EZPI_core_http_mbedtls_req`
-  ([`:223`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L223),
-  [`:233`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L233)), reached by a
+  ([`:249`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L249),
+  [`:259`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L259)), reached by a
   `sendHttpRequest` scene action. `request` is a credential envelope rather than
   a string: for a GET,
-  [`__ezlopi_http_generate_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L687)
+  [`__ezlopi_http_generate_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L701)
   writes `?username=%s&password=%s` straight into that buffer, and any
   `Authorization` header the action set is
-  [appended](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L724) to the same
+  [appended](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L781) to the same
   buffer a few lines later — the credentials being
   [parsed out of an `EZLOPI_VALUE_TYPE_CREDENTIAL` field](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L376).
   So this was not "an opaque header might be in there"; a user and password were
@@ -2152,8 +2152,8 @@ of reading the serial console would have revealed it.
   switch because it is the chosen server's reply, `Set-Cookie` included.
 
   The fourth,
-  [the per-chunk dump](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L413) in
-  [`EZPI_core_http_post_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L338),
+  [the per-chunk dump](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L439) in
+  [`EZPI_core_http_post_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L364),
   is gated for its shape and not for a leak that shipped. That function has no
   caller in the tree — header declaration and component readme only — and the
   linker agrees: its `.text`, `.literal` and `.rodata…str1.1` sections are all
@@ -2166,7 +2166,7 @@ of reading the serial console would have revealed it.
   obvious assumption is wrong twice over. EzloPi's trace macros are not
   `ESP_LOG`, so `CONFIG_LOG_DEFAULT_LEVEL=0` in the `sdkconfig.defaults.*` files
   does not gate them;
-  [`ENABLE_TRACE`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L74) comes
+  [`ENABLE_TRACE`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L75) comes
   from `CONFIG_EZPI_UTIL_TRACE_EN`, which is `=y` in **4 of 4** of those files.
   And `trace_color_print()` does no severity filtering at all — the only filter
   is in the registered serial upcall
@@ -2214,8 +2214,9 @@ of reading the serial console would have revealed it.
   returns to exactly the baseline's 1683856 bytes.
 
   **What the CI check does and does not do here.**
-  [`GATED_SWITCHES`](tests/ci/check_no_secret_logging.py#L210) now pins the new
-  option at `default n`, so flipping it in `Kconfig.projbuild` fails the check
+  [`GATED_SWITCHES`](tests/ci/check_no_secret_logging.py#L189) now carries an
+  [entry for the new option](tests/ci/check_no_secret_logging.py#L210) pinning
+  it at `default n`, so flipping it in `Kconfig.projbuild` fails the check
   until someone edits the table — which is the moment to have the argument. The
   pin was seen to fail: with the expected value mutated to `'y'`, the check
   exits 1 with the drift message.
@@ -5548,7 +5549,7 @@ enumerators — so the live half of this component was never affected.
 
 - **A request with no host is no longer assembled, logged and handed to the
   resolver.**
-  [`EZPI_core_http_mbedtls_req()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L158)
+  [`EZPI_core_http_mbedtls_req()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L178)
   is the one entry point for every outbound request a scene makes, and it used
   to check its argument and nothing in it:
 
@@ -5558,7 +5559,7 @@ enumerators — so the live half of this component was never affected.
   ```
 
   `web_server` is the host, and the
-  [`__ezlopi_http_req_via_mbedTLS` call](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L210)
+  [`__ezlopi_http_req_via_mbedTLS` call](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L255)
   passes it on unexamined, from where it reaches `mbedtls_net_connect()` and
   `getaddrinfo()`.
 
@@ -5595,7 +5596,7 @@ enumerators — so the live half of this component was never affected.
   = 17001, and the port reached here is 0 on the parse-failure route or the
   URL's own port on the allocation-failure one. The damage is upstream of the
   connect. The whole request is built first, and the
-  [`TRACE_I`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L223) below it
+  [`TRACE_I`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L249) below it
   printed the assembled buffer in full — including any `Authorization` header
   the action put in `header`, and the `?username=…&password=…` the GET branch
   writes into the same buffer. So a request that could never be delivered was
@@ -5672,7 +5673,7 @@ enumerators — so the live half of this component was never affected.
   compile to nothing and still link. `ezlopi_core_http.c` carries no such
   wrapper, so the chokepoint half ships whatever that option is set to.
 
-  **Three things deliberately not done.** There is no host test, and the reason
+  **Two things deliberately not done.** There is no host test, and the reason
   was measured rather than assumed: compiling `ezlopi_core_http.c` under
   `tests/host/` needs **12** headers that do not exist in this repo, **8** of
   them `mbedtls/`, so the test would stand in for the TLS stack and stop
@@ -5682,12 +5683,135 @@ enumerators — so the live half of this component was never affected.
   docstring. There is also no new CI check: the invariant is one condition in
   one function, and unlike a missing `scanf` width there is no syntactic class
   for a check to cover, so a check here would guard a single line and claim to
-  be more. And `target_page`, which the same allocation failure can leave NULL
-  and which reaches a
-  [`"%s"` in `__ezlopi_http_generate_request()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L691),
-  is left alone: it is a separate pre-existing case on a path the new guard
-  does not claim to cover, and it is recorded here rather than folded into this
-  entry's fix. See *Known gaps*.
+  be more.
+
+  A third thing was deliberately not done at the time and has since been done
+  as its own change: `target_page`, the field this guard does *not* cover,
+  which reaches a `"%s"` in
+  [`__ezlopi_http_generate_request()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L701).
+  It was recorded under *Known gaps* rather than folded in here. The next entry
+  is that fix, and the reason it needed its own change is that reading it
+  properly found a defect of a different shape than the gap entry described.
+
+- **Every sunrise/sunset scene condition was sending `GET /(null) HTTP/1.1`,
+  and it took no allocation failure to do it.** The *Known gaps* entry that
+  held this open described an allocation-failure edge case reaching one `"%s"`.
+  Both halves of that were wrong, and the correction is the interesting part.
+
+  There are **four** `"%s"` reads of `target_page`, not one — the
+  [GET](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L748),
+  [POST](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L754),
+  [PUT](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L759) and
+  [DELETE](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L764) arms of
+  `__ezlopi_http_generate_request()`. And the field is NULL on a path with no
+  malloc on it at all.
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1695)
+  — the third caller, the one the previous entry establishes was never at risk
+  for `web_server` — builds its config with a
+  [designated initializer](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1715)
+  that names **10** of the struct's **20** members. `target_page` is one of the
+  10 it omits, so C zero-initializes it. Its `method` is `HTTP_METHOD_GET` and
+  it sets no `username` or `password`, so it takes the GET arm that reads
+  `target_page`. That is not an edge case: it is every evaluation of every
+  `isSunState` condition in the device, deterministically, on first boot with
+  nothing misconfigured.
+
+  **Why it never surfaced as a crash, measured rather than inherited.** The old
+  gap entry asserted "newlib prints `(null)` rather than faulting", which is
+  true of glibc and was worth not taking on faith for the libc these images
+  actually link. The toolchain ships libc as a binary, so the binary was asked:
+  the `(null)` literal appears **6** times in each target's own `libc.a`
+  (checked for `esp32s2` and `esp32s3`, including the no-RTTI variants), and
+  `CONFIG_NEWLIB_NANO_FORMAT` is unset in all four `sdkconfig.defaults.*` — so
+  the full formatter is linked, and it is the one that carries the NULL case.
+  The claim holds for this firmware, now on its own evidence.
+
+  **The fix is two changes, and the upstream one is the one that matters.**
+  [`EZPI_core_http_mem_malloc()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L116)
+  now [returns 0](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L148) when
+  `ezlopi_malloc` returns nothing, instead of returning the capacity it wanted.
+  Every one of its call sites assigns the result straight into a `*_maxlen`
+  field, so the old contract advertised a capacity beside a pointer that the
+  `FREE_IF_NOT_NULL` two lines up had just set to NULL. 0 was already this
+  function's answer for a NULL `src_ptr` — the other way to end up with no
+  buffer — so this makes the two agree rather than inventing a convention.
+
+  The blast radius is **9** call sites, **7** of them compiled, all nine in
+  `ezlopi_core_scenes_then_methods_helper_func.c`; the two that do not compile
+  are inside the disabled alternate host parser at its `#if 0`, and all nine
+  sit inside the file's end-to-end `#ifdef CONFIG_EZPI_SERV_ENABLE_MESHBOTS`.
+  The gap entry this closes said **10** and **8**. The likely origin of the
+  discrepancy is that it counted the definition in `ezlopi_core_http.c` as a
+  call site, which is the kind of off-by-one that a re-derived count catches
+  and a carried-forward one does not. Recorded rather than quietly amended
+  because the gap entry was written by this same audit: a number stated once
+  and then cited is not evidence, and this one survived until something was
+  built on it.
+
+  That immediately activates a guard that was already written and could not
+  previously fail:
+  [`if (tmp_http_data->url_maxlen > 0)`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L140)
+  in `EZPI_parse_http_url()`. A failed `url` allocation now skips the nine-arm
+  parse instead of running it and leaving the struct half-filled. Worth being
+  precise about what the old return value cost here, because it is sharper than
+  "wrong number": for an empty `src_ptr` the function returns **5** on success
+  — `strlen("") + 5` — and it used to return **5** on failure too, so the two
+  outcomes were not merely confusable, they were *identical*, and no caller
+  could have told them apart however carefully it was written.
+
+  Second, the four request-line reads now go through
+  [one guarded local](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L734)
+  rather than being tested four times. The empty string is the right substitute
+  and not merely a safe one: `GET / HTTP/1.1` is the request for the root path,
+  and a legitimately empty page *already* arrives here as `""` — a URL with no
+  path takes the seventh arm of the ladder and leaves `page` as the `{0}` it
+  was declared as. So NULL and `""` now produce the same well-formed request
+  line, which is what the caller meant in both cases. This is why guarding
+  `target_page` at the call site would have been wrong, as the gap entry
+  argued: the test would have had to distinguish "not allocated" from
+  "allocated empty", and after the upstream change it does not have to.
+
+  **Behaviour-preserving for everything that was already working,** shown on
+  the host rather than reasoned about. The `snprintf` form was lifted verbatim
+  and run under `-fsanitize=address,undefined` on four inputs. A NULL page goes
+  from `GET /(null) HTTP/1.1` to `GET / HTTP/1.1`. An empty page gives
+  `GET / HTTP/1.1` before and after. A real page — `json?lat=…&lng=…` — is
+  byte-identical before and after. Only the NULL case moves.
+
+  **Verified on four targets, baseline against fixed.** `esp32`, `esp32s2`,
+  `esp32s3` and `esp32c3` all build, with `ezlopi_core_http.c` carrying **0**
+  warnings in every fixed build and whole-build warning counts unchanged from
+  baseline — 181, 176, 181 and 184 respectively, identical on both sides. The
+  non-vacuity probe had to be chosen differently from the two fixes above it:
+  those removed format strings, so a rodata grep answered directly, whereas
+  this one leaves all four format strings untouched and a rodata grep at those
+  sites would see nothing either way. What it *does* add is one new literal,
+  the `TRACE_E` on the new failure branch, and that is the probe —
+  `allocation of %d bytes failed` is absent from all four baseline images and
+  present exactly once in all four fixed ones. Image size moves by +80, +96,
+  +96 and +96 bytes. The ternary is checked a third way short of running it:
+  the new local is named `target_page`, the same as the struct member it reads,
+  which is legal but worth having the compiler confirm — and `-Wshadow` is a
+  build *error* in this project's components, so the builds succeeding is that
+  confirmation. The host suite was run on the fixed tree as the regression net
+  for the scenes sources it can compile: **77** checks, **0** failures.
+
+  **Two things deliberately not done, and one harness bug worth recording.**
+  There is no committed host test, for the reason the previous entry measured
+  and this one inherits: `__ezlopi_http_generate_request` is `static` in a file
+  that needs 12 absent headers, 8 of them `mbedtls/`, so a test would exercise
+  a *copy* of the ladder — the drift `tests/host/Makefile`'s own header argues
+  against. And the sunstate request is still functionally wrong: its path
+  should be the `json?lat=…` it built into `tmp_url`, not the root. That is a
+  different defect in a function with several, and it is recorded under *Known
+  gaps* rather than guessed at here. The harness bug: two of the sweep's
+  source-level sync lines reported **0** where the truth was **4**, because
+  their patterns were written `esp32..r..n` — six characters where the source
+  has the four `\r\n` — and this was caught by the reported number
+  contradicting an independent `grep -F`, not by the sweep. They are now `-F`
+  patterns. Both affected lines were *descriptive*, not gating, so no result
+  above rested on them; the sweep is kept rather than discarded for the same
+  reason.
 
 ### Build and configuration — [infra]
 
@@ -7057,7 +7181,7 @@ enumerators — so the live half of this component was never affected.
 - **The citations in these documents are now checked**, by
   [`check_doc_citations.py`](tests/ci/check_doc_citations.py) — the twentieth
   check and the seventeenth the `hygiene` job invokes. This file is the main
-  thing this fork produces, and these documents carry 249 markdown links,
+  thing this fork produces, and these documents carry 310 markdown links,
   most of them with a `#L<n>` fragment. Line numbers move whenever anything
   above them is edited, and nothing in the toolchain notices: a link to a
   renamed file, or to a line past the end of one, renders as ordinary text and
@@ -7072,39 +7196,65 @@ enumerators — so the live half of this component was never affected.
   and that is the one shape a reader has no way to spot. The link now says
   `#L140`.
 
-  Three mechanical failures are caught — the path is gone, the file is shorter
-  than the cited line, or the link text ends `foo.c:123` while its own fragment
-  says `#L456`. What it cannot do is tell whether a line that resolves is the
-  *right* line; nothing short of re-reading each citation can, and that is a
-  person's job. The docstring says so, so that a green run is not read as more
-  than it is. Links to directories are skipped, because `tests/host/` is linked
-  that way deliberately.
+  Four mechanical failures are caught — the path is gone, the file is shorter
+  than the cited line, the link text ends `foo.c:123` while its own fragment
+  says `#L456`, or the link text is one backticked code token that is not on
+  the cited line. What it still cannot do is judge a citation whose text is
+  prose: "appended", "the per-chunk dump" and the like have nothing to check
+  against, and 150 of the 200 citations with a line fragment are in that class.
+  The docstring says so, so that a green run is not read as more than it is.
+  Links to directories are skipped, because `tests/host/` is linked that way
+  deliberately.
 
-  That last limit has since been paid for and then measured, which is why it is
-  still a limit rather than a feature. The HTTP body-logging change under
-  *Credentials* inserted 63 lines into `ezlopi_core_http.c` and moved four
-  citations in older entries; two then pointed at a blank line and at an
-  unrelated `mbedtls_net_free()`. This check passed on all four — correctly, by
-  its own rules — and the four were repaired by hand. The obvious strengthening
-  is to demand that a link whose text is one backticked code token has that
-  token on or near the cited line. Over the 47 citations that qualify, 42 are
-  exact, 4 are within twelve lines and 1 is twenty-one away, so a twelve-line
-  window flags exactly one citation and that one is right: `GATED_SWITCHES` is
-  cited at the table entry, not at the table. The window that spares it is
-  twenty-five lines, which also spares the fourteen-line error that prompted
-  the exercise, and no ambiguity filter separates them — the token to catch
-  appears 7 times in its file, the token to spare 10. So the rule is declined
-  on the numbers, with the numbers written into the docstring. What actually
-  helped was a listing, not a check: enumerate every citation into each file a
-  commit edits, and re-read them.
+  **That fourth rule was declined once, on measurement, and then added when the
+  measurement changed.** The HTTP body-logging change under *Credentials*
+  inserted 63 lines into `ezlopi_core_http.c` and moved four citations in older
+  entries; two then pointed at a blank line and at an unrelated
+  `mbedtls_net_free()`. The check passed on all four — correctly, by its own
+  rules — and the four were repaired by hand. The strengthening considered then
+  was a *window*: the token within ±12 lines. Over the 47 citations that
+  qualified, 42 were exact, 4 within twelve lines and 1 twenty-one away, so the
+  window flagged exactly one citation and that one was right — `GATED_SWITCHES`
+  was cited at the table entry, not at the table. The window that spared it was
+  twenty-five lines, which also spared the fourteen-line error that prompted
+  the exercise, and no ambiguity filter separated them: the token to catch
+  appeared 7 times in its file, the token to spare 10. Declined on those
+  numbers.
 
-  Proved able to fail three ways before being trusted: against the committed
-  `CHANGELOG.md` it exits 1 on that mismatch; against a shadow tree where one
-  cited source file has been renamed away it reports the three links that cited
-  it; and a copy with its `return problems` replaced by `return []` exits 1
-  with `SELF-TEST FAILED` rather than passing silently. Nine fixtures run
-  first, six of them correct links — including an external URL and a bare
-  `#anchor`, neither of which is this check's business.
+  The next change into the same file — the `target_page` fix under *Scene HTTP
+  requests* — rotted **six** more citations in the same older entries, and that
+  is what changed the answer. Re-measured after repairing them by hand, all
+  **50** qualifying citations sit on the **exact** line. No window, so no
+  tolerance to tune and no exception to carve out. The one citation that had
+  forced a window was fixed at the source rather than exempted: it now links
+  twice, once at `GATED_SWITCHES` for the name and once at the entry for the
+  pin, so each link text names what its own line contains. A rule with no
+  exceptions is a different proposition from a rule with one, and that is the
+  shape that was worth gating on. Two refinements are about notation and not
+  tolerance — a trailing `()` is dropped, and a `CONFIG_` prefix is dropped
+  because `Kconfig.projbuild` writes `config EZPI_FOO` while the prose cites
+  the name the generated `sdkconfig` uses.
+
+  **Seen to catch the real thing, not just a fixture.** On a full copy of the
+  repaired tree the check exits 0 with no `ANCHOR` findings; with the six
+  rotted numbers put back it exits 1 and names all six, each by file, line and
+  missing token. The three older rules report **nothing** on those same six —
+  which is the point, since every one of them resolved to a real line inside a
+  real file, and that is precisely why they shipped unnoticed twice.
+
+  Proved able to fail four ways before being trusted: against the committed
+  `CHANGELOG.md` it exits 1 on the original mismatch; against a shadow tree
+  where one cited source file has been renamed away it reports the three links
+  that cited it; against the six-rot copy above it reports all six; and a copy
+  with its `return problems` replaced by `return []` exits 1 with
+  `SELF-TEST FAILED` rather than passing silently. **Fourteen** fixtures run
+  first, **ten** of them correct links — including an external URL and a bare
+  `#anchor`, neither of which is this check's business, and a two-letter
+  backticked token, which is too short to be read as a citation claim. The two
+  `ANCHOR` fixtures look their own line numbers up at import time instead of
+  hardcoding them: a self-test for citation rot that could itself rot would be
+  testing something weaker than the rule, and a needle that stops matching
+  raises rather than quietly turning the fixture into a no-op.
 - Added this file and [SECURITY.md](SECURITY.md).
 
 ---
@@ -7233,32 +7383,66 @@ Listed because a changelog that only mentions what was finished is misleading.
   alone is called from 116 places, and most of those getters return a freshly
   allocated string that is `NULL` on four separate paths.
 
-- **`target_page` can still be NULL where a `"%s"` reads it, and the guard
-  added one section up does not cover it.** The fix under *Scene HTTP requests*
-  tests `web_server` at the chokepoint, which closes both routes to a NULL
-  host. The sibling field escapes it.
-  [`EZPI_core_http_mem_malloc()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L116)
-  returns the size it wanted even when `ezlopi_malloc` returned nothing, and
-  `EZPI_parse_http_url()` calls it twice in a row — so an allocation that
-  succeeds for `web_server` and fails for `target_page` passes the new guard
-  and reaches
-  [`"GET /%s HTTP/1.1…"`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L691)
-  with a NULL argument. That is formally undefined; newlib prints `(null)`
-  rather than faulting, which is why it has never shown up as a crash.
+- **`__issunsate_update_sunstate_tm()` is a stub, and fixing its NULL
+  `target_page` did not make it work.** The entry under *Scene HTTP requests*
+  stops it sending `GET /(null)`; it now sends `GET /`, which is well-formed
+  and still not the request it means. Reading it to establish that found five
+  more things wrong in the same **51** lines, listed because the function needs
+  rewriting rather than patching and the next person should not have to
+  rediscover them.
 
-  Not folded into that fix, for a reason worth stating rather than leaving as
-  an omission. Guarding `target_page` the same way would be wrong: an empty
-  page is legitimate — `http://example.com` with no path takes the seventh arm
-  of the ladder and leaves `page` as `""` — so the request must still be sent,
-  and the test would have to distinguish "not allocated" from "allocated
-  empty". The honest fix is upstream, in `EZPI_core_http_mem_malloc()` itself
-  returning 0 when its allocation failed, so that every one of its callers can
-  tell. It has **10** call sites, **8** of them compiled — the other two are
-  inside the disabled alternate host parser at `#if 0` — and every one of them
-  assigns the result straight into a `*_maxlen` field, so the return value is
-  load-bearing as a capacity at all of them. Changing that contract is a
-  separate change with its own blast radius, and it is not being made as a
-  footnote to a different fix.
+  It
+  [reads the NVS latitude/longitude](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1702),
+  traces it, frees it, and then ignores it: **both** arms of the `if` write the
+  [same hardcoded Kathmandu coordinates](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1706)
+  into `tmp_url`, so the NVS read is pure overhead and the two branches differ
+  only in a `TRACE_S`. The URL it builds is then not the one sent — `url` is
+  only read by the credentialed GET arm, and this caller has no credentials, so
+  the path comes from `target_page` instead. It discards the response:
+  `.response = NULL, .response_maxlen = 0`, and
+  [`EZPI_core_http_mbedtls_req()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1729)
+  is called for effect only. And the sun times it returns are
+  [hardcoded](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1731)
+  to 05:48:42 — `+12` for sunset — with a comment reading *"e.g. after valid
+  extraction"*.
+  So every `isSunState` condition in this firmware fires at 05:48:42 or
+  17:48:42 regardless of date, location, or whether the HTTP request succeeded.
+  And the failure handling written below those three assignments cannot run:
+  it clears `curr_tm_day` when hour, minute and second are all zero, but the
+  hour is `5 + (… ? 12 : 0)` and the minute and second are literals, so the
+  condition is false by construction. That belongs with the dead checks
+  catalogued under *Dead null checks* above; it is left here instead because
+  deleting it in isolation would remove the only marker of where this
+  function's error path is supposed to go.
+
+  Not fixed here because it is a feature, not a repair: it needs a JSON parse
+  of the sunrisesunset.io reply, the NVS coordinates actually threaded through,
+  a cache keyed on `tm_mday` that the `curr_tm_day` field already implies, and
+  a decision about what a scene should do when the lookup fails — none of which
+  can be validated without the hardware this audit has no access to. Recording
+  it with the measurements attached is the useful half.
+
+- **`EZPI_parse_http_url()` traces the whole URL at `TRACE_D`, which can carry
+  credentials.** The
+  [`TRACE_D("*source = '%s'", field_value_string)`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L240)
+  prints the action's `url` field verbatim on every successful parse, and
+  `http://user:pass@host/path` is a legal URL that the first arm of the ladder
+  will accept — the `%99[^:]` conversion stops at the colon in `user:pass`, so
+  such a URL parses "successfully" into a nonsense host and still gets printed
+  whole. That is the same class as the three HTTP body dumps now behind
+  `CONFIG_EZPI_HTTP_LOG_PAYLOADS` under *Credentials*, and the fix is probably
+  the same switch.
+
+  Not folded into that change because the blast radius is different and
+  unmeasured. This is in the scenes helper, not `ezlopi_core_http.c`, and the
+  three dumps that switch covers were all in one function whose callers were
+  enumerated first. The surrounding
+  [`TRACE_S` lines for host, port and page](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L241)
+  have the same question hanging over them, and so does every other trace in
+  that file; picking one line out of it would look like the problem had been
+  addressed. What is needed first is a count of how many traces in the scenes
+  sources print a field that came from a cloud or local-API request, and that
+  sweep has not been run.
 
 - **The sweep's other 18 findings were read and deliberately not acted on, and
   one more category appears only once the platform model is right.** The sweep
@@ -7593,7 +7777,7 @@ Listed because a changelog that only mentions what was finished is misleading.
     is exactly that — a BME280 and a TSL2561 both on `gpio_sda:21, gpio_scl:22`,
     `slave_addr` 118 and 57 — though that one is commented out, so the stronger
     evidence is the live HAL:
-    [`EZPI_hal_i2c_master_init()`](ezlopi-hal/ezlopi-hal-i2c/ezlopi_hal_i2c_master.c#L91)
+    [`EZPI_hal_i2c_master_init()`](ezlopi-hal/ezlopi-hal-i2c/ezlopi_hal_i2c_master.c#L90)
     guards installation on `NULL == i2c_master_conf_ptr[channel]` precisely so
     that the second device on a channel reuses the bus the first one brought up,
     and reads and writes then select the device by `->address`. Sharing is
