@@ -1538,7 +1538,7 @@ three BLE-capable targets the image grew 16, 32 and 32 bytes.
   2 KB and nothing is asked for: the `2000` in the call is
   `wait_to_acquired_ms`, the length arrives through `buffer_len`, and it is
   `CONFIG_EZPI_CORE_STATIC_BUFFER_SIZE` — `default 10240` at
-  [`Kconfig.projbuild:528`](ezlopi-main/Kconfig.projbuild#L528), `=10240` in all
+  [`Kconfig.projbuild:565`](ezlopi-main/Kconfig.projbuild#L565), `=10240` in all
   four committed `sdkconfig.defaults.*`, and passed to `EZPI_core_buffer_init()`
   at
   [`ezlopi_core_ezlopi.c:123`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L123).
@@ -5594,12 +5594,16 @@ enumerators — so the live half of this component was never affected.
   on [`EZPI_SERV_WS_SERVER_PORT`](ezlopi-user-config/EZLOPI_USER_CONFIG.h#L148)
   = 17001, and the port reached here is 0 on the parse-failure route or the
   URL's own port on the allocation-failure one. The damage is upstream of the
-  connect. The whole request is built first, and
-  [`TRACE_I`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L209) logs it in
-  full — including any `Authorization` header the action put in `header`. So a
-  request that could never be delivered was assembled and printed anyway, and
-  the resolver was quietly aimed at the loopback interface instead of reporting
-  a missing host.
+  connect. The whole request is built first, and the
+  [`TRACE_I`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L223) below it
+  printed the assembled buffer in full — including any `Authorization` header
+  the action put in `header`, and the `?username=…&password=…` the GET branch
+  writes into the same buffer. So a request that could never be delivered was
+  assembled and printed anyway, and the resolver was quietly aimed at the
+  loopback interface instead of reporting a missing host. That dump is now
+  behind `CONFIG_EZPI_HTTP_LOG_PAYLOADS` — see *Credentials* above — so only
+  the length is printed by default; this entry's fix is the one that stops the
+  request being built at all.
 
 - **The same parse failure also emitted a literal `Host: \r\n`.** In
   `EZPI_parse_http_url()` the header creation and the
@@ -5680,7 +5684,7 @@ enumerators — so the live half of this component was never affected.
   for a check to cover, so a check here would guard a single line and claim to
   be more. And `target_page`, which the same allocation failure can leave NULL
   and which reaches a
-  [`"%s"` in `__ezlopi_http_generate_request()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L651),
+  [`"%s"` in `__ezlopi_http_generate_request()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L691),
   is left alone: it is a separate pre-existing case on a path the new guard
   does not claim to cover, and it is recorded here rather than folded into this
   entry's fix. See *Known gaps*.
@@ -7076,6 +7080,24 @@ enumerators — so the live half of this component was never affected.
   than it is. Links to directories are skipped, because `tests/host/` is linked
   that way deliberately.
 
+  That last limit has since been paid for and then measured, which is why it is
+  still a limit rather than a feature. The HTTP body-logging change under
+  *Credentials* inserted 63 lines into `ezlopi_core_http.c` and moved four
+  citations in older entries; two then pointed at a blank line and at an
+  unrelated `mbedtls_net_free()`. This check passed on all four — correctly, by
+  its own rules — and the four were repaired by hand. The obvious strengthening
+  is to demand that a link whose text is one backticked code token has that
+  token on or near the cited line. Over the 47 citations that qualify, 42 are
+  exact, 4 are within twelve lines and 1 is twenty-one away, so a twelve-line
+  window flags exactly one citation and that one is right: `GATED_SWITCHES` is
+  cited at the table entry, not at the table. The window that spares it is
+  twenty-five lines, which also spares the fourteen-line error that prompted
+  the exercise, and no ambiguity filter separates them — the token to catch
+  appears 7 times in its file, the token to spare 10. So the rule is declined
+  on the numbers, with the numbers written into the docstring. What actually
+  helped was a listing, not a check: enumerate every citation into each file a
+  commit edits, and re-read them.
+
   Proved able to fail three ways before being trusted: against the committed
   `CHANGELOG.md` it exits 1 on that mismatch; against a shadow tree where one
   cited source file has been renamed away it reports the three links that cited
@@ -7220,7 +7242,7 @@ Listed because a changelog that only mentions what was finished is misleading.
   `EZPI_parse_http_url()` calls it twice in a row — so an allocation that
   succeeds for `web_server` and fails for `target_page` passes the new guard
   and reaches
-  [`"GET /%s HTTP/1.1…"`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L651)
+  [`"GET /%s HTTP/1.1…"`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L691)
   with a NULL argument. That is formally undefined; newlib prints `(null)`
   rather than faulting, which is why it has never shown up as a crash.
 

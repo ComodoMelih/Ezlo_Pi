@@ -25,6 +25,28 @@ Nothing short of re-reading each citation can, and that is a person's job, not
 a check's. So this is a check against rot that is mechanically detectable, and
 a green run means the links resolve -- not that the prose is still true.
 
+That limit was tested rather than assumed, after the HTTP body-logging change
+inserted 63 lines into `ezlopi_core_http.c` and silently moved four citations
+in older entries -- two of which then pointed at a blank line and at an
+unrelated `mbedtls_net_free()`. This check passed on all four, correctly, by
+the rules above. The obvious strengthening is to require that a link whose
+text is one backticked code token has that token on or near the cited line.
+Measured over the 47 citations whose text is a bare token: 42 sit on the exact
+line, 4 are within 12 lines, 1 is 21 away. So a +/-12 window would flag exactly
+one citation, and that one is right -- `GATED_SWITCHES` is deliberately cited
+at the table *entry* rather than at the table's declaration. Widening the
+window to clear it reaches 25 lines, which also clears the 14-line error that
+prompted the measurement. And no ambiguity filter separates the two: the token
+to catch occurs 7 times in its file, the token to spare occurs 10. (A first
+cut also flagged three `CONFIG_EZPI_*` citations into Kconfig.projbuild, which
+writes `config EZPI_*` without the prefix -- those are the prose being right
+and the rule being wrong, and stripping the prefix fixes them.)
+
+So the rule is not added, on measurement rather than on principle. What does
+help is mechanical and needs no heuristic: when a commit edits a file, list
+every citation that points into it and re-read them. That is a listing, not a
+judgement, which is why it is not a gate here.
+
 WHAT IT FOUND
 
 One mismatch, on the day it was written:
