@@ -245,22 +245,28 @@ void EZPI_parse_http_url(s_ezlopi_core_http_mbedtls_t *tmp_http_data, l_fields_v
                 tmp_http_data->web_server_maxlen = (uint16_t)EZPI_core_http_mem_malloc(&(tmp_http_data->web_server), host);
                 tmp_http_data->targe_page_maxlen = (uint16_t)EZPI_core_http_mem_malloc(&(tmp_http_data->target_page), page);
                 tmp_http_data->web_port = port;
+
+                /* Appending the Host header belongs in here, not after the
+                ** branch. `host` is `{0}` until one of the arms above fills
+                ** it, so an unparseable URL used to emit a literal
+                ** "Host: \r\n" into the request -- a header no server will
+                ** route and the one part of the request a reader cannot see
+                ** is missing. */
+                int content_size = __ezlopi_core_scenes_then_create_fresh_header(tmp_http_data);
+                if (content_size > 0) // if this characters exsists in the 'tmp_http_data->header'
+                {
+                    // 1. adding 'host' to header-buffer
+                    // TRACE_W("Appending!! webserver -> header");
+                    __ezlopi_core_scenes_then_append_to_header(tmp_http_data, "Host", host);
+                }
+                else
+                {
+                    TRACE_E("Failed Creating header for 'Host:'");
+                }
             }
             else
             {
                 TRACE_E("failed to parse URL");
-            }
-
-            int content_size = __ezlopi_core_scenes_then_create_fresh_header(tmp_http_data);
-            if (content_size > 0) // if this characters exsists in the 'tmp_http_data->header'
-            {
-                // 1. adding 'host' to header-buffer
-                // TRACE_W("Appending!! webserver -> header");
-                __ezlopi_core_scenes_then_append_to_header(tmp_http_data, "Host", host);
-            }
-            else
-            {
-                TRACE_E("Failed Creating header for 'Host:'");
             }
         }
     }

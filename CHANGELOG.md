@@ -5414,6 +5414,147 @@ enumerators — so the live half of this component was never affected.
   no call in the tree does that today, so the branch costs nothing until it is
   needed.
 
+### Scene HTTP requests — [bug]
+
+- **A request with no host is no longer assembled, logged and handed to the
+  resolver.**
+  [`EZPI_core_http_mbedtls_req()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L158)
+  is the one entry point for every outbound request a scene makes, and it used
+  to check its argument and nothing in it:
+
+  ```c
+  if (config)                                   /* was */
+  if (config && config->web_server)             /* is */
+  ```
+
+  `web_server` is the host, and the
+  [`__ezlopi_http_req_via_mbedTLS` call](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L210)
+  passes it on unexamined, from where it reaches `mbedtls_net_connect()` and
+  `getaddrinfo()`.
+
+  **Two of the three callers could arrive with it NULL, by two different
+  routes.** The
+  [`sendHttpRequest` then-method](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods.c#L494)
+  and
+  [`hub.scenes.action.block.test`](ezlopi-cloud/ezlopi-cloud-scenes/ezlopi_cloud_scenes.c#L592)
+  both `memset` the struct to zero and then let
+  [`EZPI_parse_http_url()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L133)
+  fill it. That function allocates `web_server` only inside its
+  `if (succ_parsing)` branch, so a `url` that matches none of the nine arms —
+  or an action carrying no `url` field at all — leaves the field as the zero it
+  was memset to. The second route is subtler and survives a *successful* parse:
+  [`EZPI_core_http_mem_malloc()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L116)
+  returns the size it wanted even when `ezlopi_malloc` returned nothing, so an
+  allocation failure leaves `web_server_maxlen` positive beside a NULL
+  `web_server`, and the
+  [`web_port = port`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L247)
+  on the next line still runs with the real port. The third caller,
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1695),
+  was never at risk: its `web_server` is a `char` array initialised from a
+  literal.
+
+  **What this actually cost, stated precisely, because it is less than the
+  first reading suggests and more than nothing.** lwIP resolves a NULL node
+  name with no `AI_PASSIVE` to the *loopback* address rather than returning an
+  error — `components/lwip/lwip/src/api/netdb.c` in the pinned IDF, under the
+  comment *"service location specified, use loopback address"* — and
+  `mbedtls_net_connect()` zeroes its hints, so it never sets that flag. The
+  connect does not then succeed: the only TCP listener this firmware starts is
+  the websocket server, [`httpd_start()`](ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L810)
+  on [`EZPI_SERV_WS_SERVER_PORT`](ezlopi-user-config/EZLOPI_USER_CONFIG.h#L148)
+  = 17001, and the port reached here is 0 on the parse-failure route or the
+  URL's own port on the allocation-failure one. The damage is upstream of the
+  connect. The whole request is built first, and
+  [`TRACE_I`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L209) logs it in
+  full — including any `Authorization` header the action put in `header`. So a
+  request that could never be delivered was assembled and printed anyway, and
+  the resolver was quietly aimed at the loopback interface instead of reporting
+  a missing host.
+
+- **The same parse failure also emitted a literal `Host: \r\n`.** In
+  `EZPI_parse_http_url()` the header creation and the
+  [`Host` append](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L260)
+  sat *after* the `if (succ_parsing) ... else` rather than inside the success
+  arm, so they ran on both paths — and on the failing path `host` is still the
+  `char host[100] = {0}` it was declared as. Both are now inside the success
+  branch. Nothing downstream lost its header as a result: the other four
+  functions that append to this buffer —
+  [`EZPI_parse_http_content_type()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L274),
+  [`EZPI_parse_http_content()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L300),
+  [`EZPI_parse_http_headers()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L330)
+  and
+  [`EZPI_parse_http_skipsecurity()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L357)
+  — open by calling
+  [`__ezlopi_core_scenes_then_create_fresh_header()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L735)
+  themselves, and that function allocates only when `header` is still NULL and
+  otherwise returns the existing length, so it is idempotent and the move
+  cannot starve a later append.
+
+- **Measured rather than argued.** The nine-arm ladder was copied verbatim into
+  a host program alongside both versions of the header append. On
+  `http://example.com/x` and on `ftp://example.com:21/x` — which reaches the
+  fallback arm — both versions emit `Host: example.com`. On `not a url at all`
+  and on an empty `url`, the old shape emits an **8-byte** header line whose
+  value is empty, `Host: \r\n`, and the new shape appends nothing. The same
+  program then calls `getaddrinfo(NULL, "0", &hints, …)` with the hints
+  `mbedtls_net_connect()` sets, and it returns `rc=0` with two results, `::1`
+  and `127.0.0.1`. That last part corroborates the reading of lwIP's `netdb.c`
+  rather than executing it — the resolver in the harness is glibc's — and the
+  lwIP behaviour itself was established by reading the pinned IDF's source.
+
+  **Why [bug] and not [sec],** on the same reasoning as the `sscanf` entry
+  above: both transports that can deliver a scene action are authenticated, the
+  local websocket server admitting only `hub.offline.login.ui` until the
+  connection is logged in. What keeps it from being merely cosmetic is that
+  `hub.scenes.action.block.test` needs no scene to be stored, so the parse runs
+  on a block taken straight out of the request — and that it was the request
+  *logging*, not the connect, that did the work.
+
+  **The guard is at the chokepoint rather than at the call sites,** which was a
+  deliberate change of plan: the first version of this fix put an
+  `if (tmp_http_data->web_server)` at each of the two exposed callers, and that
+  was replaced once the third caller was read and the allocation-failure route
+  found. One test inside `EZPI_core_http_mbedtls_req()` covers all three
+  callers and any added later, which is the property that matters here — the
+  defect's whole shape was a call site that did not know what the callee
+  required. Nothing was needed at the cloud caller to keep its reply correct:
+  `response` stays NULL and the
+  [`httpAnswerCode` 404](ezlopi-cloud/ezlopi-cloud-scenes/ezlopi_cloud_scenes.c#L609)
+  branch already answers for exactly that case.
+
+  **Verified on four targets, baseline against fixed.** `esp32`, `esp32s2`,
+  `esp32s3` and `esp32c3` all build, and the disassembly of
+  `EZPI_core_http_mbedtls_req` grows by exactly **2 instructions** on every one
+  of them — a load and a branch. That is the evidence that matters here: this
+  fix adds no string literal for the usual rodata grep to find, and a test
+  folded away by the optimiser would leave the function exactly as long as the
+  baseline's. `esp32c3` is RISC-V, so four targets agreeing is two instruction
+  sets agreeing. Image size moves by −16, 0, 0 and −16 bytes — the guard's two
+  instructions are offset by the header-append move, which deletes a
+  duplicated path — and warnings in the two touched files are 0 in both
+  builds. `EZPI_parse_http_url` is in the symbol
+  table of all four, which is not decoration — the scenes helper is wrapped end
+  to end in `#ifdef CONFIG_EZPI_SERV_ENABLE_MESHBOTS` and would otherwise
+  compile to nothing and still link. `ezlopi_core_http.c` carries no such
+  wrapper, so the chokepoint half ships whatever that option is set to.
+
+  **Three things deliberately not done.** There is no host test, and the reason
+  was measured rather than assumed: compiling `ezlopi_core_http.c` under
+  `tests/host/` needs **12** headers that do not exist in this repo, **8** of
+  them `mbedtls/`, so the test would stand in for the TLS stack and stop
+  testing the thing it names. The scenes helper is no better at **7** — which
+  independently confirms the count already recorded in
+  [`check_scanf_field_width.py`](tests/ci/check_scanf_field_width.py)'s
+  docstring. There is also no new CI check: the invariant is one condition in
+  one function, and unlike a missing `scanf` width there is no syntactic class
+  for a check to cover, so a check here would guard a single line and claim to
+  be more. And `target_page`, which the same allocation failure can leave NULL
+  and which reaches a
+  [`"%s"` in `__ezlopi_http_generate_request()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L651),
+  is left alone: it is a separate pre-existing case on a path the new guard
+  does not claim to cover, and it is recorded here rather than folded into this
+  entry's fix. See *Known gaps*.
+
 ### Build and configuration — [infra]
 
 - **Shadowed locals are now a build error, in this project's components and
@@ -6939,6 +7080,33 @@ Listed because a changelog that only mentions what was finished is misleading.
   hand is larger than it looks: the `EZPI_core_factory_info_v3_get_*` family
   alone is called from 116 places, and most of those getters return a freshly
   allocated string that is `NULL` on four separate paths.
+
+- **`target_page` can still be NULL where a `"%s"` reads it, and the guard
+  added one section up does not cover it.** The fix under *Scene HTTP requests*
+  tests `web_server` at the chokepoint, which closes both routes to a NULL
+  host. The sibling field escapes it.
+  [`EZPI_core_http_mem_malloc()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L116)
+  returns the size it wanted even when `ezlopi_malloc` returned nothing, and
+  `EZPI_parse_http_url()` calls it twice in a row — so an allocation that
+  succeeds for `web_server` and fails for `target_page` passes the new guard
+  and reaches
+  [`"GET /%s HTTP/1.1…"`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L651)
+  with a NULL argument. That is formally undefined; newlib prints `(null)`
+  rather than faulting, which is why it has never shown up as a crash.
+
+  Not folded into that fix, for a reason worth stating rather than leaving as
+  an omission. Guarding `target_page` the same way would be wrong: an empty
+  page is legitimate — `http://example.com` with no path takes the seventh arm
+  of the ladder and leaves `page` as `""` — so the request must still be sent,
+  and the test would have to distinguish "not allocated" from "allocated
+  empty". The honest fix is upstream, in `EZPI_core_http_mem_malloc()` itself
+  returning 0 when its allocation failed, so that every one of its callers can
+  tell. It has **10** call sites, **8** of them compiled — the other two are
+  inside the disabled alternate host parser at `#if 0` — and every one of them
+  assigns the result straight into a `*_maxlen` field, so the return value is
+  load-bearing as a capacity at all of them. Changing that contract is a
+  separate change with its own blast radius, and it is not being made as a
+  footnote to a different fix.
 
 - **The sweep's other 18 findings were read and deliberately not acted on, and
   one more category appears only once the platform model is right.** The sweep

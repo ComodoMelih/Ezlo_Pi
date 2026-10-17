@@ -157,7 +157,44 @@ ezlopi_error_t EZPI_core_http_dyna_relloc(char **Buf, int reqSize)
 
 void EZPI_core_http_mbedtls_req(s_ezlopi_core_http_mbedtls_t *config)
 {
-    if (config)
+    /* `web_server` is the host. It is checked here rather than at the call
+    ** sites because a NULL host is never a meaningful request, and because the
+    ** __ezlopi_http_req_via_mbedTLS call below passes it on unexamined: from
+    ** there it reaches mbedtls_net_connect() and getaddrinfo(), and lwIP
+    ** resolves a NULL node name with no AI_PASSIVE to the *loopback* address
+    ** -- netdb.c, "service location specified, use loopback address" -- rather
+    ** than returning an error.
+    **
+    ** What that cost is worth stating precisely, because it is less than it
+    ** first looks and more than nothing. The connect does not succeed: the only
+    ** TCP listener this firmware starts is the websocket server on
+    ** EZPI_SERV_WS_SERVER_PORT (17001), so nothing answers on the port that
+    ** gets used -- 0 when the URL did not parse, or the URL's own port in the
+    ** allocation-failure case below. The damage is upstream of the connect. The
+    ** whole request is assembled first, and the TRACE_I below logs it in full,
+    ** including any Authorization header the caller put in `header`. So a
+    ** request that could never be delivered was still built and printed, and
+    ** the resolver quietly aimed at the loopback interface instead of saying
+    ** the host was missing.
+    **
+    ** Two of the three callers could arrive that way, by two routes. Both build
+    ** the struct with memset(0) and let EZPI_parse_http_url fill it, so a
+    ** sendHttpRequest action -- or a hub.scenes.action.block.test request,
+    ** which is the same parse on a block taken straight off the wire -- whose
+    ** `url` does not parse or is absent leaves the field NULL. The second route
+    ** is a successful parse with a failed allocation: EZPI_core_http_mem_malloc
+    ** returns the size it wanted even when ezlopi_malloc gave it nothing, so
+    ** web_server_maxlen ends up positive beside a NULL web_server, and
+    ** web_port ends up the real port. (The third caller,
+    ** __issunsate_update_sunstate_tm, is safe by construction: its web_server
+    ** is a char array initialised from a literal.)
+    **
+    ** Guarding here covers all three callers and any added later, which a guard
+    ** repeated at each call site would not. It does not cover `target_page`,
+    ** which the same allocation failure can leave NULL and which reaches a
+    ** "%s" in __ezlopi_http_generate_request; that is a separate pre-existing
+    ** case and is recorded in the CHANGELOG rather than fixed here. */
+    if (config && config->web_server)
     {
         int request_len = (config->url_maxlen) + (config->header_maxlen) + (config->content_maxlen) + 100; // [>25] ; for "skipSecurity: true"
         char *request = ezlopi_malloc(__FUNCTION__, sizeof(char) * request_len);
