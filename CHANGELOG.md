@@ -6701,17 +6701,69 @@ Listed because a changelog that only mentions what was finished is misleading.
   (`isprint(ret[0])` before `if (ret)`) and does not find
   `ezpi_provisioning_info_read_func()` (two `strlen()`s before
   `if (NULL != g_provisioning_info_base64)`), even at `--enable=all
-  --check-level=exhaustive`. It also missed one of the thirty trace sites,
-  `ezlopi_core_scenes_v2.c:2091`, which a grep caught once the shape was known.
-  Two out of three is a useful check and a poor guarantee.
+  --check-level=exhaustive`. One of two is a useful check and a poor guarantee.
 
-  The main reason is structural: no include paths are passed, because resolving
-  the IDF header graph per translation unit needs a `compile_commands.json`
-  from a configured build, which would tie the check to a full build and to
-  whichever target was configured last. Without headers the analyser cannot
-  expand IDF macros and loses paths. Running it *with* a real compilation
-  database is the obvious next step and would be the way to find out how much
-  is left.
+  It was also recorded here, and in the check's own docstring, that the
+  analyser missed a thirtieth trace site at `ezlopi_core_scenes_v2.c:2091`
+  which a grep caught afterwards — making the score two of three. That was
+  wrong, and the correction runs in the analyser's favour: line 2091 is inside
+  an `#if 0` opened at
+  [line 1924](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_v2.c#L1924)
+  and commented `[for future use]`, so it is not compiled into any image and
+  cppcheck was right to say nothing about it. The same file holds five live
+  copies of that exact idiom — lines 220, 398, 453, 635 and 708 — and all five
+  are reported, so the analyser is not weak on this shape here. The one it
+  skipped is the one that does not survive preprocessing.
+
+  That refines the headline number too. Of the 69 hunks the fix commit touched,
+  exactly two lines fall inside a non-compiled region, and both are that single
+  site; every other line it changed is live. So 33 of the 34 fixed defects were
+  reachable in a shipped image, 33 is also the number cppcheck reported, and
+  the one site it did not report is the one site that was never built. The fix
+  there is still worth keeping — the block is labelled for future use and the
+  bug would arrive with it — but it should not be counted as a defect that
+  shipped, and the analyser should not be marked down for it.
+
+  The reason is **not** the missing include paths, which is worth saying
+  outright because that was the first explanation written here and it is wrong.
+  It has now been tested instead of reasoned about. Each defect was extracted at
+  the commit before its own fix and scanned both ways — bare, and with the exact
+  `-I`/`-D` flags for that translation unit taken from a real compilation
+  database, 250 of them for the provisioning unit and 70 for the factory-info
+  one. Nothing moves: the provisioning defect is missed **with and without**
+  headers, and the factory-info one is found **both** ways. A header-aware scan
+  of all 159 first-party translation units reports no findings of this class
+  anywhere, so the compilation database that was the "obvious next step" buys no
+  recall at all.
+
+  What the analyser is actually blind to is a guard sitting in a **sibling
+  block** of the one that holds the dereference. Isolated with eight fixtures,
+  changing one variable at a time:
+
+  | Dereference | Guard position | Reported |
+  |---|---|---|
+  | `strlen(p)`, local | same block | yes |
+  | `strlen(p)`, function-static | same block | yes |
+  | `p[0]`, local | same block | yes |
+  | `strlen(p)`, local, nested one level | same block | yes |
+  | `strlen(p)`, function-static, nested | same block | yes |
+  | `strlen(p)`, local | sibling block | **no** |
+  | `strlen(p)`, function-static | sibling block | **no** |
+  | `p[0]`, local | sibling block | **no** |
+
+  So none of the things that look like they ought to matter do: not the storage
+  class, not the nesting depth, and not whether the dereference goes through a
+  library call or a plain subscript. The single predictor is whether the test
+  shares a block with the use. That is exactly the shape of the one it misses —
+  `g_provisioning_info_base64` is assigned and handed to `strlen()` inside
+  `if (NULL == ...)`, and the `if (NULL != ...)` meant to guard it is the next
+  block down. It is the only known instance in the tree, and the only measured
+  cause of a miss.
+
+  The useful consequence is that this says what to search for by hand, which
+  "pass include paths" never did: a pointer tested in one block and used in its
+  sibling. Teaching the check that shape is the open work; `cppcheck` will not
+  do it, so it would mean a check of our own.
 
   The alternatives remain worse. The compiler cannot see this class:
   `-Wnull-dereference` needs the `NULL` to be provable on a path, and here it

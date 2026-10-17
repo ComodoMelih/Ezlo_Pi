@@ -21,11 +21,21 @@ is compiled in: CONFIG_EZPI_UTIL_TRACE_EN is `default y` in Kconfig.projbuild
 and =y in all four committed sdkconfig.defaults.* files. So the strlen(NULL)
 ran, in every shipped image, one line before the test meant to prevent it.
 
-A thirtieth instance of that same idiom, at ezlopi_core_scenes_v2.c:2091, is
-NOT in cppcheck's output and was found by grepping for the trace text once the
-shape was known. It is fixed along with the rest. Keep that in mind when
-reading a green run here: the analyser found 29 of the 30, which is the same
-story as the recall measurement below.
+A thirtieth instance of that same idiom sits at ezlopi_core_scenes_v2.c:2091
+and is NOT in cppcheck's output. It was found by grepping for the trace text
+once the shape was known, and it is fixed along with the rest -- but it is not
+an analyser miss, and this file used to say it was. Line 2091 is inside an
+`#if 0` opened at line 1924 and commented "[for future use]", so it is not
+compiled into any image and cppcheck was right to stay quiet about it. The same
+file holds five live copies of the idiom, at lines 220, 398, 453, 635 and 708,
+and reports all five.
+
+So of the 34 sites fixed, 33 are compiled, and 33 is exactly what cppcheck
+reported: the only one it did not report is the only one that does not survive
+preprocessing. That was measured rather than assumed -- of the 69 hunks in the
+fix commit, the two lines inside a non-compiled region are both at that site.
+The real limit on this check is the one measured below, and it is a different
+shape entirely.
 
 The remaining five findings were four defects of a different shape. Note the
 `scripts.c` one accounts for two of the five findings on its own, which is why
@@ -64,9 +74,12 @@ commit before its fix:
     --enable=all --check-level=exhaustive.
 
 So recall is 1 of 2 on known cases. That is worth stating plainly: a green run
-here does not mean the tree is free of this class. It means the 34 instances
-this did find cannot come back silently, which is the regression the eleven
-files above would otherwise be wide open to.
+here does not mean the tree is free of this class. It means the 34 findings
+this did produce cannot come back silently, which is the regression the
+thirteen files they are spread across would otherwise be wide open to. Those
+counts are re-derived, not inherited: scanning the tree at the commit before
+the fix, with the flags below, gives 34 findings in 13 distinct files, and the
+fix commit touches exactly those 13.
 
 SCOPE, AND WHY ezlopi-components IS OUT OF IT
 
@@ -86,8 +99,37 @@ and that a vendor bump would break.
 No include paths are passed. Resolving the IDF header graph per translation
 unit needs a compile_commands.json from a configured build, which would make
 this check depend on which target was last configured and on a full build.
-Without headers cppcheck cannot expand IDF macros and will miss things -- that
-is part of why recall is 1 of 2 -- but it still found all 34.
+
+That choice costs nothing, and this is the part that was measured rather than
+argued. It is tempting to blame the 1-of-2 recall on the missing headers, and
+this file used to. Both subjects were rescanned with the exact -I/-D flags for
+their own translation unit, taken from a real compilation database -- 250 flags
+for the provisioning unit, 70 for the factory-info one -- and nothing moved:
+the provisioning defect is missed with and without headers, and the
+factory-info one is found both ways. A header-aware scan of all 159 first-party
+translation units reports zero findings of this class anywhere. So the
+compilation database buys no recall; it only buys a dependency on a build.
+
+WHAT IT IS ACTUALLY BLIND TO
+
+A guard sitting in a SIBLING block of the one that holds the dereference.
+Isolated with eight fixtures, one variable changed at a time. Reported when the
+test shares a block with the use -- for a plain local, for a function-static,
+for a p[0] subscript instead of strlen(), and for either of those nested a
+level deeper. Not reported, in all three cases tried, when the test is in the
+next block down: local, function-static, and subscript alike.
+
+So none of the things that look like they ought to matter do: not the storage
+class, not the nesting depth, not library call versus plain subscript. The
+single predictor is whether the test shares a block with the use. That is the
+provisioning defect exactly -- g_provisioning_info_base64 is assigned and
+handed to strlen() inside `if (NULL == ...)`, and the `if (NULL != ...)` meant
+to guard it is the next block down.
+
+The useful consequence is that this says what to look for by hand, which "pass
+include paths" never did: a pointer tested in one block and used in its
+sibling. cppcheck 2.13.0 will not find that shape, so covering it would mean a
+check of our own.
 
 SELF-TEST
 
