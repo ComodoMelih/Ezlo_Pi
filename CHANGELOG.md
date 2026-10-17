@@ -2107,6 +2107,136 @@ of reading the serial console would have revealed it.
   printing the local key the same way, so the new option was modelled on it
   rather than invented.
 
+- **The HTTP bodies this firmware sends and receives were printed to the serial
+  console, and one of them is the device's own SSL private key.** Four
+  whole-body dumps in `ezlopi_core_http.c` are now behind
+  [`CONFIG_EZPI_HTTP_LOG_PAYLOADS`](ezlopi-main/Kconfig.projbuild#L492),
+  **`default n`** — the sibling of
+  [`EZPI_WS_LOG_PAYLOADS`](ezlopi-main/Kconfig.projbuild#L465) above, and
+  modelled on it. Each `#else` keeps the length, so "a request was assembled"
+  and "a reply came back" still reach the console.
+
+  The worst of the four is not the request. It is
+  [`HTTP_EVENT_ON_DATA`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L808),
+  which printed every chunk of every `esp_http_client` response body. Both live
+  callers of that handler are
+  [`EZPI_core_http_get_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L246)
+  calls in `ezlopi_service_webprov.c`, and the second is
+  [provision-sync](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L583)
+  — whose reply `__provision_update()` reads
+  [`ssl_private_key`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L742),
+  [`ssl_shared_key`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L754),
+  [`signing_ca_certificate`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L760)
+  and a fresh
+  [`provision_token`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L698)
+  out of. Those arrive as the body, in PEM, and were printed chunk by chunk.
+  Nobody has to ask for it: provisioning runs by itself on a device that has
+  network and a token, so the device's own private key went to the console on a
+  path no operator triggers. It is the same material the BLE provisioning read
+  was fixed for two entries above — a second route to it.
+
+  The other two live sites are the request/response pair in
+  `EZPI_core_http_mbedtls_req`
+  ([`:223`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L223),
+  [`:233`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L233)), reached by a
+  `sendHttpRequest` scene action. `request` is a credential envelope rather than
+  a string: for a GET,
+  [`__ezlopi_http_generate_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L687)
+  writes `?username=%s&password=%s` straight into that buffer, and any
+  `Authorization` header the action set is
+  [appended](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L724) to the same
+  buffer a few lines later — the credentials being
+  [parsed out of an `EZLOPI_VALUE_TYPE_CREDENTIAL` field](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L376).
+  So this was not "an opaque header might be in there"; a user and password were
+  logged in the clear, in a query string. The response is withheld on the same
+  switch because it is the chosen server's reply, `Set-Cookie` included.
+
+  The fourth,
+  [the per-chunk dump](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L413) in
+  [`EZPI_core_http_post_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L338),
+  is gated for its shape and not for a leak that shipped. That function has no
+  caller in the tree — header declaration and component readme only — and the
+  linker agrees: its `.text`, `.literal` and `.rodata…str1.1` sections are all
+  in the *Discarded input sections* block of the map, in the baseline image as
+  well as this one. It has never been in a shipped binary. It is gated anyway,
+  because it prints a server's response body unconditionally and the first
+  caller to arrive would inherit that.
+
+  **Live in every shipped image, not latent.** This is worth stating because the
+  obvious assumption is wrong twice over. EzloPi's trace macros are not
+  `ESP_LOG`, so `CONFIG_LOG_DEFAULT_LEVEL=0` in the `sdkconfig.defaults.*` files
+  does not gate them;
+  [`ENABLE_TRACE`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L74) comes
+  from `CONFIG_EZPI_UTIL_TRACE_EN`, which is `=y` in **4 of 4** of those files.
+  And `trace_color_print()` does no severity filtering at all — the only filter
+  is in the registered serial upcall
+  ([`:307`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L307)), which
+  [`EZPI_init()` defeats on every boot](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L119)
+  by raising `serial_log_severity` to `TRACE` after reading NVS. So a
+  severity-3 `TRACE_I` printed regardless of what anyone configured.
+
+  The exposure is the UART and only the UART, which is worth being exact about
+  rather than overstating. Cloud log severity is capped at `WARNING` in both
+  setters ([`:142`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L142),
+  [`:276`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L276)) and
+  `EZPI_core_send_cloud_log` gates on it
+  ([`:211`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L211)), so these
+  traces never left the device by that route.
+
+  **Testing, all four targets.** The fix removes three format strings from
+  rodata and adds one, so the binary can be asked directly rather than being
+  trusted because it compiled. Baseline is `git archive HEAD`; both trees built
+  for esp32, esp32s2, esp32s3 and esp32c3.
+
+  | in the linked `.bin` | baseline | fixed |
+  |---|---|---|
+  | `request[capacity: %d]:` | 1 | 0 |
+  | `*result[%p] =>` | 1 | 0 |
+  | `HTTP_EVENT_ON_DATA, len=%d, data:` | 1 | 0 |
+  | `…is off` (the withheld messages) | 0 | 3 |
+
+  Identical on all four. Three and not four withheld messages because the
+  fourth is in the discarded function, which is how that claim above was
+  checked rather than assumed. The image grows 128–144 bytes. No new warning in
+  `ezlopi_core_http.c` on any target. The per-chunk site's format string is
+  `"%.*s"` — four bytes shared with every other user of that conversion — so it
+  is not separable in rodata and is not claimed to be; it is covered by the
+  compile and by the source-level check.
+
+  A Kconfig-gated fix has a failure mode that looks exactly like success: if the
+  macro name in the `.c` did not match the one in `Kconfig.projbuild`, the
+  `#ifdef` would simply be false, the `#else` would compile, the dumps would
+  vanish from rodata, and every row above would read correctly — leaving a
+  switch that can never be turned on. Two things rule that out. The generated
+  `sdkconfig` mentions the option in the fixed tree and not in the baseline
+  (`# CONFIG_EZPI_HTTP_LOG_PAYLOADS is not set`), and a fifth build turned it
+  **on**: the three dumps come back, the withheld message goes, and the image
+  returns to exactly the baseline's 1683856 bytes.
+
+  **What the CI check does and does not do here.**
+  [`GATED_SWITCHES`](tests/ci/check_no_secret_logging.py#L210) now pins the new
+  option at `default n`, so flipping it in `Kconfig.projbuild` fails the check
+  until someone edits the table — which is the moment to have the argument. The
+  pin was seen to fail: with the expected value mutated to `'y'`, the check
+  exits 1 with the drift message.
+
+  Its pattern matching was deliberately *not* extended, and the reason is
+  recorded in the file's own
+  [LIMITS](tests/ci/check_no_secret_logging.py#L84) section. All four buffers
+  are named after the transport rather than the contents — `request`,
+  `config->response`, `curr_chunk->ptr`, `evt->data` — and the check passed on
+  every one of them before this change. No rule that works on identifiers
+  reaches `evt->data`. `payload` in `SECRET_SUBSTRINGS` covers exactly one such
+  buffer, the one the websocket server happens to call `payload`; it is a name,
+  not a rule. These four were found by reading the provisioning path and asking
+  what was in the body.
+
+  Scope note: the backlog item that prompted this named one site, and described
+  it as a request dump that "would include any `Authorization` header". Grepping
+  the file found four of the same class, and following the fourth to
+  `__provision_update` found the private key. Three of the four were not in the
+  item.
+
 - **An unparseable cloud message was exported to the OpenTelemetry collector
   with its body attached.** `ezlopi_service_webprov.c` passed
   `rx_message->payload` to `TRACE_OTEL` on the `method == NULL` path. Now

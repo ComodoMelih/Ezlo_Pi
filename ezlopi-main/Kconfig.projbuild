@@ -489,6 +489,43 @@ menu "EzloPi User Config"
             macros are not ESP_LOG, so CONFIG_LOG_DEFAULT_LEVEL does not
             apply to them.
 
+    config EZPI_HTTP_LOG_PAYLOADS
+        bool "Print HTTP request and response bodies to the serial console"
+        default n
+        help
+            Logs the full body of the HTTP traffic that goes through
+            ezlopi-core-http: the request this firmware assembles, and the
+            response it gets back. The length is logged either way, so with
+            this off you still see that a request was built and that a reply
+            arrived.
+
+            Off by default because every one of the four sites it gates can
+            carry a credential:
+
+              the assembled request    a sendHttpRequest scene action with a
+                                       credential field puts user and password
+                                       in the GET query string, and any
+                                       Authorization header the action sets is
+                                       in the same buffer
+              that request's response  whatever the server the action chose
+                                       sends back, including Set-Cookie
+              esp_http_client bodies   the provision-sync reply carries this
+                                       device's ssl_private_key, ssl_shared_key,
+                                       signing_ca_certificate and a fresh
+                                       provision_token
+
+            The last one is the one that matters. Provisioning runs
+            unattended on a device that has network and a token, so with
+            these dumps on, the device's own SSL private key is printed in
+            PEM on the serial console without anybody asking for it.
+
+            This is not the switch for the local websocket API; that is
+            EZPI_WS_LOG_PAYLOADS above. Neither is gated by the log level:
+            EzloPi's trace macros are not ESP_LOG, so
+            CONFIG_LOG_DEFAULT_LEVEL does not apply to them, and
+            EZPI_init() raises the serial severity to TRACE on every boot
+            regardless of what NVS holds.
+
     config EZPI_OFFLINE_LOGIN_VERIFY_USER_ID
         depends on EZPI_LOCAL_WEBSOCKET_SERVER
         bool "Verify the user id on offline login as well as the key"

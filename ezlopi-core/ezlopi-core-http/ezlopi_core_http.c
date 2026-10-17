@@ -206,11 +206,36 @@ void EZPI_core_http_mbedtls_req(s_ezlopi_core_http_mbedtls_t *config)
             __ezlopi_http_generate_request(config, &request, request_len);
             // Ready-Up 'request' buffer
             TRACE_D("Minimum free heap size: %d bytes\n", esp_get_minimum_free_heap_size());
+
+            /* `request` is a credential envelope, not just a string. A
+            ** sendHttpRequest action carrying a credential field reaches
+            ** __ezlopi_http_generate_request, which for a GET writes
+            ** "?username=%s&password=%s" straight into this buffer, and any
+            ** Authorization header the action set is appended to the same
+            ** buffer a few lines later. Printing it printed both. The
+            ** response is withheld on the same switch because it is the
+            ** chosen server's reply, Set-Cookie included.
+            **
+            ** The length survives either way: that a request was assembled
+            ** and that a reply came back are the two facts this trace was
+            ** really being read for. */
+#ifdef CONFIG_EZPI_HTTP_LOG_PAYLOADS
             TRACE_I("request[capacity: %d]:\n\n%s[%d]", request_len, request, strlen(request));
+#else
+            TRACE_I("request[capacity: %d, len: %d] (body withheld; "
+                    "CONFIG_EZPI_HTTP_LOG_PAYLOADS is off)",
+                    request_len, (int)strlen(request));
+#endif
             __ezlopi_http_req_via_mbedTLS(config->web_server, (config->web_port), request, &(config->response)); // (  web_server['host'] , port_num , http_request , *response_ptr] )
             if (config->response)
             {
+#ifdef CONFIG_EZPI_HTTP_LOG_PAYLOADS
                 TRACE_S("*result[%p] =>\n[%d]\n%s", config->response, strlen(config->response), config->response);
+#else
+                TRACE_S("*result[%p][len: %d] (body withheld; "
+                        "CONFIG_EZPI_HTTP_LOG_PAYLOADS is off)",
+                        config->response, (int)strlen(config->response));
+#endif
             }
 
             ezlopi_free(__FUNCTION__, request);
@@ -375,7 +400,22 @@ s_ezlopi_http_data_t *EZPI_core_http_post_request(const char *cloud_url, const c
                         while (curr_chunk)
                         {
                             strcat(_tmp_buffer, curr_chunk->ptr);
+                            /* Same switch as the other body dumps in this
+                            ** file. This one has no caller in the tree today
+                            ** -- EZPI_core_http_post_request is declared in
+                            ** the header and used only in the component
+                            ** readme -- so it is gated for the shape, not for
+                            ** a reachable leak. The shape is what matters: it
+                            ** prints a server's response body unconditionally,
+                            ** and the first caller to arrive would inherit
+                            ** that. */
+#ifdef CONFIG_EZPI_HTTP_LOG_PAYLOADS
                             TRACE_D("%.*s", curr_chunk->len, curr_chunk->ptr);
+#else
+                            TRACE_D("chunk[len: %d] (body withheld; "
+                                    "CONFIG_EZPI_HTTP_LOG_PAYLOADS is off)",
+                                    (int)curr_chunk->len);
+#endif
                             curr_chunk = curr_chunk->next;
                         }
 
@@ -747,7 +787,30 @@ static esp_err_t __ezlopi_http_event_handler(esp_http_client_event_t *evt)
     }
     case HTTP_EVENT_ON_DATA:
     {
+        /* This is the one that was worth finding. Both live users of this
+        ** event handler are EZPI_core_http_get_request calls in
+        ** ezlopi_service_webprov.c, and the second of them is provision-sync
+        ** -- whose reply __provision_update() reads ssl_private_key,
+        ** ssl_public_key, ssl_shared_key, signing_ca_certificate and a new
+        ** provision_token out of. Those arrive here as the body, in PEM, and
+        ** this line printed every chunk of them.
+        **
+        ** Nobody has to ask for it. Provisioning runs by itself on a device
+        ** that has network and a token, so the device's own SSL private key
+        ** went to the serial console on a path no operator triggers. That is
+        ** the same material the BLE provisioning read was fixed for; this is
+        ** a second route to it, and a name-based check cannot see it, because
+        ** the argument is called `evt->data`.
+        **
+        ** The length stays, which is what the Content-Length bookkeeping
+        ** below is about anyway. */
+#ifdef CONFIG_EZPI_HTTP_LOG_PAYLOADS
         TRACE_D("HTTP_EVENT_ON_DATA, len=%d, data: %.*s\r\n", evt->data_len, evt->data_len, (char *)evt->data);
+#else
+        TRACE_D("HTTP_EVENT_ON_DATA, len=%d (body withheld; "
+                "CONFIG_EZPI_HTTP_LOG_PAYLOADS is off)",
+                evt->data_len);
+#endif
 
         s_rx_data_t *my_data = (s_rx_data_t *)evt->user_data;
         if (my_data)

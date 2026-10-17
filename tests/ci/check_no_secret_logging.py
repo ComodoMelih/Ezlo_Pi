@@ -81,6 +81,18 @@ thing the %s consumes". Pairing them up would need real argument parsing for
 no benefit, since there is no good reason to pass a bare credential to a
 logging call in any argument position.
 
+The sharper version of that limit is a whole-body dump whose buffer is named
+after the transport rather than the contents. Four sites in ezlopi_core_http.c
+printed HTTP bodies through `request`, `config->response`, `curr_chunk->ptr`
+and `evt->data`, and this check passed on all four, because none of those
+names says "credential" -- yet one of them is the provision-sync reply, which
+carries the device's SSL private key in PEM. `payload` in SECRET_SUBSTRINGS
+covers exactly one such buffer, the one the websocket server happens to call
+payload; it is a name, not a rule. All four are now behind
+CONFIG_EZPI_HTTP_LOG_PAYLOADS, which this file pins, but they were found by
+reading the provisioning path and asking what was in the body -- not by this
+check, and not by a check of any shape that works on identifiers.
+
 A variable named exactly `key` is not matched, only compounds like local_key
 and private_key. Bare `key` was tried and produced three false positives and
 no true ones: ezlopi_core_mdns.c logs `mdns_context->key`, a TXT-record key
@@ -185,6 +197,17 @@ GATED_SWITCHES = {
     # local API key in params.token, so turning this on prints the key on
     # every connection attempt by anything.
     'CONFIG_EZPI_WS_LOG_PAYLOADS': 'n',
+    # Prints the bodies of the HTTP traffic handled by ezlopi-core-http: the
+    # request this firmware assembles, its response, and every body chunk
+    # esp_http_client delivers. Default n: the provision-sync reply is one of
+    # those bodies, and __provision_update() reads this device's
+    # ssl_private_key, ssl_shared_key, signing_ca_certificate and a new
+    # provision_token out of it.
+    #
+    # This entry pins the default; it does not grant an exemption that the
+    # scan would otherwise withhold. None of the four gated calls names a
+    # secret in its arguments -- see LIMITS.
+    'CONFIG_EZPI_HTTP_LOG_PAYLOADS': 'n',
 }
 
 KCONFIG = os.path.join('ezlopi-main', 'Kconfig.projbuild')
