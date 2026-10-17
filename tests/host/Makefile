@@ -674,6 +674,36 @@ $(BUILD)/test_httpresp: test_httpresp.c $(HTTP_DIR)/ezlopi_core_http_buf.c | $(B
 # end in that #ifdef, so without the macro it preprocesses to nothing, the link
 # still succeeds for as long as the test references no symbol from it, and the
 # suite would report a pass having compiled an empty object.
+#
+# -fno-sanitize-recover=undefined, which most rules here do not carry. It is
+# here for one operation: EZPI_core_suntime_backoff_delay's
+# `EZPI_SUNTIME_BACKOFF_BASE_SEC << (step - 1)`. The two guards in front of it
+# -- step <= 0 rejected, step above the maximum saturated down -- exist only to
+# keep that shift count inside 0..5, so the thing this rule has to be able to
+# detect is a shift count outside it.
+#
+# It was added because the mutation sweep needed it, and that is the honest
+# reason. Loosening `step <= 0` to `step < 0` makes delay(0) evaluate 60 << -1.
+# gcc's default UBSan handler prints "runtime error: shift exponent -1 is
+# negative" and carries on, and on this host the shift then yields 0 -- which is
+# the answer the test asserts for step 0, so every check passed and the suite
+# exited 0 with a sanitizer finding in its own output. The mutant survived a
+# green run. That is the failure mode the flag removes: see probe/bomut.py,
+# mutant D1.
+#
+# Scoped to the subject's own object file, not to SUNTIME_CFLAGS. Following the
+# precedent set by test_cjsongpio further down, and for the same stated reason
+# -- turning it on for all 27 binaries is probably right and is not something
+# to do as a side effect of one change. Narrower than that rule, though, because
+# cjext.c is compiled with these flags too: -fno-sanitize-recover changes the
+# instrumentation in whichever translation unit carries it, so putting it on
+# cjext.c would make any pre-existing recoverable finding in 2500 lines of JSON
+# parser abort a suite that passes today. The shift is in the subject. The flag
+# goes on the subject.
+#
+# Empty when SANITIZERS is overridden away, so a toolchain without them still
+# builds this rule rather than failing on a flag it cannot honour.
+SUNTIME_SAN := $(if $(SANITIZERS),-fno-sanitize-recover=undefined,)
 SUNTIME_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
                   -I$(SCENES_DIR) -I$(ERRORS_DIR) -I$(CJEXT_DIR) \
                   -I$(CONSTANTS_DIR) \
@@ -683,7 +713,7 @@ $(BUILD)/test_suntime: test_suntime.c $(SCENES_DIR)/ezlopi_core_scenes_suntime.c
                        $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
                        $(CJEXT_DIR)/cjext.c | $(BUILD)
 	$(CC) $(SUNTIME_CFLAGS) -c -o $(BUILD)/test_suntime_main.o test_suntime.c
-	$(CC) $(SUNTIME_CFLAGS) -c -o $(BUILD)/suntime_subject.o $(SCENES_DIR)/ezlopi_core_scenes_suntime.c
+	$(CC) $(SUNTIME_CFLAGS) $(SUNTIME_SAN) -c -o $(BUILD)/suntime_subject.o $(SCENES_DIR)/ezlopi_core_scenes_suntime.c
 	@nm $(BUILD)/suntime_subject.o | grep -q ' T EZPI_core_suntime_parse_clock' \
 	  || { echo "ezlopi_core_scenes_suntime.c compiled to an empty object -- CONFIG_EZPI_SERV_ENABLE_MESHBOTS is not reaching it"; exit 1; }
 	$(CC) $(SUNTIME_CFLAGS) -c -o $(BUILD)/suntime_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c

@@ -17,6 +17,7 @@
 
 #ifdef CONFIG_EZPI_SERV_ENABLE_MESHBOTS
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "ezlopi_core_errors.h"
 
@@ -172,6 +173,144 @@ extern "C"
      * @return EZPI_SUCCESS unless an input was out of range.
      */
     ezlopi_error_t EZPI_core_suntime_shift(int sun_hour, int sun_min, int sun_sec, int offs_sec, int *hour, int *min, int *sec);
+
+    /* ***********************************************************************
+     * HOW OFTEN A FAILED LOOKUP IS RETRIED
+     *
+     * The three functions above decide what a reply means. These three decide
+     * whether to ask again, and they are here for the same reason: the policy
+     * is a function of a day number and a time of day, so it can be tested,
+     * while the thing it governs is a TLS connection that cannot.
+     *
+     * The cost of not having them was measured, not guessed.
+     * __scenes_loop calls ezpi_scene_proto_thread(scene_node, 1000), and the
+     * protothread's PT_WAIT_UNTIL releases on
+     * (xTaskGetTickCount() - ctx->curr_ticks) > routine_delay_ms -- so every
+     * when-condition is re-evaluated about once a second. A failed suntime
+     * lookup left no state behind to throttle on: __issunsate_update_sunstate_tm
+     * cleared curr_tm_day on entry, ISSUNSTATE_get_suntime saw it still clear,
+     * deleted the whole user_arg block, and the next evaluation allocated a
+     * fresh zeroed one and started over. A hub that could not reach
+     * api.sunrisesunset.io therefore opened in the order of 86,400 TLS
+     * connections a day, per isSunState scene, indefinitely.
+     *
+     * WHY A TIMESTAMP AND NOT AN ATTEMPT COUNT
+     *
+     * "Stop after N tries today" is the obvious shape and it is worse than no
+     * backoff at all for the case that actually happens. A hub reboots, the
+     * scene starts evaluating before DHCP and DNS are up, and N attempts are
+     * spent in N seconds -- after which the scene is finished for the day even
+     * though the network came up a minute later. The budget has to be spent
+     * over the day, which means remembering when rather than how many.
+     *
+     * The ladder is 60 s, 2, 4, 8, 16 and then 32 minutes, held there: exactly
+     * 50 attempts across a full day of outage instead of 86,400, and the first
+     * retry still inside a minute so a hub whose network arrives late is not
+     * punished for it.
+     *
+     * That 50 is counted, not estimated. This comment said "about 48" until
+     * test_backoff_a_full_day_of_outage was written, which runs the real loop
+     * over all 86,400 seconds and reports the number it actually got; the
+     * estimate was two low. Five attempts land while the ladder is still
+     * climbing -- at 0, 60, 180, 420 and 900 seconds -- and the remaining 45
+     * are 1,860 plus a multiple of 1,920.
+     *
+     * WHAT IT COSTS
+     *
+     * A configuration failure -- no coordinates stored, an unreadable offset
+     * field -- backs off on the same ladder, because nothing here can tell it
+     * apart from an outage. So after hub.coordinates.set on a hub that has been
+     * failing for a while, the scene can take up to 32 minutes to pick the
+     * coordinates up. That is the deliberate trade: a bounded one-off delay
+     * after a setup action, against a permanent connection storm.
+     *
+     * THE CLOCK IS THE CALLER'S, AND IT MAY BE WRONG
+     *
+     * now_sod is derived from the same `struct tm` the when-condition is being
+     * evaluated against, so before SNTP has synced it is whatever the RTC says.
+     * That is survivable in both directions. A clock that jumps forward makes
+     * next_attempt_sod look due and costs one early attempt; a clock that jumps
+     * backward delays one attempt by at most the remainder of the day, and the
+     * day change clears the state outright. Neither can wedge a scene, because
+     * tm_mday moving at all is a reset.
+     * *********************************************************************** */
+
+/* 60 s doubling six times: 60, 120, 240, 480, 960, 1920. */
+#define EZPI_SUNTIME_BACKOFF_BASE_SEC 60
+#define EZPI_SUNTIME_BACKOFF_MAX_STEP 6
+
+    /**
+     * How long a failed lookup waits before the next one.
+     *
+     * Kept separate from the state so the ladder itself can be asserted, and
+     * so the trace can print the delay it is about to impose rather than
+     * leaving a reader to work it out from the step number.
+     *
+     * @param step  1 for the first failure; 0 means no failure yet
+     * @return seconds; 0 for step 0, and clamped to the top of the ladder for
+     *         any step above EZPI_SUNTIME_BACKOFF_MAX_STEP
+     */
+    int EZPI_core_suntime_backoff_delay(int step);
+
+    /* The retry state for one isSunState scene. Embedded in s_sunstate_data_t,
+    ** which is the block ISSUNSTATE_get_suntime keeps in
+    ** when_block->fields->user_arg -- so it lives exactly as long as the scene
+    ** does and is zeroed with the rest of it on allocation. All-zero means
+    ** "nothing attempted", which is the correct starting state. */
+    typedef struct s_suntime_backoff
+    {
+        /* The day this state describes. A different tm_mday discards it: a new
+        ** day needs a new suntime regardless, so there is nothing to carry
+        ** over, and a multi-day outage restarts at 60 s each midnight. */
+        int attempt_tm_day;
+
+        /* Seconds since midnight before which no attempt is made. May sit past
+        ** the end of the day -- 86,399 plus the top of the ladder is 88,319 --
+        ** and that is not clamped on purpose: "not again today" is a correct
+        ** answer, and the day rollover is what ends it. */
+        int next_attempt_sod;
+
+        /* Consecutive failures today, saturating at
+        ** EZPI_SUNTIME_BACKOFF_MAX_STEP. 0 after a success. */
+        int backoff_step;
+    } s_suntime_backoff_t;
+
+    /**
+     * Whether the lookup should run now.
+     *
+     * NOT A PURE PREDICATE -- it writes to `bo`. A tm_mday that differs from
+     * the stored one resets the state here, because this is the only function
+     * of the three the caller is guaranteed to reach on every evaluation, and
+     * a reset that depended on the caller remembering to ask for it would be
+     * missed on exactly the path that matters.
+     *
+     * A NULL `bo` returns true. There is no state to throttle on, and refusing
+     * the lookup because the struct is missing would turn an allocation problem
+     * into a scene that never fires.
+     *
+     * @param bo       retry state; may be NULL
+     * @param tm_mday  today's day-of-month, 1-31
+     * @param now_sod  seconds since midnight, 0-86399
+     */
+    bool EZPI_core_suntime_should_attempt(s_suntime_backoff_t *bo, int tm_mday, int now_sod);
+
+    /**
+     * Record that the lookup just failed, and set when the next one may run.
+     *
+     * Self-contained: it takes the day rather than assuming
+     * EZPI_core_suntime_should_attempt ran first, so the two cannot disagree
+     * about which day the state belongs to.
+     */
+    void EZPI_core_suntime_note_failure(s_suntime_backoff_t *bo, int tm_mday, int now_sod);
+
+    /**
+     * Record that the lookup succeeded, clearing the backoff.
+     *
+     * The day is deliberately not touched. It is set by
+     * EZPI_core_suntime_should_attempt on the evaluation that led here, and a
+     * step of 0 already means nothing is being withheld.
+     */
+    void EZPI_core_suntime_note_success(s_suntime_backoff_t *bo);
 
 #ifdef __cplusplus
 }

@@ -107,6 +107,16 @@ typedef struct s_sunstate_data
      * worst one evaluation later than it could have been. */
     int moment_tm_day;
     bool moment_valid;
+
+    /* How long to wait before asking api.sunrisesunset.io again after a failed
+     * lookup. See the policy section in ezlopi_core_scenes_suntime.h; the short
+     * version is that a when-condition is evaluated about once a second, and
+     * before this field a hub that could not reach the service opened one TLS
+     * connection per second per scene, forever.
+     *
+     * This is the field that required the failure path below to stop deleting
+     * the block it lives in. */
+    s_suntime_backoff_t backoff;
 } s_sunstate_data_t;
 
 /*******************************************************************************
@@ -530,6 +540,19 @@ uint8_t ISSUNSTATE_get_suntime(l_scenes_list_v2_t *scene_node, l_fields_v2_t *cu
         s_sunstate_data_t *user_data = (s_sunstate_data_t *)(scene_node->when_block->fields->user_arg);
         if (user_data && (info->tm_mday != user_data->curr_tm_day))
         {
+            /* Before the trace, not after: the trace below ran once a second
+            ** for as long as a lookup kept failing, which is the same flood in
+            ** the log that the TLS attempts were on the wire. */
+            const int now_sod = (info->tm_hour * 3600) + (info->tm_min * 60) + info->tm_sec;
+            if (false == EZPI_core_suntime_should_attempt(&(user_data->backoff), info->tm_mday, now_sod))
+            {
+                /* Silent. The attempt that started the backoff said what was
+                ** wrong and when the next one would be; repeating it every
+                ** second would bury the rest of the log, which is where
+                ** whatever actually broke is going to be found. */
+                return 0;
+            }
+
             TRACE_S("curr_day = [%d] ; [%dth]", info->tm_mday, user_data->curr_tm_day);
             char *tmp_str = curr_field->field_value.u_value.value_string;
             size_t tmp_str_len = strlen(tmp_str);
@@ -544,14 +567,61 @@ uint8_t ISSUNSTATE_get_suntime(l_scenes_list_v2_t *scene_node, l_fields_v2_t *cu
                 (0 == user_data->sunstate_mode) ||
                 (ISSUNSTATE_UNDEFINED == user_data->tmoffs_type)) // if the curr_day or sunstate or offset is not set properly;
             {
-                TRACE_E(" API extraction unsuccesful... Reseting user_args");
-                /* This used to free the block and leave the pointer in place,
-                 * so the next evaluation dereferenced freed memory and scene
-                 * teardown freed it a second time. Release through the tagged
-                 * helper, which also clears the slot. */
-                EZPI_core_scenes_delete_field_user_arg(scene_node->when_block->fields);
+                EZPI_core_suntime_note_failure(&(user_data->backoff), info->tm_mday, now_sod);
+
+                /* The block is kept now, and that is the whole point: a
+                 * deleted block takes the backoff state with it, so the next
+                 * evaluation allocates a fresh zeroed one and retries from
+                 * nothing. Deleting it is what made this unthrottleable.
+                 *
+                 * Keeping it is behaviour-identical because of what the readers
+                 * test. Every one of them -- ISSUNSTATE_get_offs_tmval,
+                 * ISSUNSTATE_eval_range and ISSUNSTATE_check_flag_result --
+                 * gates on `0 != user_data->sunstate_mode`, so clearing that
+                 * one field makes them all skip this scene exactly as a NULL
+                 * user_arg did. It is safe to clear because it is not
+                 * configuration: line ~536 above re-reads it from
+                 * curr_sunstate_mode on every re-entry.
+                 *
+                 * moment_valid goes with it. No reader can reach it while
+                 * sunstate_mode is 0, so this is not load-bearing -- but
+                 * leaving a `true` next to a defined_moment computed from a
+                 * suntime that has since been discarded is an invariant waiting
+                 * to be broken by the next person to add a reader.
+                 *
+                 * (Before either of those, this used to free the block and
+                 * leave the pointer in place, so the next evaluation
+                 * dereferenced freed memory and scene teardown freed it a
+                 * second time.)
+                 *
+                 * ONE CASE CHANGES MORE THAN THE RATE, AND IT IS THE WORST ONE.
+                 * Of the three conditions above, two leave curr_tm_day at 0 and
+                 * so stay on the ladder. The third -- tmoffs_type UNDEFINED,
+                 * meaning the offset field holds something that is not
+                 * "intime", "before" or "after" -- is reached with curr_tm_day
+                 * already set to today, because the suntime was fetched before
+                 * the offset string was looked at. The test above it is then
+                 * false until midnight, so this scene goes quiet for the day
+                 * rather than retrying at all.
+                 *
+                 * That is correct and it is the point. Retrying cannot fix a
+                 * malformed offset field, and the old code retried it hardest:
+                 * it deleted the block, the next evaluation allocated a fresh
+                 * one with curr_tm_day back at 0, and the hub opened a TLS
+                 * connection to api.sunrisesunset.io every second, indefinitely,
+                 * because of a typo in a scene field. Fixing the field requires
+                 * a scene edit, and EZPI_core_scenes_delete_when_blocks tears
+                 * the field list down -- user_arg with it -- so the correction
+                 * is picked up on the next evaluation and not at midnight. */
+                user_data->sunstate_mode = 0;
+                user_data->moment_valid = false;
+
+                TRACE_E("isSunState lookup failed; next attempt in %d s (failure %d)",
+                        EZPI_core_suntime_backoff_delay(user_data->backoff.backoff_step),
+                        user_data->backoff.backoff_step);
                 return 0;
             }
+            EZPI_core_suntime_note_success(&(user_data->backoff));
             TRACE_W("update_day = [%d][%dth] , offset[%d] : intime=0,before=1,after=2,undefined=3 , SunState[%d] : sunrise=1,sunset=2", info->tm_mday, user_data->curr_tm_day, user_data->tmoffs_type, user_data->sunstate_mode);
         }
     }
@@ -1784,11 +1854,16 @@ static uint8_t __isdate_find_nth_week_curr_month(struct tm *info)
  * `curr_tm_day` is cleared first and set only once a time has actually been
  * parsed, so every way out of this function that does not produce one leaves
  * the caller's "no data for today" signal set. The caller -- ISSUNSTATE_get_suntime
- * -- re-enters here whenever `curr_tm_day` differs from today, which means a
- * failed lookup is retried on the next condition evaluation rather than
- * remembered. That is deliberate for a transient network failure and is a
- * known gap for a persistent one: there is no backoff, so a hub that cannot
- * reach the service will ask again every time the scene is evaluated.
+ * -- re-enters here whenever `curr_tm_day` differs from today, so a failed
+ * lookup is retried rather than remembered.
+ *
+ * How often it is retried is not decided here. The caller asks
+ * EZPI_core_suntime_should_attempt first and records the outcome either way, so
+ * a persistent failure walks a 60 s to 32 min ladder instead of being re-asked
+ * on every one-second evaluation. This function is free to fail as often as it
+ * needs to; what it must keep doing is clearing `curr_tm_day` on entry and
+ * setting it only once a time has actually been parsed, because that is the
+ * signal the caller reads to tell a failure from a success.
  */
 static void __issunsate_update_sunstate_tm(int tm_mday, s_sunstate_data_t *user_data)
 {

@@ -17,6 +17,17 @@ Severity markers:
 - **[feat]** — new capability. Off by default unless an entry says otherwise.
 - **[infra]** — build, test, packaging or documentation.
 
+A note on one kind of reference, because it looks like a path in this tree and
+is not. Several entries below attribute a measurement to a script named
+`probe/something` — `probe/hurestore.sh`, `probe/bomut.py`. Those live in the
+audit working directory, a sibling of this checkout, and are deliberately not
+committed: each one is a throwaway written to take a single measurement, and
+they hardcode absolute `/mnt/c/...` paths and a WSL invocation that is specific
+to the machine this work was done on. They are named anyway, so that a number
+quoted in prose says which run produced it rather than appearing from nowhere.
+Anything meant to be re-run by someone else is in [`tests/ci/`](tests/ci/) or
+[`tests/host/`](tests/host/) and is wired into `make test` or the gate set.
+
 ---
 
 ## Unreleased
@@ -945,7 +956,7 @@ None of these have been exercised on physical hardware; see Known gaps.
 
 - **"20 minutes before sunrise" fired forty minutes after it, and "30 seconds
   after" fired six hours later.** The offset half of an isSunState trigger —
-  [`__issunstate_add_offs`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1910)
+  [`__issunstate_add_offs`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1985)
   — had seven defects in it. Its companion entry under *Scene HTTP requests*
   fixed the half that fetches the suntime; this is the half that moves it, and
   until now it moved it to the wrong place for every offset anybody would
@@ -993,7 +1004,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   **Nothing was range-checked, and `strtoul` accepts a leading minus.** An
   out-of-range result is not a loud failure here. The moment is compared to the
   wall clock *for equality* by
-  [`ISSUNSTATE_check_mdrn`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L658),
+  [`ISSUNSTATE_check_mdrn`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L728),
   so a trigger at 81:39:39 is not an error — it is a scene that sits in the
   list, reports nothing, and never fires:
 
@@ -1035,7 +1046,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   survived in shipped firmware.
 
   **Two more were in the caller, not the parser.**
-  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L560)
+  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L630)
   used "is `defined_moment` all-zero?" as its do-this-once test, and that
   sentinel cannot do either job it was given. It cannot mean *already done*,
   because 00:00:00 is a time a real offset produces, so a scene whose moment
@@ -1097,9 +1108,9 @@ None of these have been exercised on physical hardware; see Known gaps.
   `curr_tm_day`, which only advances once a suntime has actually been read,
   means the moment is never computed from yesterday's suntime. And both places
   that compare the moment to the clock —
-  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L636)
+  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
   and
-  [`ISSUNSTATE_check_flag_result`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L703)
+  [`ISSUNSTATE_check_flag_result`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L773)
   — now require `moment_valid` first, because the struct's own zeroes read as
   00:00:00, a time the clock reaches every night.
 
@@ -6005,7 +6016,7 @@ enumerators — so the live half of this component was never affected.
   `web_server`, and the
   [`web_port = port`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L273)
   on the next line still runs with the real port. The third caller,
-  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1793),
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1868),
   was never at risk: its `web_server` is a `char` array initialised from a
   literal.
 
@@ -6137,10 +6148,10 @@ enumerators — so the live half of this component was never affected.
   [DELETE](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L764) arms of
   `__ezlopi_http_generate_request()`. And the field is NULL on a path with no
   malloc on it at all.
-  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1793)
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1868)
   — the third caller, the one the previous entry establishes was never at risk
   for `web_server` — builds its config with a
-  [designated initializer](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1774)
+  [designated initializer](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1844)
   that names **10** of the struct's **20** members. `target_page` is one of the
   10 it omits, so C zero-initializes it. Its `method` is `HTTP_METHOD_GET` and
   it sets no `username` or `password`, so it takes the GET arm that reads
@@ -6475,7 +6486,7 @@ enumerators — so the live half of this component was never affected.
 
 - **An isSunState scene fired at 05:48 or 17:48 local time, anywhere on
   earth.** The function that was supposed to fetch today's sunrise or sunset,
-  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1793),
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1868),
   was 51 lines long and had five independent defects in them. What makes it
   worth writing up as one entry rather than five is that each defect made the
   next one undetectable.
@@ -6603,12 +6614,16 @@ enumerators — so the live half of this component was never affected.
   not produce one leaves the caller's "no data for today" signal set — which
   makes the error path reachable for the first time. It frees the reply. It has
   no hardcoded coordinates, no hardcoded time, and traces a usable message
-  naming `hub.coordinates.set` when no coordinates are stored. **What it does
-  not have is a backoff:** `ISSUNSTATE_get_suntime` re-enters it whenever
-  `curr_tm_day` differs from today, so a hub that cannot reach the service asks
-  again on every condition evaluation. That is right for a transient failure
-  and wrong for a persistent one; it is recorded in the function's own comment
-  and under *Known gaps* rather than fixed here.
+  naming `hub.coordinates.set` when no coordinates are stored. **What it did
+  not have, at the time this paragraph was written, was a backoff:**
+  `ISSUNSTATE_get_suntime` re-enters it whenever `curr_tm_day` differs from
+  today, so a hub that could not reach the service asked again on every
+  condition evaluation — right for a transient failure, wrong for a persistent
+  one, and recorded under *Known gaps* rather than fixed at the time. It is
+  fixed now; see *A failed suntime lookup is no longer retried once a second*
+  below. The sentence is put in the past tense rather than deleted because the
+  rest of this paragraph is an account of what that rewrite did and declined to
+  do, and the decline is part of the account.
 
   **Verified on four targets, against a baseline built from `git archive
   HEAD`.** The rewritten caller cannot be host-compiled — it pulls in FreeRTOS,
@@ -6835,7 +6850,8 @@ enumerators — so the live half of this component was never affected.
   removed" from "the file was not compiled". No new warning appears in the
   subject on any target, on either side.
 
-  The full host suite is **6083** checks across **27** binaries, 0 failures.
+  The full host suite is **6154** checks across **27** binaries, 0 failures.
+  (It was 6083 when this entry was written; the suntime backoff below added 71.)
 
   **Untested on hardware.** No board has sent a scene HTTP request. Every
   number above is from a host build of the real translation unit or from a
@@ -6847,6 +6863,187 @@ enumerators — so the live half of this component was never affected.
   the caller did not intend, so a URL this rejects produces a scene action that
   does not fire, where before it fired at something unintended with complete
   confidence.
+
+- **A failed suntime lookup is no longer retried once a second.** An
+  `isSunState` when-condition that could not get a sunrise/sunset time opened a
+  fresh TLS connection to `api.sunrisesunset.io` on every evaluation, and
+  when-conditions are evaluated about once a second —
+  [ezlopi_service_meshbot.c:455](ezlopi-services/ezlopi-service-meshbot/ezlopi_service_meshbot.c#L455)
+  calls the protothread with a 1,000 ms routine delay and
+  [`PT_WAIT_UNTIL`](ezlopi-services/ezlopi-service-meshbot/ezlopi_service_meshbot.c#L440)
+  releases once that has elapsed. So a hub with no route to the service, or no
+  coordinates stored, made on the order of **86,400 TLS connections a day, per
+  isSunState scene, indefinitely**. That figure is not an estimate; it is one of
+  the two numbers the test below measures.
+
+  **Nothing throttled it because the state that would have throttled it was
+  being deleted.**
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1868)
+  clears `curr_tm_day` on entry and sets it only once a time has actually been
+  parsed, so a failure leaves it clear — which is correct, and is the signal the
+  caller reads to tell a failure from a success. But the caller's response to
+  that signal, in
+  [`ISSUNSTATE_get_suntime`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L514),
+  was to delete the whole `user_arg` block. The next evaluation therefore
+  allocated a fresh zeroed one and started over from nothing. Any attempt to
+  remember "I just failed, wait a bit" had nowhere to live: the block holding it
+  was freed a microsecond later. **Removing that delete is the fix**; the
+  backoff is what becomes possible once the state survives.
+
+  **The policy is three pure functions, and that is deliberate.** Whether to ask
+  again is a function of a day number and a time of day, so it can be tested;
+  the thing it governs is a TLS connection, which cannot. So
+  [`EZPI_core_suntime_backoff_delay`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L423),
+  [`EZPI_core_suntime_should_attempt`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L442),
+  [`EZPI_core_suntime_note_failure`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L468)
+  and
+  [`EZPI_core_suntime_note_success`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L494)
+  sit next to the existing decidable suntime helpers, with the reasoning in the
+  header beside them
+  ([HOW OFTEN A FAILED LOOKUP IS RETRIED](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.h#L178)).
+  The hub-side state is one new field,
+  [`backoff`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L119),
+  of type
+  [`s_suntime_backoff_t`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.h#L276).
+
+  **The ladder is 60 s doubling to 32 minutes and then held** —
+  [`EZPI_SUNTIME_BACKOFF_BASE_SEC`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.h#L239)
+  and
+  [`EZPI_SUNTIME_BACKOFF_MAX_STEP`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.h#L240)
+  — which costs **exactly 50 attempts across a full day of outage** instead of
+  86,400, while still retrying inside the first minute. The step is saturated
+  *before* the shift rather than the result after it
+  ([suntime.c:439](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L439)):
+  an unbounded step would shift an `int` by 31 or more, which is undefined
+  rather than merely large. That distinction is not academic here — see the
+  sanitizer note below, where it is exactly what let a mutant survive a green
+  suite. The comparison is `>=` and not `>`
+  ([suntime.c:465](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L465)),
+  because at one-second resolution a deadline that can only be passed and never
+  met would lose the attempt whenever the evaluation lands exactly on it.
+
+  **A per-day attempt counter was considered and rejected, and the rejection is
+  itself a test.** My own earlier note on this gap — in Known gaps, below — said
+  the fix was "a per-day attempt counter or a timestamped backoff", as though
+  the two were interchangeable. They are not, and the counter is *worse than no
+  backoff at all* for the case that actually happens: a hub reboots, the scene
+  starts evaluating before DHCP and DNS are up, N attempts are spent in N
+  seconds, and the scene is then finished for the day even though the network
+  came up a minute later. `test_backoff_survives_a_late_network` models both
+  designs against a network that arrives at 00:03:00 and asserts that the
+  timestamped version obtains the suntime at 180 s while a five-attempt daily
+  budget **never obtains it at all**. The budget has to be spent across the day,
+  which means remembering *when* rather than *how many*.
+
+  **Keeping the block is behaviour-identical, and the reason is what the readers
+  test.** `ISSUNSTATE_get_offs_tmval`, `ISSUNSTATE_eval_range` and
+  `ISSUNSTATE_check_flag_result` all gate on `0 != user_data->sunstate_mode`, so
+  clearing that single field
+  ([`sunstate_mode`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L616))
+  makes every one of them skip the scene exactly as a NULL `user_arg` did. It is
+  safe to clear because it is not configuration — it is re-read from
+  `curr_sunstate_mode` on every re-entry. `moment_valid` is cleared with it;
+  no reader can reach it while `sunstate_mode` is 0, so that is not
+  load-bearing, but leaving a `true` beside a `defined_moment` computed from a
+  suntime that has since been discarded is an invariant waiting to be broken by
+  whoever adds the next reader. The per-second `TRACE_S` is also now behind the
+  gate rather than in front of it
+  ([when_methods_helper_functions.c:547](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L547)):
+  it was flooding the log at the same rate the connections were flooding the
+  wire, and the withheld path is deliberately silent, because the attempt that
+  started the backoff already said what was wrong and when the next one would
+  be.
+
+  **One case changes more than the rate, and it is reported because it is the
+  worst one**
+  ([when_methods_helper_functions.c:597](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L597)).
+  Of the three failure conditions, two leave `curr_tm_day` at 0 and so stay on
+  the ladder. The third — `tmoffs_type` UNDEFINED, meaning the offset field
+  holds something that is not `intime`, `before` or `after` — is reached with
+  `curr_tm_day` already set to today, because the suntime was fetched before the
+  offset string was examined. Retaining the block therefore makes that scene go
+  quiet until midnight rather than retry at all. That is correct: retrying
+  cannot fix a malformed offset field, and the old code retried it *hardest* — a
+  TLS connection every second, forever, because of a typo in a scene field. A
+  correction is not delayed until midnight either, because
+  `EZPI_core_scenes_delete_when_blocks` tears the field list down on a scene
+  edit, `user_arg` with it. The cost that *is* real: a configuration failure
+  backs off on the same ladder as an outage, because nothing at this layer can
+  tell them apart, so after `hub.coordinates.set` on a hub that has been failing
+  for a while the scene can take up to 32 minutes to notice. A bounded one-off
+  delay after a setup action, against a permanent connection storm.
+
+  **206 checks before this change, 277 after** — +71 across nine new sections in
+  [`tests/host/test_suntime.c`](tests/host/test_suntime.c), 0 failures, and **0
+  sanitizer findings**, under `-Werror` with ASan and UBSan. Both numbers are
+  re-derived by building the subject at `git show HEAD:` of itself rather than
+  quoted from a previous run.
+
+  **The control row is the awkward one here, and it is reported honestly.**
+  Every other change in this branch has a control of the form "run the new test
+  against the old subject and watch it fail". That form does not exist for this
+  one: before this change the three functions did not exist, so the new test
+  does not compile against the old subject and the measurement would be "link
+  error", which says nothing about whether the checks can fail. So the control
+  is in two parts, and neither is that form:
+
+  - **A 28-mutant sweep over the three new functions: 25 detected, 1 survived,
+    2 refused by the compiler, 0 misapplied.** Control row clean before and
+    after. The two refusals are both "remove the only use of a parameter", which
+    `-Wunused-parameter -Werror` rejects outright — scored in a separate column
+    so a compiler refusal is not read as a failing check. The one survivor is
+    removing the `0 == backoff_step` early-out, and it is argued equivalent
+    rather than excused: whenever the step is 0 the deadline is 0 too, and
+    `now_sod >= 0` always holds. To show that is a redundancy and not two pieces
+    of dead code, a further mutant applies that removal *together* with the
+    deadline-clearing one; it fails two checks where the deadline mutant alone
+    fails one, confirming the pair are jointly load-bearing.
+  - **An exact before-and-after measurement, inside the passing suite.** The old
+    behaviour has a precise representative: a NULL `bo`, which the header
+    documents as "always attempt" and which is what deleting the block on every
+    failure amounted to. `test_backoff_a_full_day_of_outage` runs the same
+    86,400-second loop against both and asserts **86,400 attempts against 50**.
+    That is the defect and its fix, measured, rather than described.
+
+  **Two of those mutants found defects in this work rather than in the subject,
+  which is the point of running them.** A mutant that loosened `step <= 0` to
+  `step < 0` made `delay(0)` evaluate `60 << -1`; gcc's default UBSan handler
+  prints `runtime error: shift exponent -1 is negative` and *carries on*, and on
+  x86 the count masks to 5 bits so `60 << 31` yields 0 — precisely the value the
+  test asserts for step 0. Every check passed, the suite exited 0, and the
+  finding sat unread in the suite's own output. The fix is
+  `-fno-sanitize-recover=undefined`, scoped to this subject's object file only
+  ([tests/host/Makefile:691](tests/host/Makefile#L691)); turning it on for all
+  27 binaries is probably right and is not something to do as a side effect of
+  one change. Separately, a mutant that cleared the day in `note_success`
+  survived because my assertion for it was placed *after* a `should_attempt`
+  call, which reads the cleared day as a day change and writes the value
+  straight back — the check existed and could not fail. It is now asserted
+  before that call, with the ordering documented as the check
+  ([tests/host/test_suntime.c:1133](tests/host/test_suntime.c#L1133)).
+
+  **Four targets cross-built against a baseline from `git archive HEAD`**, all
+  clean with 0 warnings in either subject on either side: `esp32` **+256**
+  bytes, `esp32s2` **+272**, `esp32s3` **+240**, `esp32c3` **+224**. Rodata and
+  symbol probes all moved in the expected direction — the old per-second trace
+  string 1 → 0, the new backoff trace 0 → 1, the four backoff symbols 0 → 4 —
+  against two control strings that held at 1 → 1 and 2 → 2 on every target, so
+  the probe distinguishes "string removed" from "the file did not get compiled".
+  Reconciling the deltas against the per-section sizes agrees to within 6 bytes
+  on three targets and exactly on `esp32s3`; the remainder is segment alignment
+  padding in the image container.
+
+  The full host suite is **6154** checks across **27** binaries, 0 failures.
+
+  **Untested on hardware.** No board has fetched a sunrise time, and nothing has
+  been flashed. The 86,400-against-50 figure is a host loop over a pure
+  function, not an observed connection count; what happens on the wire when
+  `api.sunrisesunset.io` is unreachable is settled by the build probe showing
+  the new code is linked in, not by watching a hub. The wiring that reads the
+  policy — the gate, the two call sites, the cleared `sunstate_mode` — is in the
+  half of this path that has no test that can fail, and that split is listed
+  under Known gaps rather than papered over here: a mutation of the policy fails
+  a check, a mutation of the wiring fails nothing.
 
 ### Hub location — [bug]
 
@@ -7053,7 +7250,7 @@ enumerators — so the live half of this component was never affected.
 - **The isSunState fix in the previous section was not affected by any of
   this**, which was established by reading the call site rather than assumed
   from the shared subject matter:
-  [`ezlopi_core_scenes_when_methods_helper_functions.c#L1738`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1738)
+  [`ezlopi_core_scenes_when_methods_helper_functions.c#L1808`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1808)
   calls `EZPI_core_nvs_read_latidtude_longitude()` directly and never touches
   the cache. The blast radius of the stale-cache defect was `hub.info.get`
   alone.
@@ -8925,41 +9122,38 @@ Listed because a changelog that only mentions what was finished is misleading.
   alone is called from 116 places, and most of those getters return a freshly
   allocated string that is `NULL` on four separate paths.
 
-- **A failing sunrise/sunset lookup is retried with no backoff.** This gap used
-  to hold open the whole of `__issunsate_update_sunstate_tm` — five defects in
-  51 lines, recorded here because it needed rewriting rather than patching.
-  That rewrite is done and is described under *Scene HTTP requests*; what is
-  left of the gap is one thing the rewrite deliberately did not do.
-  [`ISSUNSTATE_get_suntime`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L504)
-  calls
-  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1793)
-  whenever the recorded day differs from today, and on a cleared
-  [`curr_tm_day`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L543)
-  it releases the whole `user_arg` block and returns 0 — so the next evaluation
-  allocates a fresh zeroed one and the lookup runs again from nothing. A hub
-  that cannot reach `api.sunrisesunset.io` therefore opens a TLS connection to
-  it on every evaluation of every isSunState condition, for as long as the
-  outage lasts. That retry is the right behaviour
-  for a transient failure — the common case, and the reason it is written this
-  way rather than caching the failure — and the wrong behaviour for a
-  persistent one, such as a hub with a working local network and no route out.
-  The fix is a per-day attempt counter or a timestamped backoff.
+- **The isSunState call path still has no test that can fail — but less of it
+  than before.** This entry used to open with *a failing sunrise/sunset lookup
+  is retried with no backoff*, which is no longer true: see *A failed suntime
+  lookup is no longer retried once a second* under *Scene HTTP requests*. What
+  survives of the gap is the narrower half, and the boundary has moved rather
+  than disappeared.
 
-  **The isSunState path is also the one fix in this branch whose top-level
-  functions have no test that can fail.** The query, the reply parsing, the
-  clock arithmetic, the offset parser and the shift were extracted precisely so
-  that they could have one, and they have **206** assertions between them. The
-  two functions that call them do not.
-  `__issunsate_update_sunstate_tm` needs a radio: a test for it means a seam at
-  `EZPI_core_http_mbedtls_req` — a function pointer or a weak symbol — which is
-  a larger change to the HTTP component than this defect warranted.
-  `ISSUNSTATE_get_offs_tmval` needs a populated scene, a field list and a
-  `struct tm`, so the once-per-day recomputation and the `e_type` gate are
-  likewise argued rather than demonstrated. Stated rather than implied, since
-  the entries above report a lot of green: of the twelve defects across the two
-  halves, the ones inside the extracted functions are fixed by something that
-  can fail, and the rest are fixed by reading and by a four-target build that
-  checks the symbols are in the image.
+  The query, the reply parsing, the clock arithmetic, the offset parser, the
+  shift and now the retry policy were all extracted so that they could be
+  tested, and they have **277** assertions between them. The two functions that
+  call them still have none.
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1868)
+  needs a radio: a test for it means a seam at `EZPI_core_http_mbedtls_req` — a
+  function pointer or a weak symbol — which is a larger change to the HTTP
+  component than this defect warranted.
+  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L630)
+  needs a populated scene, a field list and a `struct tm`, so the once-per-day
+  recomputation and the `e_type` gate are likewise argued rather than
+  demonstrated.
+
+  **The backoff is the sharpest example of the split, and worth stating as
+  one.** Its *policy* — the 60 s to 32 min ladder, the day rollover, the
+  saturation, the inclusive deadline — is three pure functions with 71
+  assertions and a 28-mutant sweep behind them. Its *wiring* — that
+  [`ISSUNSTATE_get_suntime`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L514)
+  asks before the lookup, records the outcome after it, and keeps the `user_arg`
+  block instead of deleting it — is in the untestable half, and is supported by
+  reading, by an argument about which fields each reader gates on, and by a
+  four-target build. A mutation of the policy fails a check. A mutation of the
+  wiring fails nothing. That asymmetry is the shape of this whole gap, and it is
+  stated here rather than left to be inferred, because the entry below reports a
+  lot of green and only half of it is the kind that can go red.
 
 - **The wire shape of `hms_interval` is assumed, not verified.** The isSunState
   offset parser described under *Scene triggers* takes a string — `"30"`,
@@ -8981,8 +9175,8 @@ Listed because a changelog that only mentions what was finished is misleading.
 
   **The same union-without-its-tag read is still present two lines away, and
   was deliberately not fixed in that change.**
-  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L636)
-  gates on [`value_string`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L639)
+  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
+  gates on [`value_string`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L709)
   being non-NULL for its `EZLOPI_VALUE_TYPE_TOKEN` field, with
   no `e_type` check, and the `cJSON_Object` arm of field population stores
   `VALUE_TYPE_CJSON` for any value_type it does not name — `TOKEN` is not among

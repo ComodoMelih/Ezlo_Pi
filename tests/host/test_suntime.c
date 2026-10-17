@@ -968,6 +968,374 @@ static void test_the_shipped_offset_answers_are_gone(void)
        "'5' is five seconds and reads no further than the string");
 }
 
+/*******************************************************************************
+ *                          the retry backoff
+ *******************************************************************************/
+
+/* WHAT THESE CHECK, AND WHY THE SIMULATION IS THE ONE THAT MATTERS
+**
+** The backoff replaces nothing -- before it there was no state at all, so
+** "does the new code differ from the old code" cannot be asked of a function
+** that did not exist. It can still be asked mechanically, because the old
+** behaviour has an exact representative here: a NULL `bo`. The header
+** documents a NULL as "no state to throttle on, so always attempt", which is
+** precisely what the shipped code did by deleting the user_arg block on every
+** failure. test_backoff_a_full_day_of_outage runs one loop over one day twice,
+** once with state and once with NULL, and asserts 50 against 86400. That pair
+** of numbers is the change; everything else below pins the mechanism that
+** produces it.
+**
+** 86400 is not a figure of speech. __scenes_loop calls
+** ezpi_scene_proto_thread(scene_node, 1000) and the protothread releases on
+** (xTaskGetTickCount() - ctx->curr_ticks) > routine_delay_ms, so a
+** when-condition is evaluated about once a second, and each evaluation that
+** reached __issunsate_update_sunstate_tm opened a TLS connection. */
+
+static void test_backoff_the_ladder(void)
+{
+    printf("-- the backoff ladder --\n");
+
+    /* Step 0 is "no failure yet", not "retry immediately". A nonzero delay
+    ** here would be harmless, but a reader checking the trace against the
+    ** header has to be able to tell the two apart. */
+    ok(0 == EZPI_core_suntime_backoff_delay(0), "step 0 is no delay");
+
+    ok(60 == EZPI_core_suntime_backoff_delay(1), "step 1 is 60s");
+    ok(120 == EZPI_core_suntime_backoff_delay(2), "step 2 is 120s");
+    ok(240 == EZPI_core_suntime_backoff_delay(3), "step 3 is 240s");
+    ok(480 == EZPI_core_suntime_backoff_delay(4), "step 4 is 480s");
+    ok(960 == EZPI_core_suntime_backoff_delay(5), "step 5 is 960s");
+    ok(1920 == EZPI_core_suntime_backoff_delay(6), "step 6 is 1920s (32 min)");
+
+    /* The saturation is applied to the step before the shift, not to the
+    ** result after it. A step of 31 or more shifted into an int is undefined
+    ** behaviour, and the usual shape of this mistake -- compute then clamp --
+    ** has already executed it by the time the clamp runs. These two are the
+    ** checks that distinguish the two orders. */
+    ok(1920 == EZPI_core_suntime_backoff_delay(7), "step 7 is held at 1920s");
+    ok(1920 == EZPI_core_suntime_backoff_delay(64), "so is step 64");
+    ok(1920 == EZPI_core_suntime_backoff_delay(1000000), "and step 1000000");
+
+    /* Negative cannot arrive from the caller -- backoff_step only ever
+    ** increments from 0 -- but the function is reachable from the trace
+    ** statement and a shift by a negative count is undefined too. */
+    ok(0 == EZPI_core_suntime_backoff_delay(-1), "a negative step is no delay");
+}
+
+static void test_backoff_first_attempt_is_never_withheld(void)
+{
+    s_suntime_backoff_t bo;
+    memset(&bo, 0, sizeof(bo));
+
+    printf("-- the first attempt of a day --\n");
+
+    /* An all-zero struct is what ezlopi_malloc + memset leaves in
+    ** s_sunstate_data_t, so this is the state every scene starts in. If it
+    ** withheld the first attempt an isSunState scene would never work at all. */
+    ok(EZPI_core_suntime_should_attempt(&bo, 14, 0), "a zeroed state attempts at midnight");
+
+    memset(&bo, 0, sizeof(bo));
+    ok(EZPI_core_suntime_should_attempt(&bo, 14, 43200), "and at noon");
+
+    /* A NULL state attempts. This is the old behaviour's representative and
+    ** also the real failure mode it guards: a hub that could not allocate the
+    ** block must not get a scene that silently never fires. */
+    ok(EZPI_core_suntime_should_attempt(NULL, 14, 0), "a NULL state always attempts");
+    ok(EZPI_core_suntime_should_attempt(NULL, 14, 86399), "at any time of day");
+
+    /* And the no-op calls do not fault. The caller passes &user_data->backoff,
+    ** which cannot be NULL, so this is defence for the tests and for a future
+    ** caller rather than for today's. */
+    EZPI_core_suntime_note_failure(NULL, 14, 0);
+    EZPI_core_suntime_note_success(NULL);
+    ok(1, "note_failure and note_success tolerate a NULL state");
+}
+
+static void test_backoff_one_failure_withholds_exactly_60s(void)
+{
+    s_suntime_backoff_t bo;
+    memset(&bo, 0, sizeof(bo));
+
+    printf("-- the first failure --\n");
+
+    ok(EZPI_core_suntime_should_attempt(&bo, 14, 1000), "the attempt runs");
+    EZPI_core_suntime_note_failure(&bo, 14, 1000);
+
+    ok(1 == bo.backoff_step, "one failure is step 1");
+    ok(1060 == bo.next_attempt_sod, "the next attempt is 60s later");
+
+    ok(!EZPI_core_suntime_should_attempt(&bo, 14, 1000), "the same second is refused");
+    ok(!EZPI_core_suntime_should_attempt(&bo, 14, 1001), "a second later is refused");
+    ok(!EZPI_core_suntime_should_attempt(&bo, 14, 1059), "59 seconds later is refused");
+
+    /* The boundary is inclusive. The caller's resolution is one second, so a
+    ** strict > would skip the evaluation that lands exactly on the deadline and
+    ** every delay in the ladder would silently be one second longer -- a
+    ** difference nothing else here would reveal. */
+    ok(EZPI_core_suntime_should_attempt(&bo, 14, 1060), "60 seconds later is allowed");
+    ok(EZPI_core_suntime_should_attempt(&bo, 14, 1061), "and so is any time after");
+}
+
+static void test_backoff_consecutive_failures_walk_the_ladder(void)
+{
+    s_suntime_backoff_t bo;
+    const int expect[] = {60, 120, 240, 480, 960, 1920, 1920, 1920};
+    int t = 0;
+    int i = 0;
+    char what[96];
+
+    memset(&bo, 0, sizeof(bo));
+
+    printf("-- consecutive failures --\n");
+
+    for (i = 0; i < (int)(sizeof(expect) / sizeof(expect[0])); i++)
+    {
+        ok(EZPI_core_suntime_should_attempt(&bo, 14, t), "the due attempt runs");
+        EZPI_core_suntime_note_failure(&bo, 14, t);
+
+        snprintf(what, sizeof(what), "failure %d waits %ds", i + 1, expect[i]);
+        ok((t + expect[i]) == bo.next_attempt_sod, what);
+
+        /* Walk to the deadline, which is where the next iteration's
+        ** should_attempt is asked. */
+        t = bo.next_attempt_sod;
+    }
+
+    ok(EZPI_SUNTIME_BACKOFF_MAX_STEP == bo.backoff_step, "the step saturates rather than growing");
+}
+
+static void test_backoff_success_clears_it(void)
+{
+    s_suntime_backoff_t bo;
+
+    memset(&bo, 0, sizeof(bo));
+
+    printf("-- a success after failures --\n");
+
+    EZPI_core_suntime_note_failure(&bo, 14, 0);
+    EZPI_core_suntime_note_failure(&bo, 14, 60);
+    EZPI_core_suntime_note_failure(&bo, 14, 180);
+    ok(3 == bo.backoff_step, "three failures is step 3");
+
+    EZPI_core_suntime_note_success(&bo);
+    ok(0 == bo.backoff_step, "a success clears the step");
+
+    /* The day is deliberately left alone by note_success -- should_attempt owns
+    ** it. Asserting that here is what stops a later "tidy up" from clearing it
+    ** and reopening the day-change reset to a double reset.
+    **
+    ** ASSERTED BEFORE THE NEXT should_attempt CALL, AND THAT ORDER IS THE
+    ** CHECK. It was written after one, and the mutant that clears the day in
+    ** note_success survived the sweep because of it: should_attempt(14, ...)
+    ** sees the cleared day as a day change and writes 14 straight back, so by
+    ** the time the assertion ran the field had been repaired by the call it was
+    ** supposed to be independent of. The check was there and it could not fail.
+    ** See probe/bomut.py, mutant C3. */
+    ok(14 == bo.attempt_tm_day, "note_success does not touch the day");
+
+    /* The deadline too, and this one is asserted on the field rather than
+    ** through behaviour because behaviour cannot see it: with the step back at
+    ** 0, should_attempt returns true from its early-out without ever reading
+    ** next_attempt_sod, so a stale deadline left here is invisible. It is still
+    ** worth clearing -- the two fields are the state, and one of them holding a
+    ** time from a backoff that has been cancelled is the kind of thing the next
+    ** person to touch should_attempt's control flow will step on. */
+    ok(0 == bo.next_attempt_sod, "and clears the deadline with it");
+
+    /* The point of clearing the step: an intermittent service must not be
+    ** treated as a down one. Without this a hub that failed four times in the
+    ** morning would be on 32-minute retries for the rest of the day even though
+    ** every lookup since had worked. */
+    ok(EZPI_core_suntime_should_attempt(&bo, 14, 181), "and the next attempt is immediate");
+
+    /* A failure after the success starts at the bottom of the ladder again,
+    ** not where it left off. */
+    EZPI_core_suntime_note_failure(&bo, 14, 200);
+    ok(1 == bo.backoff_step, "a failure after a success is step 1 again");
+    ok(260 == bo.next_attempt_sod, "waiting 60s, not 480s");
+}
+
+static void test_backoff_a_new_day_clears_it(void)
+{
+    s_suntime_backoff_t bo;
+
+    memset(&bo, 0, sizeof(bo));
+
+    printf("-- the day rollover --\n");
+
+    /* Deep into the backoff, late in the day. */
+    EZPI_core_suntime_note_failure(&bo, 14, 0);
+    EZPI_core_suntime_note_failure(&bo, 14, 60);
+    EZPI_core_suntime_note_failure(&bo, 14, 180);
+    EZPI_core_suntime_note_failure(&bo, 14, 420);
+    EZPI_core_suntime_note_failure(&bo, 14, 900);
+    EZPI_core_suntime_note_failure(&bo, 14, 86000);
+    ok(6 == bo.backoff_step, "six failures is the top of the ladder");
+    ok(!EZPI_core_suntime_should_attempt(&bo, 14, 86399), "nothing more happens that day");
+
+    /* Midnight. A new day needs a new suntime whatever yesterday did, so there
+    ** is nothing to carry over and the ladder restarts. */
+    ok(EZPI_core_suntime_should_attempt(&bo, 15, 0), "the new day attempts immediately");
+    ok(0 == bo.backoff_step, "and the step was reset by that call");
+    ok(15 == bo.attempt_tm_day, "which also recorded the new day");
+    ok(0 == bo.next_attempt_sod, "and cleared the deadline");
+
+    /* The reset is in should_attempt and not in a function the caller has to
+    ** remember to call, because should_attempt is the only one of the three
+    ** that is reached on every evaluation. Asking a second time must not
+    ** re-reset anything -- it is idempotent, so the state after a day change
+    ** behaves like a fresh struct rather than like one being cleared
+    ** repeatedly. */
+    EZPI_core_suntime_note_failure(&bo, 15, 10);
+    ok(1 == bo.backoff_step, "a failure on the new day is step 1");
+    ok(!EZPI_core_suntime_should_attempt(&bo, 15, 11), "and is honoured");
+
+    /* A day number going backwards is a reset too, not an error. The hub's
+    ** clock can be corrected downward by SNTP, and tm_mday wraps from 31 to 1
+    ** every month, so "different" is the only test that works. */
+    ok(EZPI_core_suntime_should_attempt(&bo, 1, 11), "day 31 -> day 1 resets");
+    ok(1 == bo.attempt_tm_day, "recording day 1");
+
+    /* note_failure applies the same rule, so the two cannot disagree about
+    ** which day the state describes even if the caller ever reaches one
+    ** without the other. */
+    EZPI_core_suntime_note_failure(&bo, 1, 100);
+    EZPI_core_suntime_note_failure(&bo, 1, 160);
+    ok(2 == bo.backoff_step, "two failures on day 1");
+    EZPI_core_suntime_note_failure(&bo, 2, 0);
+    ok(1 == bo.backoff_step, "a failure on day 2 restarts the ladder");
+    ok(2 == bo.attempt_tm_day, "and moves the day");
+    ok(60 == bo.next_attempt_sod, "waiting 60s, not 240s");
+}
+
+static void test_backoff_does_not_wrap_past_midnight(void)
+{
+    s_suntime_backoff_t bo;
+
+    memset(&bo, 0, sizeof(bo));
+
+    printf("-- a deadline past the end of the day --\n");
+
+    /* next_attempt_sod is not clamped to 86399, on purpose. A deadline of
+    ** 87920 means "not again today", which is a correct answer: the day
+    ** rollover is itself a reason to retry, and it resets the state. Clamping
+    ** instead would put the deadline at 86399 and then every evaluation in that
+    ** last second would attempt -- a small storm in exactly the place the
+    ** ladder was supposed to have gone quiet. */
+    EZPI_core_suntime_note_failure(&bo, 14, 86000);
+    ok(86060 == bo.next_attempt_sod, "a 60s deadline from 86000 is 86060");
+
+    bo.backoff_step = EZPI_SUNTIME_BACKOFF_MAX_STEP;
+    EZPI_core_suntime_note_failure(&bo, 14, 86399);
+    ok(88319 == bo.next_attempt_sod, "a 1920s deadline from 86399 is 88319, not 86399");
+    ok(!EZPI_core_suntime_should_attempt(&bo, 14, 86399), "which is never reached today");
+    ok(EZPI_core_suntime_should_attempt(&bo, 15, 0), "and ends at the day change");
+}
+
+/* Count the attempts a whole day of total outage costs, against the number the
+** shipped code cost. This is the check the change exists for. */
+static void test_backoff_a_full_day_of_outage(void)
+{
+    s_suntime_backoff_t bo;
+    int sod = 0;
+    int with_state = 0;
+    int without_state = 0;
+    char what[96];
+
+    printf("-- a full day of outage, once per second --\n");
+
+    memset(&bo, 0, sizeof(bo));
+    for (sod = 0; sod < 86400; sod++)
+    {
+        if (EZPI_core_suntime_should_attempt(&bo, 14, sod))
+        {
+            with_state++;
+            EZPI_core_suntime_note_failure(&bo, 14, sod);
+        }
+    }
+
+    /* The same loop with no state to throttle on, which is what the shipped
+    ** code amounted to: every failure deleted the user_arg block, so the next
+    ** evaluation started from a fresh zeroed one. */
+    for (sod = 0; sod < 86400; sod++)
+    {
+        if (EZPI_core_suntime_should_attempt(NULL, 14, sod))
+        {
+            without_state++;
+            EZPI_core_suntime_note_failure(NULL, 14, sod);
+        }
+    }
+
+    ok(86400 == without_state, "with no state: one TLS attempt per second, all day");
+
+    /* 50, counted from the ladder rather than approximated: 0, 60, 180, 420
+    ** and 900 while the delay is still doubling, then every 1920s from 1860 to
+    ** 86340, which is 45 more. If a delay in the ladder changes this number
+    ** changes with it, which is the intended way to notice. */
+    snprintf(what, sizeof(what), "with state: 50 attempts, measured %d", with_state);
+    ok(50 == with_state, what);
+
+    /* Stated as a ratio as well, because the exact count is the kind of number
+    ** that gets "fixed" to match a changed ladder without anyone asking whether
+    ** the ladder is still doing its job. */
+    ok(with_state < (without_state / 1000), "which is more than a thousandfold fewer");
+}
+
+/* The case that decided the design. Recorded as a test because it is the
+** argument for a timestamp over an attempt count, and the prose version of it
+** has already been wrong once in this tree. */
+static void test_backoff_survives_a_late_network(void)
+{
+    s_suntime_backoff_t bo;
+    int sod = 0;
+    int got_it_at = -1;
+    int counter_got_it_at = -1;
+    int counter_budget = 5;
+
+    printf("-- a hub whose network arrives after the scene starts --\n");
+
+    /* The scene begins evaluating at boot; DHCP and DNS complete 120 seconds
+    ** later. Before then every lookup fails, after it every lookup works. */
+    memset(&bo, 0, sizeof(bo));
+    for (sod = 0; (sod < 86400) && (got_it_at < 0); sod++)
+    {
+        if (EZPI_core_suntime_should_attempt(&bo, 14, sod))
+        {
+            if (sod >= 120)
+            {
+                EZPI_core_suntime_note_success(&bo);
+                got_it_at = sod;
+            }
+            else
+            {
+                EZPI_core_suntime_note_failure(&bo, 14, sod);
+            }
+        }
+    }
+
+    /* Attempts at 0 and 60 fail; the one at 180 succeeds. Three minutes, for a
+    ** scene that fires at sunrise. */
+    ok(180 == got_it_at, "the suntime is obtained at 00:03:00");
+
+    /* And the design that was rejected, modelled in the same loop so the
+    ** comparison is mechanical rather than asserted in a comment. "Stop after
+    ** N attempts today" spends its whole budget in N seconds while the radio
+    ** is still coming up, and the scene is then finished for the day -- worse
+    ** than having no backoff at all, which at least eventually succeeds. */
+    for (sod = 0; (sod < 86400) && (counter_got_it_at < 0); sod++)
+    {
+        if (counter_budget > 0)
+        {
+            counter_budget--;
+            if (sod >= 120)
+            {
+                counter_got_it_at = sod;
+            }
+        }
+    }
+    ok(-1 == counter_got_it_at, "a 5-attempt daily budget never gets it at all");
+}
+
 int main(void)
 {
     printf("ezlopi-core-scenes suntime host tests\n\n");
@@ -989,6 +1357,15 @@ int main(void)
     test_shift_every_second_of_the_day();
     test_shift_rejections();
     test_the_shipped_offset_answers_are_gone();
+    test_backoff_the_ladder();
+    test_backoff_first_attempt_is_never_withheld();
+    test_backoff_one_failure_withholds_exactly_60s();
+    test_backoff_consecutive_failures_walk_the_ladder();
+    test_backoff_success_clears_it();
+    test_backoff_a_new_day_clears_it();
+    test_backoff_does_not_wrap_past_midnight();
+    test_backoff_a_full_day_of_outage();
+    test_backoff_survives_a_late_network();
 
     printf("\n%d check(s), %d failure(s)\n", g_checks, g_fails);
     if (g_fails)

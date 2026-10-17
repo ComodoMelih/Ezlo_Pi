@@ -420,6 +420,88 @@ ezlopi_error_t EZPI_core_suntime_shift(int sun_hour, int sun_min, int sun_sec, i
     return EZPI_SUCCESS;
 }
 
+int EZPI_core_suntime_backoff_delay(int step)
+{
+    if (step <= 0)
+    {
+        return 0;
+    }
+
+    if (step > EZPI_SUNTIME_BACKOFF_MAX_STEP)
+    {
+        step = EZPI_SUNTIME_BACKOFF_MAX_STEP;
+    }
+
+    /* Saturated above before the shift, not after. EZPI_SUNTIME_BACKOFF_MAX_STEP
+    ** is 6 so the widest shift here is 5 and the result is 1920; letting an
+    ** unbounded step through would shift an int by 31 or more, which is
+    ** undefined rather than merely large. */
+    return EZPI_SUNTIME_BACKOFF_BASE_SEC << (step - 1);
+}
+
+bool EZPI_core_suntime_should_attempt(s_suntime_backoff_t *bo, int tm_mday, int now_sod)
+{
+    if (NULL == bo)
+    {
+        return true;
+    }
+
+    if (tm_mday != bo->attempt_tm_day)
+    {
+        bo->attempt_tm_day = tm_mday;
+        bo->backoff_step = 0;
+        bo->next_attempt_sod = 0;
+        return true;
+    }
+
+    if (0 == bo->backoff_step)
+    {
+        return true;
+    }
+
+    /* >=, not >. The caller's resolution is one second, so a next_attempt_sod
+    ** that can only be passed and never met would lose the attempt whenever
+    ** the evaluation that lands on it is the one that happens. */
+    return (now_sod >= bo->next_attempt_sod);
+}
+
+void EZPI_core_suntime_note_failure(s_suntime_backoff_t *bo, int tm_mday, int now_sod)
+{
+    if (NULL == bo)
+    {
+        return;
+    }
+
+    /* A failure on a day the state does not describe starts the ladder rather
+    ** than continuing it, which is the same rule should_attempt applies. The
+    ** two are reached in order in the caller, so this only matters if that ever
+    ** stops being true -- and then it keeps the day and the step consistent
+    ** instead of extending yesterday's backoff into today. */
+    if (tm_mday != bo->attempt_tm_day)
+    {
+        bo->attempt_tm_day = tm_mday;
+        bo->backoff_step = 0;
+    }
+
+    if (bo->backoff_step < EZPI_SUNTIME_BACKOFF_MAX_STEP)
+    {
+        bo->backoff_step++;
+    }
+
+    bo->next_attempt_sod = now_sod + EZPI_core_suntime_backoff_delay(bo->backoff_step);
+}
+
+void EZPI_core_suntime_note_success(s_suntime_backoff_t *bo)
+{
+    if (NULL == bo)
+    {
+        return;
+    }
+
+    bo->backoff_step = 0;
+    bo->next_attempt_sod = 0;
+}
+
 /*******************************************************************************
  *                          Static Function Definitions
  *******************************************************************************/
