@@ -115,7 +115,12 @@ extern "C"
      */
     void EZPI_SERV_uart_init(void);
 
-#ifndef CONFIG_IDF_TARGET_ESP32
+/* Must match the guard on the definition at ezlopi_service_uart.c:318, which
+** is "!ESP32 && !ESP32C3". This said only "!ESP32", so it also declared
+** EZPI_SERV_cdc_init for esp32c3, where no definition exists -- the two guards
+** were exactly one target apart. Nothing calls it on esp32c3 today, which is
+** the only reason the link succeeds. */
+#if !defined(CONFIG_IDF_TARGET_ESP32) && !defined(CONFIG_IDF_TARGET_ESP32C3)
     /**
      * @brief Function to initialize USB cdc
      * @details Following tasks are performed
@@ -125,7 +130,7 @@ extern "C"
      *
      */
     void EZPI_SERV_cdc_init();
-#endif // NOT defined CONFIG_IDF_TARGET_ESP32
+#endif // NOT defined CONFIG_IDF_TARGET_ESP32 or CONFIG_IDF_TARGET_ESP32C3
        /**
         * @brief Function to send data through UART or CDC
         *

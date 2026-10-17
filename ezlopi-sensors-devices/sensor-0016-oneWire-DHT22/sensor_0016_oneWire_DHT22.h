@@ -42,6 +42,8 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
+#include "sdkconfig.h"
+
 #include "ezlopi_core_actions.h"
 #include "ezlopi_core_devices.h"
 #include "ezlopi_core_errors.h"
@@ -74,7 +76,12 @@ extern "C"
      * @param user_arg User-arg
      * @return ezlopi_error_t
      */
+/* Scoped to match the guard that sensor_0016_oneWire_DHT22.c, dht22.c and
+** dht22.h all already carry. This header was the one piece of the component
+** left promising esp32c3 an implementation. */
+#if (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)
     ezlopi_error_t SENSOR_0016_oneWire_dht22(e_ezlopi_actions_t action, l_ezlopi_item_t *item, void *arg, void *user_arg);
+#endif // (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)
 
 #ifdef __cplusplus
 }

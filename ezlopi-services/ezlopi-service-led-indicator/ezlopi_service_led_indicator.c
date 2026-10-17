@@ -42,7 +42,23 @@
 
 #include "sdkconfig.h"
 
-#ifdef CONFIG_EZPI_ENABLE_LED_INDICATOR
+/* Every LED effect in this file lives in one of the two arms of
+** "#if S3||C3 ... #elif ESP32 ... #endif". There is no esp32s2 arm, but the
+** five calls to those effects -- :301 and the switch at :331 -- sit outside
+** the chain, so on esp32s2 they called static functions that nothing defined.
+** CONFIG_EZPI_ENABLE_LED_INDICATOR is "default y" in Kconfig.projbuild and
+** switched off in all four sdkconfig.defaults.*, which is the only reason this
+** never showed: the file is empty in every shipped configuration. Turning the
+** option on for esp32s2 fails the build with "undefined reference to
+** ezpi_indicator_led_init" plus four "used but never defined" warnings naming
+** the effects, which says nothing about the missing arm being the cause.
+**
+** Requiring an implemented target here turns that into one line that names the
+** actual problem. Adding the esp32s2 arm is the real fix and needs an esp32s2
+** board to confirm the LED timing, so it is not attempted blind. */
+#if defined(CONFIG_EZPI_ENABLE_LED_INDICATOR) &&                               \
+    (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3) || \
+     defined(CONFIG_IDF_TARGET_ESP32))
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -636,7 +652,11 @@ static int ezpi_indicator_led_init(void)
 
 #endif // CONFIG_IDF_TARGET_ESP32S3 OR OR CONFIG_IDF_TARGET_ESP32C3
 
-#endif // CONFIG_EZPI_ENABLE_LED_INDICATOR
+#elif defined(CONFIG_EZPI_ENABLE_LED_INDICATOR)
+#error "CONFIG_EZPI_ENABLE_LED_INDICATOR is set, but this file implements the \
+indicator LED only for esp32, esp32s3 and esp32c3. Add an arm for this target \
+or clear the option in sdkconfig."
+#endif // CONFIG_EZPI_ENABLE_LED_INDICATOR && an implemented target
 
 /*******************************************************************************
  *                          End of File

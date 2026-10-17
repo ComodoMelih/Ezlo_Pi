@@ -42,6 +42,8 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
+#include "sdkconfig.h"
+
 #include "ezlopi_core_actions.h"
 #include "ezlopi_core_devices.h"
 #include "ezlopi_core_errors.h"
@@ -75,7 +77,12 @@ extern "C"
      * @param user_arg User-arg
      * @return ezlopi_error_t
      */
+/* Scoped to the targets whose sensor_0015_oneWire_DHT11.c actually defines it,
+** so the prototype cannot promise esp32c3 an implementation that the guard in
+** that file -- and in dht11.c beneath it -- excludes. */
+#if (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)
     ezlopi_error_t SENSOR_0015_oneWire_dht11(e_ezlopi_actions_t action, l_ezlopi_item_t *item, void *arg, void *user_arg);
+#endif // (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)
 
 #ifdef __cplusplus
 }

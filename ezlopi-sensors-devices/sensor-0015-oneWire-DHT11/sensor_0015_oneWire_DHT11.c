@@ -39,6 +39,22 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
+#include "sdkconfig.h"
+/* dht11.c wraps its whole body, readDHT11 included, in this same condition,
+** because the bit-banged 1-wire timing loop needs the per-target
+** <target>/rom/ets_sys.h for ets_delay_us and no esp32c3 branch was ever
+** added. Until this file carried the guard too, it compiled on esp32c3 into a
+** 190KB object holding an undefined reference to readDHT11 -- harmless only
+** because the device-list entry that would pull the object out of the archive
+** is guarded by the same condition in ezlopi_core_devices_list_modules.h, so
+** the member was never linked. Anything that referenced
+** SENSOR_0015_oneWire_dht11 on esp32c3 would have failed at link time with an
+** error naming readDHT11 rather than the guard that actually caused it.
+** sensor-0016's DHT22 equivalent has always guarded all three of dht22.c,
+** dht22.h and its wrapper; this makes DHT11 match. Supporting either sensor on
+** esp32c3 is a separate change that needs hardware to validate the timing. */
+#if (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)
+
 #include <math.h>
 
 #include "ezlopi_core_cloud.h"
@@ -357,6 +373,8 @@ static ezlopi_error_t __0015_notify(l_ezlopi_item_t *item)
     }
     return ret;
 }
+
+#endif // (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)
 
 /*******************************************************************************
  *                          End of File

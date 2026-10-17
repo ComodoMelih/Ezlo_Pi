@@ -3943,8 +3943,8 @@ enumerators — so the live half of this component was never affected.
   differently, which misleads nobody.
 
 - **The enum-to-`int *` assumption under `CJSON_GET_VALUE_INT` is now
-  compile-time enforced.** The build emits 87 `-Wincompatible-pointer-types`
-  warnings from
+  compile-time enforced.** An esp32, esp32s2 or esp32s3 build emits 87
+  `-Wincompatible-pointer-types` warnings from
   [`ezlopi_core_cjson_macros.h`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_cjson_macros.h),
   all the same shape: a device driver passes an enum-typed struct field to
   `CJSON_GET_VALUE_INT`, which forwards its address as an `int *`, so
@@ -4051,6 +4051,144 @@ enumerators — so the live half of this component was never affected.
   the tree referenced it.
 
 - **Ignore editor atomic-save leftovers** (`**/*.tmp`, `**/*.tmp.*`).
+
+- **Five places where a target guard on a definition did not match the guard on
+  what referenced it**, fixed across nine files. One put an undefined reference
+  into a shipped archive, one makes a build fail with five messages that do not
+  name the cause, and three declared functions for targets that define them
+  nowhere.
+
+  The first is the DHT11 driver. `dht11.c` wraps its whole body, `readDHT11`
+  included, in `#if (ESP32S3 || ESP32 || ESP32S2)`, because the bit-banged
+  1-wire timing loop needs the per-target `<target>/rom/ets_sys.h` for
+  `ets_delay_us` and no esp32c3 branch was ever written. Its caller,
+  `sensor_0015_oneWire_DHT11.c`, carried no guard at all. So on esp32c3 that file
+  compiled into a **190 228-byte object whose symbol table contains exactly
+  `U readDHT11`** — a reference nothing in the build defines.
+
+  **Nothing reports this, and the reason is worth stating precisely, because it
+  is a general hole rather than a quirk of this file.** The object is a member of
+  a static archive, and a member is only pulled out if something already needs a
+  symbol it defines. The only thing that would is the `EZLOPI_DEVICE_LIST` entry
+  for device 15 — which `ezlopi_core_devices_list_modules.h:116` guards on the
+  same three-target condition. So on esp32c3 the member is never extracted, its
+  dangling reference is never resolved, and the link succeeds.
+
+  The compiler had nothing to say either, and for a separate reason worth
+  keeping: `dht11.h` was *also* unguarded, so the call site had a perfectly good
+  prototype for a function that the same header's `.c` had just preprocessed
+  away. A declaration with no definition is legal C to compile — the obligation
+  falls on the linker, and the linker never looked. That is why the fix guards
+  `dht11.h` as well rather than only the caller: a prototype is a promise that
+  something, somewhere, defines this, and on esp32c3 nothing did. Anything that
+  referenced
+  `SENSOR_0015_oneWire_dht11` on esp32c3 — a new device-list entry, a scene
+  action, anything — would have failed with an error naming `readDHT11`, which
+  says nothing about the guard that actually caused it.
+
+  `sensor_0015_oneWire_DHT11.c`, its header, and `dht11.h` now carry the same
+  condition `dht11.c` always had, which is exactly the shape sensor-0016's DHT22
+  equivalent has always had across all three of its files. Verified
+  behaviour-neutral rather than assumed: the esp32c3 object goes from 190 228
+  bytes to **1152 bytes with no undefined `dht` symbols**, and the **esp32c3
+  image is byte-identical at 1 756 320** — which is the proof that the member was
+  never linked. esp32/esp32s2/esp32s3 images are unchanged at 1 683 072 /
+  1 373 488 / 1 697 872, and on those three targets the wrapper object still
+  carries its normal `U readDHT11` resolved from `dht11.c.obj` at link.
+
+  The same drift elsewhere is **not** silent, which is what makes it worth a
+  check rather than a one-line fix. `ezlopi_service_led_indicator.c` is one
+  `#if (S3||C3) ... #elif ESP32 ... #endif` chain with no esp32s2 arm, but the
+  five calls to those effects — line 301 and the switch at 331 — sit *outside*
+  the chain. `CONFIG_EZPI_ENABLE_LED_INDICATOR` is `default y` at
+  `ezlopi-main/Kconfig.projbuild:546` and `# ... is not set` in all four
+  `sdkconfig.defaults.*`, and that is the only reason this never showed: the file
+  preprocesses to nothing in every shipped configuration. Turn the option on for
+  esp32s2 and the build failed with `undefined reference to
+  ezpi_indicator_led_init` plus four `used but never defined` warnings naming the
+  effects — five messages, none of which mentions a missing target arm.
+
+  The guard now requires an implemented target, with an `#error` on the
+  `#elif` that says so. Measured on esp32s2 with the option forced on: the build
+  stops at `ezlopi_service_led_indicator.c:656` with that one message, and
+  **0 undefined references and 0 "used but never defined" warnings**. An esp32s3
+  control with the same option forced on still builds (1 698 400 bytes against
+  1 697 872 with it off, so the option genuinely does add code there) and links
+  `EZPI_service_led_indicator_init` — so the failure is specific to esp32s2, not
+  to the option.
+
+  A `depends on IDF_TARGET_...` in Kconfig would also work, and the idiom is in
+  the same file three lines below this option. It is deliberately not used here:
+  it would encode "esp32s2 never has an indicator LED" into the configuration
+  system, which is a product decision, where the `#error` states the current
+  implementation limit without foreclosing it.
+
+  The remaining three are prototypes declared for targets that define them
+  nowhere, each now matching its definition:
+
+  | header | was | definition's guard |
+  | --- | --- | --- |
+  | `ezlopi_service_uart.h` | `!ESP32` | `!ESP32 && !ESP32C3` |
+  | `sensor_0016_oneWire_DHT22.h` | unguarded | `S3 \|\| ESP32 \|\| S2` |
+  | `sensor_0018_other_internal_hall_effect.h` | unguarded | `ESP32` |
+
+  The uart one is the instructive case: the two guards were **exactly one target
+  apart**, so `EZPI_SERV_cdc_init` was declared on esp32c3, where no definition
+  exists. Nothing calls it there today, which is the only reason the link
+  succeeds. For sensor-0018 the `.c` body and the device-list entry were both
+  already guarded on `ESP32`; the prototype was the only piece that was not,
+  leaving esp32s2, esp32s3 and esp32c3 with a declaration and no definition. For
+  DHT22 the header was the one piece of that component still promising esp32c3
+  an implementation.
+
+  Also removed a dead `#elif CONFIG_IDF_TARGET_ESP32C3` arm in `dht22.c` that
+  included `esp32c3/rom/ets_sys.h`. It sits inside a block whose `#if` excludes
+  esp32c3, so it could never be taken — it read as esp32c3 support that does not
+  exist.
+
+- **New check: `tests/ci/check_target_guard_symmetry.py`.** Fixing five sites
+  does nothing about a sixth, and the archive-member hole above means the sixth
+  would be just as invisible. This evaluates every `#if`/`#elif`/`#else`
+  condition in the first-party tree once per target and, for each target
+  separately, requires that every call and every prototype left active has a
+  definition that is also active. 495 files; 26 of them carry target guards
+  across 33 distinct conditions.
+
+  Conditions are *evaluated*, not pattern-matched, because set algebra over
+  target names cannot express the shapes actually in the tree —
+  `#if !defined(A) && !defined(B)`, `#ifndef`, and `#elif` chains. There is a
+  small recursive-descent evaluator over `||`, `&&`, `!`, parentheses,
+  `defined()` and integer literals, with unknown symbols propagating as UNKNOWN
+  and UNKNOWN treated as active, so a non-target `#if` never causes a finding.
+
+  **Five bugs in the check were found and fixed before it was trusted**, and they
+  are recorded in the script because each would have made it quietly wrong rather
+  than noisy: calls on a one-line definition's own line were excluded along with
+  the definition (fixed by excluding by name offset, not by line); a block of
+  static forward declarations counted as calls; `static` definitions were pooled
+  tree-wide, so an unrelated file's static could stand in as a definition;
+  `return readDHT11(...);` matches a prototype regex perfectly (fixed by
+  rejecting statement keywords); and backslash continuations were not joined, so
+  the check read the new three-line LED guard as its first line only, found no
+  target mentioned, and silently discarded the restriction.
+
+  **Then mutation-tested against the real tree, not just its own fixtures** —
+  its `SELF_TEST` cases are strings in the same file, which is not evidence that
+  it can fail. Five of the fixed sites were reintroduced into a scratch copy one
+  at a time — the DHT11 wrapper, the DHT11 header, the uart prototype, the
+  hall-effect prototype and the LED guard, with the uart case narrowed by exactly
+  one target rather than unguarded, since that is how it originally read. All
+  five were caught, each naming the right file, and baseline and restored both
+  passed at 495 files. The LED mutation is the one that exercises the
+  continuation-line handling, which is why it is applied by script rather than
+  `sed`. `sensor_0016_oneWire_DHT22.h` is the one fixed site not covered this
+  way; it is the same shape as the DHT11 header, which is.
+
+  Its limits are in the script. The main one: it cannot expand object-like
+  macros, so a guard hidden behind a helper macro reads as UNKNOWN and is
+  skipped. That is why the LED condition is written out in all three places it
+  appears rather than factored into a macro — the preprocessor alone should show
+  which targets have an implementation.
 
 ### Testing — [infra]
 
@@ -4918,6 +5056,30 @@ enumerators — so the live half of this component was never affected.
 
 Listed because a changelog that only mentions what was finished is misleading.
 
+- **Two target gaps are now stated by the build instead of being fixed, because
+  both need hardware to close.** The target-guard work under *Build and
+  configuration* made the guards honest; it did not add the missing support, and
+  these are the two cases where "the guard is right" and "the feature works
+  everywhere" are not the same thing.
+
+  **Neither DHT sensor works on esp32c3.** `dht11.c` and `dht22.c` both bit-bang
+  the 1-wire protocol with `ets_delay_us` out of `<target>/rom/ets_sys.h`, and
+  the timing is written against the three Xtensa parts. Both drivers and both
+  device-list entries are guarded accordingly, so an esp32c3 hub simply does not
+  offer device 15 or 16 — consistently now, rather than offering a prototype with
+  no definition behind it. Adding C3 support is not an include change: it means
+  validating the pulse timing on a C3 board, which no build or host test can
+  stand in for. Deliberately not attempted blind.
+
+  **The indicator LED has no esp32s2 implementation.** The effects in
+  `ezlopi_service_led_indicator.c` exist for esp32, esp32s3 and esp32c3 only.
+  Since `CONFIG_EZPI_ENABLE_LED_INDICATOR` is `default y` in Kconfig and off in
+  all four shipped defaults, no shipped image is affected — but anyone turning it
+  on for esp32s2 now gets a one-line `#error` naming the limitation instead of
+  five link errors and warnings that name the symbols and not the cause. Writing
+  the arm is a small change; confirming the LED timing on an esp32s2 board is the
+  part that is missing, so the arm is not written on guesswork.
+
 - **The check-after-use analyser is in CI now, but its recall is 1 of 2 on the
   cases we can measure against.** `cppcheck` found 33 instances of the class
   and they are fixed (see *Null dereferences* above), so this gap is much
@@ -5201,8 +5363,10 @@ Listed because a changelog that only mentions what was finished is misleading.
 
   **The reroute removes none of the `-Wincompatible-pointer-types` warnings, and
   an earlier draft of the HX711 comment claimed it removed two.** Built both
-  ways on esp32c3 from the same mirror with the same grep: 92 pointer-type
-  warnings before, 92 after, with the same set of sites. HX711's two pin fields
+  ways on esp32c3 from the same mirror with the same grep: the count and the set
+  of sites were identical before and after. (It was 92 in both arms when that
+  A/B was run; the current figure is 90, for the unrelated reason given below.
+  Both arms moved together, so the comparison is unaffected.) HX711's two pin fields
   *are* `gpio_num_t`, an enum, and the old code did take their address as an
   `int *` — but `gpio_num_t` declares `GPIO_NUM_NC = -1`, so its compatible type
   is `int` and `gpio_num_t *` genuinely is compatible with `int *`. The enums
@@ -5214,23 +5378,40 @@ Listed because a changelog that only mentions what was finished is misleading.
   after.
 
   Finding that out corrected the count this entry had been quoting. The warnings
-  are **87 on esp32, esp32s2 and esp32s3 and 92 on esp32c3**, not 87
+  are **87 on esp32, esp32s2 and esp32s3 and 90 on esp32c3**, not 87
   everywhere. On the three xtensa targets all 87 are reported at
-  `ezlopi_core_cjson_macros.h` and none anywhere else. esp32c3 has 85 there —
-  the two missing ones are both in `sensor_0016_oneWire_DHT22.c`, whose entire
-  body, lines 43 to 375 of 378, sits inside
-  `#if (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)`,
-  so on the C3 that file compiles to a 1152-byte object containing nothing. That
-  was established by replaying the build's own compile command for the file with
-  a control (`device_0004_digitalIn_generic.c`, same macro, same destination
-  field, 2 warnings on the same compiler) rather than by reading the `#if`,
-  because the first three explanations tried — not compiled, `ccache` replaying
-  a cached object, a per-component `-w` — were all wrong, and the flags are
-  byte-identical between the two files. **Separately, this means the DHT11 and
-  DHT22 drivers are absent from esp32c3 firmware while
+  `ezlopi_core_cjson_macros.h` and none anywhere else. esp32c3 has 83 there, and
+  the four it is missing account for themselves exactly: two in
+  `sensor_0016_oneWire_DHT22.c` and two in `sensor_0015_oneWire_DHT11.c`, both of
+  which now sit entirely inside
+  `#if (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)`
+  and compile to 1152-byte objects containing nothing on the C3. DHT22 was always
+  guarded that way; DHT11 was not until the target-guard entry under *Build and
+  configuration*, which is why this figure was 92/85 when first measured and is
+  90/83 now. That the difference from 87 is
+  twice the per-file warning count, for exactly the two files the preprocessor
+  removes, is the arithmetic working out rather than a coincidence.
+
+  The mechanism was established by replaying the build's own compile command for
+  the file with a control (`device_0004_digitalIn_generic.c`, same macro, same
+  destination field, 2 warnings on the same compiler) rather than by reading the
+  `#if`, because the first three explanations tried — not compiled, `ccache`
+  replaying a cached object, a per-component `-w` — were all wrong, and the flags
+  are byte-identical between the two files.
+
+  **An earlier version of this entry drew the wrong conclusion from that.** It
+  said that because
   `SENSOR_0015_ONEWIRE_DHT11` and `SENSOR_0016_ONEWIRE_DHT22` are unconditionally
-  `1` in `ezlopi_core_device_macros.h`, so the device list offers both on every
-  target.** That is not touched here and is recorded as its own open question.
+  `1` in `ezlopi_core_device_macros.h`, "the device list offers both on every
+  target" while the drivers are absent from esp32c3 firmware. That is false.
+  Those macros are not the registration: `ezlopi_core_devices_list_modules.h:116`
+  wraps both `EZLOPI_DEVICE_LIST` lines in the same three-target `#if`, so
+  esp32c3 does not offer either device. Checked against the built image rather
+  than re-read from the header — the strings `sensor-DHT11` and `sensor-DHT22`
+  appear 0 times in the esp32c3 ELF and neither wrapper symbol is in its symbol
+  table. The real defect was narrower and in the opposite place — not a device
+  offered without a driver, but a driver compiled without the function it calls —
+  and is fixed in the target-guard entry under *Build and configuration*.
 
   The remaining 7 on the C3 are in five files that every target builds —
   `ezlopi_service_uart.c` and

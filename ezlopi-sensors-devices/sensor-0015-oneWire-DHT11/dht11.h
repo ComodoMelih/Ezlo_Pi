@@ -42,6 +42,7 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
+#include "sdkconfig.h"
 
 /*******************************************************************************
  *                          C++ Declaration Wrapper
@@ -57,6 +58,13 @@ extern "C"
     /*
         DHT11 temperature sensor driver
     */
+
+/* Declaring readDHT11 and dht11_getSignalLevel on targets where dht11.c does
+** not define them turns a missing implementation into a link error at whatever
+** happens to reference them first. dht22.h has always scoped its own two
+** prototypes this way; both names are used nowhere outside this component, so
+** the guard costs nothing. */
+#if (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)
 
 #define DHT11_OK 0
 #define DHT11_CHECKSUM_ERROR -1
@@ -89,6 +97,8 @@ extern "C"
      */
     int dht11_getSignalLevel(int DHT11gpio, int usTimeOut, bool state);
     // void errorHandler(int response);
+
+#endif // (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2)
 
 #ifdef __cplusplus
 }

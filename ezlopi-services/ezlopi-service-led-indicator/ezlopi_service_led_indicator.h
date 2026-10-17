@@ -40,7 +40,15 @@
 #ifndef _EZLOPI_SERVICE_LED_INDICATOR_H___
 #define _EZLOPI_SERVICE_LED_INDICATOR_H___
 
-#ifdef CONFIG_EZPI_ENABLE_LED_INDICATOR
+#include "sdkconfig.h"
+
+/* The same condition as the one at the top of
+** ezlopi_service_led_indicator.c, written out rather than hidden behind a
+** helper macro so that the preprocessor alone shows which targets have an
+** implementation. That file's comment explains why esp32s2 is absent. */
+#if defined(CONFIG_EZPI_ENABLE_LED_INDICATOR) &&                                 \
+    (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3) || \
+     defined(CONFIG_IDF_TARGET_ESP32))
 
 /*******************************************************************************
  *                          Include Files
@@ -89,7 +97,7 @@ extern "C"
 }
 #endif
 
-#endif // CONFIG_EZPI_ENABLE_LED_INDICATOR
+#endif // CONFIG_EZPI_ENABLE_LED_INDICATOR && an implemented target
 
 #endif // __EZLOPI_SERVICE_LED_INDICATOR_H__
 

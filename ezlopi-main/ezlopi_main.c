@@ -127,9 +127,14 @@ void app_main(void)
 
     __print_mac_address();
 
-#ifdef CONFIG_EZPI_ENABLE_LED_INDICATOR
+/* Matches the guard on the definition; see the comment at the top of
+** ezlopi_service_led_indicator.c. Calling this on esp32s2 with the option set
+** is what used to break the link. */
+#if defined(CONFIG_EZPI_ENABLE_LED_INDICATOR) &&                                 \
+    (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3) || \
+     defined(CONFIG_IDF_TARGET_ESP32))
     EZPI_service_led_indicator_init();
-#endif // CONFIG_EZPI_ENABLE_LED_INDICATOR
+#endif // CONFIG_EZPI_ENABLE_LED_INDICATOR && an implemented target
 
     gpio_install_isr_service(0);
 

@@ -54,11 +54,16 @@
 #include "esp32s3/rom/ets_sys.h"
 #elif CONFIG_IDF_TARGET_ESP32
 #include "esp32/rom/ets_sys.h"
-#elif CONFIG_IDF_TARGET_ESP32C3
-#include "esp32c3/rom/ets_sys.h"
 #elif CONFIG_IDF_TARGET_ESP32S2
 #include "esp32s2/rom/ets_sys.h"
 #endif
+/* There used to be an "#elif CONFIG_IDF_TARGET_ESP32C3" arm here including
+** esp32c3/rom/ets_sys.h. It could never be taken: the enclosing #if above
+** excludes esp32c3, so the arm read as esp32c3 support that does not exist.
+** Reaching it would also mean reaching the rest of this file, whose timing is
+** written against the three Xtensa targets. Enabling either DHT sensor on
+** esp32c3 means validating that timing on a C3 board, not restoring an
+** include. */
 
 #include "dht22.h"
 /*******************************************************************************

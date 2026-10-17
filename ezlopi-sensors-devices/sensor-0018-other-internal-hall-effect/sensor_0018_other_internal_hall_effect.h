@@ -42,6 +42,8 @@
 /*******************************************************************************
  *                          Include Files
  *******************************************************************************/
+#include "sdkconfig.h"
+
 #include "driver/adc.h"
 #include "ezlopi_core_actions.h"
 #include "ezlopi_core_devices.h"
@@ -83,7 +85,15 @@ extern "C"
      * @param user_arg User-arg
      * @return ezlopi_error_t
      */
+/* The internal hall sensor is an esp32-only peripheral, and
+** sensor_0018_other_internal_hall_effect.c guards its whole body on
+** CONFIG_IDF_TARGET_ESP32 to match. The device-list entry in
+** ezlopi_core_devices_list_modules.h is guarded the same way; this prototype
+** was the only part that was not, leaving esp32s2, esp32s3 and esp32c3 with a
+** declaration and no definition. */
+#ifdef CONFIG_IDF_TARGET_ESP32
     ezlopi_error_t SENSOR_0018_other_internal_hall_effect(e_ezlopi_actions_t action, l_ezlopi_item_t *item, void *arg, void *user_arg);
+#endif // CONFIG_IDF_TARGET_ESP32
 
 #ifdef __cplusplus
 }
