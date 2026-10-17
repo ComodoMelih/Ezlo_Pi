@@ -5656,7 +5656,7 @@ enumerators — so the live half of this component was never affected.
   no ESP-IDF surface at all, so it went into
   [`ezlopi_core_http_buf.c`](ezlopi-core/ezlopi-core-http/ezlopi_core_http_buf.c),
   which includes `ezlopi_core_http.h` and nothing else of consequence.
-  [`EZPI_core_http_dyna_relloc`](ezlopi-core/ezlopi-core-http/ezlopi_core_http_buf.c#L56)
+  [`EZPI_core_http_dyna_relloc`](ezlopi-core/ezlopi-core-http/ezlopi_core_http_buf.c#L76)
   moved with it, unchanged: the accumulator grows through it, and a test that
   stubbed the growth would be testing the half that was never in doubt. The
   component's `CMakeLists.txt` uses `file(GLOB_RECURSE config_src "*.c")`, so
@@ -5760,7 +5760,7 @@ enumerators — so the live half of this component was never affected.
   `web_server`, and the
   [`web_port = port`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L306)
   on the next line still runs with the real port. The third caller,
-  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1695),
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1729),
   was never at risk: its `web_server` is a `char` array initialised from a
   literal.
 
@@ -5892,10 +5892,10 @@ enumerators — so the live half of this component was never affected.
   [DELETE](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L764) arms of
   `__ezlopi_http_generate_request()`. And the field is NULL on a path with no
   malloc on it at all.
-  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1695)
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1729)
   — the third caller, the one the previous entry establishes was never at risk
   for `web_server` — builds its config with a
-  [designated initializer](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1715)
+  [designated initializer](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1774)
   that names **10** of the struct's **20** members. `target_page` is one of the
   10 it omits, so C zero-initializes it. Its `method` is `HTTP_METHOD_GET` and
   it sets no `username` or `password`, so it takes the GET arm that reads
@@ -6214,6 +6214,186 @@ enumerators — so the live half of this component was never affected.
   switch-off, which is the withheld message's string and its `strlen` minus the
   two short format strings they replaced. The switch moves the image in both
   directions, so the name in the `.c` is the name in `Kconfig.projbuild`.
+
+- **An isSunState scene fired at 05:48 or 17:48 local time, anywhere on
+  earth.** The function that was supposed to fetch today's sunrise or sunset,
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1729),
+  was 51 lines long and had five independent defects in them. What makes it
+  worth writing up as one entry rather than five is that each defect made the
+  next one undetectable.
+
+  It read the stored coordinates, traced them, and then ignored them: both
+  branches of the `if (lat_long_vals)` test wrote the *same* hardcoded
+  Kathmandu URL, so the only effect of having coordinates was one extra trace
+  line. It wrote that URL into the config's `url` field — which an
+  uncredentialed GET never reads, because
+  [`__ezlopi_http_generate_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L701)
+  builds the request line from
+  [`target_page`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L748) — so
+  every request actually went out as `GET /`. It then discarded whatever came
+  back without freeing it.
+  Finally it assigned `05:48:42`, or twelve hours later for a sunset, and
+  tested *those literals* for being all-zero to decide whether the lookup had
+  failed. They cannot be all-zero, so the failure branch below was unreachable
+  and `curr_tm_day` was recorded as fetched every time.
+
+  **Read as a chain, the behaviour is consistent and silent.** The wrong URL
+  did not matter because the URL was not sent. The unsent request did not
+  matter because the reply was discarded. The discarded reply did not matter
+  because the time came from literals. And the literals did not matter to the
+  error path because the error path could not run. A scene using this trigger
+  therefore worked — it fired, once a day, on time to the second, at a time
+  that was correct for one street in Kathmandu and for nowhere else, and leaked
+  one HTTPS reply per day while doing it. There is no log line, no assertion
+  and no build warning anywhere in that chain. The one instrument that would
+  have caught it is a test that asks what time came back for a known pair of
+  coordinates, and that could not be written, because every part of the
+  calculation was inside a function that needs a radio.
+
+  **So the three parts that do not need a radio were moved out.** The query
+  built from stored coordinates, the shape of the reply, and the clock
+  arithmetic are now
+  [`EZPI_core_suntime_build_query`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L157),
+  [`EZPI_core_suntime_from_reply`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L221)
+  and
+  [`EZPI_core_suntime_parse_clock`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L48)
+  in a **358**-line translation unit. The boundary was drawn where it is for
+  one reason: everything on this side of it can be compiled and run on a
+  development machine. Its only dependencies beyond `stdio.h` and `string.h`
+  are `cjext.h`, the trace macros and the cloud keyword table, and the host
+  suite builds the real file against the real `cjext.c` and the real
+  `ezlopi_cloud_keywords.c` — nothing in the calculation is standing in for
+  anything.
+  [`tests/host/test_suntime.c`](tests/host/test_suntime.c) compiles the real
+  file and makes **109** assertions against it, including every one of the 1440
+  minutes in a day put through both the 12-hour and the 24-hour rendering and
+  compared against each other — **0** mismatches either way. The rule carries
+  the same `nm` guard as the rest of the suite, so if
+  `CONFIG_EZPI_SERV_ENABLE_MESHBOTS` ever stops reaching the file and it
+  compiles to an empty object, the build fails rather than reporting 109 checks
+  against nothing.
+
+  Ten mutations of the subject were run and all **10** were detected: `+12` on
+  every PM reading with no 12 special-case, midnight and noon swapped, the
+  `status` check dropped, coordinates rounded to two decimals, a truncated
+  query reported as success, the coordinate range check removed, three-digit
+  clock fields accepted, the sunrise/sunset mode ignored, the 12-hour range
+  check removed, and the outputs written before validation. The sweep also
+  carries a control row — an appended comment, which applies but changes no
+  behaviour — and it sits at **0** failures. Without it, "all ten detected" and
+  "the harness fails on everything" produce identical output.
+
+  One of the 109 checks is there to catch a regression rather than a defect: it
+  asserts that what comes back for the fixture is *not* `05:48:42`. Reinstating
+  the old hardcoded time would therefore fail the suite rather than pass it.
+
+  **The repair needed a third piece that nobody had written: HTTP body
+  framing.** `EZPI_core_http_mbedtls_req` hands back everything the socket
+  produced — status line, headers, blank line, then the body in whatever
+  framing the server chose. `cJSON_Parse` on that fails at the first character,
+  so the parser above could never have been pointed at `config->response`
+  directly. That was not visible while the reply was being thrown away; it
+  became the blocking problem the moment anything wanted to read it.
+  [`EZPI_core_http_body_in_place`](ezlopi-core/ezlopi-core-http/ezlopi_core_http_buf.c#L268)
+  finds the body, honours `Content-Length`, and reassembles a
+  `Transfer-Encoding: chunked` body in place via
+  [`__dechunk_in_place`](ezlopi-core/ezlopi-core-http/ezlopi_core_http_buf.c#L583).
+  Chunked is not an exotic case to skip: it is what an HTTP/1.1 server sends
+  whenever it does not know the length in advance, and a chunked body begins
+  with a hex length on its own line. In place is safe because the reassembled
+  body is strictly shorter than the chunked form — every chunk costs a header
+  and a trailing CRLF — so the write cursor can never overtake the read cursor.
+
+  A reply that cannot be accounted for *in full* is a failure rather than a
+  best-effort body: no blank line, a status other than 200, a `Content-Length`
+  longer than what arrived, a chunk sequence that ends without its terminating
+  zero. The reason is the same one that governs the clock parser above it — a
+  body missing its middle parses exactly as well as a complete one, and is
+  worse than no body at all.
+
+  [`tests/host/test_httpresp.c`](tests/host/test_httpresp.c) grew from **60**
+  checks to **176** for this, and the new ones were measured the same way:
+  twelve mutations of the body locator plus a control row, with the control at
+  **0** failures and **11** of the twelve detected. The twelfth is an
+  *equivalent* mutant and is recorded as one rather than chased — removing the
+  step over the status line changes no observable behaviour, because the header
+  name match is anchored at a line start and a status line this function
+  accepts always begins `HTTP/1.`, so the status line cannot match a header
+  name whether it is skipped or not. It is kept in the mutation list so the
+  claim is re-measured rather than remembered, and the subject carries the same
+  note at the skip itself. Two of the eleven are worth naming because they are
+  the ones a reader would assume were covered and were not: dropping the `:`
+  anchor after a header name makes `Transfer-Encoding-Hint: chunked` put the
+  function into de-chunking a body that was never chunked, and believing a
+  `Content-Length` longer than what arrived is caught by an AddressSanitizer
+  heap-overflow rather than by an assertion, because the terminator then lands
+  past the allocation.
+
+  **This caller asks for `Connection: close`,** which is not tidiness. There is
+  no read timeout configured anywhere on the mbedTLS socket in this tree —
+  `mbedtls_ssl_conf_read_timeout` is never called — so on a keep-alive
+  connection the read loop blocks forever once the body has arrived, with the
+  scene-evaluation task inside it. That was harmless while the reply was being
+  discarded and would have become a hang the moment this change started waiting
+  for the body.
+
+  The rewritten function is **117** lines. It clears `curr_tm_day` first and
+  sets it only once a time has actually been parsed, so every exit that does
+  not produce one leaves the caller's "no data for today" signal set — which
+  makes the error path reachable for the first time. It frees the reply. It has
+  no hardcoded coordinates, no hardcoded time, and traces a usable message
+  naming `hub.coordinates.set` when no coordinates are stored. **What it does
+  not have is a backoff:** `ISSUNSTATE_get_suntime` re-enters it whenever
+  `curr_tm_day` differs from today, so a hub that cannot reach the service asks
+  again on every condition evaluation. That is right for a transient failure
+  and wrong for a persistent one; it is recorded in the function's own comment
+  and under *Known gaps* rather than fixed here.
+
+  **Verified on four targets, against a baseline built from `git archive
+  HEAD`.** The rewritten caller cannot be host-compiled — it pulls in FreeRTOS,
+  NVS and the scenes graph — so a target build is the first instrument that
+  compiles it at all, and a baseline is what turns "it builds" into a
+  measurement:
+
+  | target | baseline | fixed | delta | `.flash.text` | `.flash.rodata` |
+  |---|---|---|---|---|---|
+  | esp32   | 1684672 | 1688208 | +3536 | +2404 | +1136 |
+  | esp32s2 | 1375008 | 1378528 | +3520 | +2380 | +1136 |
+  | esp32s3 | 1699552 | 1703312 | +3760 | +2632 | +1136 |
+  | esp32c3 | 1757984 | 1761856 | +3872 | +2666 | +1200 |
+
+  The two section deltas reconcile to the image delta to within 4 to 8 bytes on
+  each target (3540 against 3536, 3516 against 3520, 3768 against 3760, 3866
+  against 3872) — the remainder is segment alignment padding in the image
+  container, and it is reported rather than rounded away because a reconciliation
+  that is forced to balance exactly stops being a check. `.flash.rodata` moves
+  by the same **+1136** on all three Xtensa targets and **+1200** on the RISC-V
+  one, which is the expected shape: the added constant data is the same strings
+  and tables everywhere, and only its padding is target-specific.
+
+  **Every one of the four new functions is absent from the baseline ELF and
+  present in the fixed one, on all four targets.** That direction is the half
+  that matters. Presence alone would only prove something compiled; absence
+  from the baseline is what proves the probe is looking at this change. And
+  both halves are needed here specifically, because the entire scenes
+  translation unit sits inside `#ifdef CONFIG_EZPI_SERV_ENABLE_MESHBOTS` — a
+  target with meshbots off would compile the rewritten function to nothing,
+  link successfully, and report "build: OK". No new warning appears in any of
+  the three touched files on any target.
+
+  The full host suite is **5252** checks across **25** binaries, 0 failures.
+
+  **Untested on hardware.** No board has fetched a sunrise time. Nothing here
+  has made a TLS connection to `api.sunrisesunset.io`, so the reply this parses
+  is a fixture written from the service's documented shape and not a capture,
+  and the `Connection: close` reasoning above is read off the absence of
+  `mbedtls_ssl_conf_read_timeout` rather than measured against a socket that
+  hung. What is covered is every part of the calculation; what is unverified is
+  that the request goes out, that something comes back, and that what comes
+  back looks like the fixture. The failure direction is at least the safe one:
+  anything this cannot account for leaves `curr_tm_day` cleared, so an
+  isSunState scene that cannot reach the service does not fire at all, where
+  before the fix it fired at the wrong time with complete confidence.
 
 ### Build and configuration — [infra]
 
@@ -7785,44 +7965,37 @@ Listed because a changelog that only mentions what was finished is misleading.
   alone is called from 116 places, and most of those getters return a freshly
   allocated string that is `NULL` on four separate paths.
 
-- **`__issunsate_update_sunstate_tm()` is a stub, and fixing its NULL
-  `target_page` did not make it work.** The entry under *Scene HTTP requests*
-  stops it sending `GET /(null)`; it now sends `GET /`, which is well-formed
-  and still not the request it means. Reading it to establish that found five
-  more things wrong in the same **51** lines, listed because the function needs
-  rewriting rather than patching and the next person should not have to
-  rediscover them.
+- **A failing sunrise/sunset lookup is retried with no backoff.** This gap used
+  to hold open the whole of `__issunsate_update_sunstate_tm` — five defects in
+  51 lines, recorded here because it needed rewriting rather than patching.
+  That rewrite is done and is described under *Scene HTTP requests*; what is
+  left of the gap is one thing the rewrite deliberately did not do.
+  [`ISSUNSTATE_get_suntime`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L480)
+  calls
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1729)
+  whenever the recorded day differs from today, and on a cleared
+  [`curr_tm_day`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L519)
+  it releases the whole `user_arg` block and returns 0 — so the next evaluation
+  allocates a fresh zeroed one and the lookup runs again from nothing. A hub
+  that cannot reach `api.sunrisesunset.io` therefore opens a TLS connection to
+  it on every evaluation of every isSunState condition, for as long as the
+  outage lasts. That retry is the right behaviour
+  for a transient failure — the common case, and the reason it is written this
+  way rather than caching the failure — and the wrong behaviour for a
+  persistent one, such as a hub with a working local network and no route out.
+  The fix is a per-day attempt counter or a timestamped backoff.
 
-  It
-  [reads the NVS latitude/longitude](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1702),
-  traces it, frees it, and then ignores it: **both** arms of the `if` write the
-  [same hardcoded Kathmandu coordinates](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1706)
-  into `tmp_url`, so the NVS read is pure overhead and the two branches differ
-  only in a `TRACE_S`. The URL it builds is then not the one sent — `url` is
-  only read by the credentialed GET arm, and this caller has no credentials, so
-  the path comes from `target_page` instead. It discards the response:
-  `.response = NULL, .response_maxlen = 0`, and
-  [`EZPI_core_http_mbedtls_req()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1729)
-  is called for effect only. And the sun times it returns are
-  [hardcoded](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1731)
-  to 05:48:42 — `+12` for sunset — with a comment reading *"e.g. after valid
-  extraction"*.
-  So every `isSunState` condition in this firmware fires at 05:48:42 or
-  17:48:42 regardless of date, location, or whether the HTTP request succeeded.
-  And the failure handling written below those three assignments cannot run:
-  it clears `curr_tm_day` when hour, minute and second are all zero, but the
-  hour is `5 + (… ? 12 : 0)` and the minute and second are literals, so the
-  condition is false by construction. That belongs with the dead checks
-  catalogued under *Dead null checks* above; it is left here instead because
-  deleting it in isolation would remove the only marker of where this
-  function's error path is supposed to go.
-
-  Not fixed here because it is a feature, not a repair: it needs a JSON parse
-  of the sunrisesunset.io reply, the NVS coordinates actually threaded through,
-  a cache keyed on `tm_mday` that the `curr_tm_day` field already implies, and
-  a decision about what a scene should do when the lookup fails — none of which
-  can be validated without the hardware this audit has no access to. Recording
-  it with the measurements attached is the useful half.
+  **The isSunState path is also the one fix in this branch whose top-level
+  function has no test that can fail.** The query, the reply parsing and the
+  clock arithmetic were extracted precisely so that they could have one, and
+  they have 109 assertions between them. The function that calls them does not,
+  because it needs a radio: a test for it means a seam at
+  `EZPI_core_http_mbedtls_req` — a function pointer or a weak symbol — which is
+  a larger change to the HTTP component than this defect warranted. Stated
+  rather than implied, since the entry above reports a lot of green: the five
+  original defects are fixed by reading and by a four-target build that checks
+  the symbols are in the image, and only the three extracted pieces are fixed
+  by anything that can fail.
 
 - **Arm nine of the URL ladder puts a leading slash on the path and truncates a
   long one in silence.** The credentialed-URL defect this gap used to hold open

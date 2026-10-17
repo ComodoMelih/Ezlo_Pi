@@ -303,7 +303,13 @@ static void test_bodies_round_trip(void)
     /* Two reads, the second one byte long: the old code lost one from each. */
     one_body("256 bytes, so two reads", exact256, 256);
 
-    /* Six reads, the size of the reply api.sunrisesunset.io actually returns. */
+    /* Six reads. 1299 was picked as a plausible size for the suntime reply --
+    ** a few hundred bytes of JSON plus headers -- and not measured against the
+    ** live service, which this test deliberately does not contact. Nothing here
+    ** depends on the number being the real one: what it buys is a body spanning
+    ** more than two reads with a final read that is neither empty nor full, and
+    ** any number of that shape would do. Named rather than left to look like a
+    ** measurement. */
     one_body("1299 bytes, six reads", big, 1299);
 }
 
@@ -549,6 +555,412 @@ static void test_size_ceiling(void)
     free(buf);
 }
 
+/*******************************************************************************
+ *                          EZPI_core_http_body_in_place
+ *******************************************************************************/
+
+/* The second half of what the accumulator above makes possible. Reassembling
+** every byte of a reply is necessary and not sufficient: what comes back is a
+** status line, a set of headers and then a body framed however the server
+** chose, and cJSON_Parse on the whole of that fails at the first character.
+**
+** The inputs here are chosen by whoever is on the other end of the socket --
+** hex chunk lengths, a declared Content-Length, any number of header lines --
+** so these run under ASan for the same reason the accumulator's do. Every case
+** below is also a copy: the function de-chunks in place, which is only safe
+** because the reassembled body is strictly shorter, and a test that handed it a
+** string literal would be writing to read-only memory. */
+
+static char *dup_str(const char *s)
+{
+    char *d = (char *)malloc(strlen(s) + 1);
+
+    if (NULL == d)
+    {
+        abort();
+    }
+    strcpy(d, s);
+
+    return d;
+}
+
+static void body_is(const char *raw, const char *expect, const char *what)
+{
+    char *copy = dup_str(raw);
+    char sentinel = 0;
+    char *body = &sentinel;
+    uint32_t len = 0xABCDEFu;
+    char label[200];
+
+    if (EZPI_SUCCESS != EZPI_core_http_body_in_place(copy, &body, &len))
+    {
+        snprintf(label, sizeof(label), "%s: accepted", what);
+        ok(0, label);
+    }
+    else
+    {
+        const uint32_t want = (uint32_t)strlen(expect);
+
+        snprintf(label, sizeof(label), "%s: length is %u, not %u", what, (unsigned)want, (unsigned)len);
+        ok(len == want, label);
+
+        snprintf(label, sizeof(label), "%s: bytes match", what);
+        ok((len == want) && (0 == memcmp(body, expect, len)), label);
+
+        snprintf(label, sizeof(label), "%s: terminated at the length", what);
+        ok('\0' == body[len], label);
+    }
+
+    free(copy);
+}
+
+static void body_refused(const char *raw, const char *what)
+{
+    char *copy = dup_str(raw);
+    char sentinel = 0;
+    char *body = &sentinel;
+    uint32_t len = 0xABCDEFu;
+    char label[200];
+
+    snprintf(label, sizeof(label), "refused: %s", what);
+    ok(EZPI_SUCCESS != EZPI_core_http_body_in_place(copy, &body, &len), label);
+
+    /* Both outputs seeded with values the subject cannot produce, so a refusal
+    ** that nonetheless wrote something is a failure here rather than a caller's
+    ** problem later. */
+    snprintf(label, sizeof(label), "refused: %s -- outputs untouched", what);
+    ok((&sentinel == body) && (0xABCDEFu == len), label);
+
+    free(copy);
+}
+
+/* The body sunrisesunset.io is documented to return, which is the thing this
+** whole path exists to fetch. Not verified against a live reply -- see the
+** CAUTION in ezlopi_core_scenes_suntime.h -- so what is being checked is that
+** the framing comes off it intact, not that the service sends exactly this. */
+static const char *k_suntime_body =
+    "{\"results\":{\"date\":\"2026-10-16\",\"sunrise\":\"5:59:11 AM\","
+    "\"sunset\":\"6:04:22 PM\",\"timezone\":\"Asia/Kathmandu\"},\"status\":\"OK\"}";
+
+static void test_body_unchunked(void)
+{
+    printf("-- finding the body: Content-Length and no framing at all --\n");
+
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 17\r\n"
+            "\r\n"
+            "{\"status\":\"OK\"}\r\n",
+            "{\"status\":\"OK\"}\r\n", "Content-Length exactly");
+
+    /* Shorter than what arrived is not an error. With keep-alive the next
+    ** reply's first bytes can already be in the buffer, and Content-Length is
+    ** the only thing that says where this body stops. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Content-Length: 15\r\n"
+            "\r\n"
+            "{\"status\":\"OK\"}HTTP/1.1 200 OK\r\n",
+            "{\"status\":\"OK\"}", "Content-Length shorter than what arrived");
+
+    /* No Content-Length and no Transfer-Encoding: the body is delimited by the
+    ** connection closing, which is what the read loop upstream observes. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Server: nginx\r\n"
+            "\r\n"
+            "{\"status\":\"OK\"}",
+            "{\"status\":\"OK\"}", "no framing headers at all");
+
+    /* Header names are case-insensitive on the wire and servers do not agree
+    ** on a spelling. A test that only ever saw "Content-Length" would pass
+    ** against an implementation using strncmp. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "CONTENT-LENGTH: 5\r\n"
+            "\r\n"
+            "abcdefghij",
+            "abcde", "an upper-case header name");
+    body_is("HTTP/1.1 200 OK\r\n"
+            "content-length:5\r\n"
+            "\r\n"
+            "abcdefghij",
+            "abcde", "a lower-case name with no space after the colon");
+
+    /* The ':' is required immediately after the name, so a longer header that
+    ** ends with the name cannot answer for it. Without that anchor this reply
+    ** would be trimmed to 3 bytes. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "X-Content-Length: 3\r\n"
+            "\r\n"
+            "abcdefghij",
+            "abcdefghij", "X-Content-Length is a different header");
+
+    /* The prefix anchor catches the case above on its own, because the line
+    ** does not start with the name. These two need the ':' as well, and a
+    ** mutation that dropped it survived the whole suite until they were added.
+    ** The second is the one that matters: without the ':', a header merely
+    ** beginning with "Transfer-Encoding" would put this function into
+    ** de-chunking a body that was never chunked. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Content-Length-Hint: 3\r\n"
+            "\r\n"
+            "abcdefghij",
+            "abcdefghij", "Content-Length-Hint is a different header");
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding-Hint: chunked\r\n"
+            "\r\n"
+            "abcdefghij",
+            "abcdefghij", "Transfer-Encoding-Hint is a different header");
+
+    /* A bare-LF separator. Accepted deliberately: proxies produce them, and
+    ** refusing a reply over its line endings costs a scene and buys nothing. */
+    body_is("HTTP/1.1 200 OK\n"
+            "Server: nginx\n"
+            "\n"
+            "{\"status\":\"OK\"}",
+            "{\"status\":\"OK\"}", "bare LF line endings");
+
+    /* The status line is stepped over before any header is matched. If it were
+    ** not, this one would match "Content-Length" on the status line itself. */
+    body_is("HTTP/1.1 200 Content-Length: 2\r\n"
+            "\r\n"
+            "abcdefghij",
+            "abcdefghij", "a header name appearing in the status text");
+}
+
+static void test_body_chunked(void)
+{
+    printf("-- finding the body: chunked framing --\n");
+
+    /* One chunk. The source and destination regions are adjacent here, which
+    ** is the case that makes memmove rather than memcpy necessary. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "\r\n"
+            "f\r\n"
+            "{\"status\":\"OK\"}\r\n"
+            "0\r\n"
+            "\r\n",
+            "{\"status\":\"OK\"}", "a single chunk");
+
+    /* Three chunks, which is what a reply looks like from a server that
+    ** streams. 0x7 + 0x8 + 0x9 = 24 bytes of body out of 44 bytes of framed
+    ** input, so dst falls a long way behind src and the copy is a real move. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "\r\n"
+            "7\r\n"
+            "{\"a\":1,\r\n"
+            "8\r\n"
+            "\"b\":222,\r\n"
+            "9\r\n"
+            "\"c\":3333}\r\n"
+            "0\r\n"
+            "\r\n",
+            "{\"a\":1,\"b\":222,\"c\":3333}", "three chunks reassembled");
+
+    /* Hex, upper and lower case, and more than one digit. A decimal reading of
+    ** "1A" is 1, which would truncate the body to a single brace and leave the
+    ** rest to be mistaken for a chunk header. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "\r\n"
+            "1A\r\n"
+            "01234567890123456789012345\r\n" /* 0x1A == 26 bytes */
+            "0\r\n"
+            "\r\n",
+            "01234567890123456789012345", "an upper-case two-digit hex size");
+
+    /* Chunk extensions. Nothing reads them; they have to be stepped over to
+    ** reach the CRLF, and a parser that did not would read the ';' as the end
+    ** of the size and then fail to find the CRLF. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "\r\n"
+            "5;ieee=754\r\n"
+            "abcde\r\n"
+            "0\r\n"
+            "\r\n",
+            "abcde", "a chunk header carrying an extension");
+
+    /* A trailer after the terminating chunk is not body. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "\r\n"
+            "5\r\n"
+            "abcde\r\n"
+            "0\r\n"
+            "Expires: Wed, 21 Oct 2026 07:28:00 GMT\r\n"
+            "\r\n",
+            "abcde", "a trailer after the terminating chunk");
+
+    /* "gzip, chunked" is legal and means chunked is the outer framing, so a
+    ** whole-value comparison against "chunked" would miss it and the hex
+    ** length would be handed to cJSON. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding: gzip, chunked\r\n"
+            "\r\n"
+            "5\r\n"
+            "abcde\r\n"
+            "0\r\n"
+            "\r\n",
+            "abcde", "chunked as the last item of a list");
+
+    /* Chunked wins over a Content-Length if a server sends both, because that
+    ** is what the framing on the wire actually is. */
+    body_is("HTTP/1.1 200 OK\r\n"
+            "Content-Length: 99\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "\r\n"
+            "5\r\n"
+            "abcde\r\n"
+            "0\r\n"
+            "\r\n",
+            "abcde", "chunked takes precedence over Content-Length");
+}
+
+/* The reply this path exists for, in both framings a server might choose, so
+** that the thing handed to EZPI_core_suntime_from_reply is known to be exactly
+** the JSON and nothing else. */
+static void test_the_suntime_reply(void)
+{
+    char raw[512];
+    char chunked[512];
+    const size_t n = strlen(k_suntime_body);
+
+    printf("-- the suntime reply, both framings --\n");
+
+    snprintf(raw, sizeof(raw),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %u\r\n"
+             "Connection: close\r\n"
+             "\r\n"
+             "%s",
+             (unsigned)n, k_suntime_body);
+    body_is(raw, k_suntime_body, "Content-Length framed");
+
+    /* Split across two chunks in the middle of the sunrise time itself -- byte
+    ** 44 falls between the '5' and the ':' of "5:59:11 AM". That is where a
+    ** reassembly losing a byte per chunk is hardest to spot by eye, because
+    ** what comes out still reads as a time. */
+    snprintf(chunked, sizeof(chunked),
+             "HTTP/1.1 200 OK\r\n"
+             "Transfer-Encoding: chunked\r\n"
+             "\r\n"
+             "%x\r\n%.*s\r\n%x\r\n%s\r\n0\r\n\r\n",
+             44u, 44, k_suntime_body,
+             (unsigned)(n - 44u), k_suntime_body + 44);
+    body_is(chunked, k_suntime_body, "chunk-framed across the sunrise time");
+
+    ok(n > 44, "the fixture is long enough for that split to be a split");
+    ok(0 == memcmp(k_suntime_body + 42, "\"5:", 3), "and byte 44 really is inside the time");
+    ok(NULL == strstr(k_suntime_body, "\r\n"), "and contains no CRLF of its own");
+}
+
+static void test_body_refusals(void)
+{
+    printf("-- replies that cannot be accounted for in full --\n");
+
+    body_refused("", "an empty reply");
+    body_refused("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n",
+                 "headers with no blank line after them");
+    body_refused("HTTP/1.1 200 OK\r\n\r\n", "a 200 with an empty body");
+
+    /* A non-200 has a body too and it is not the data that was asked for.
+    ** Reading it would turn a redirect into a parse failure several layers
+    ** away from what went wrong. */
+    body_refused("HTTP/1.1 404 Not Found\r\n\r\n{\"error\":\"nope\"}", "a 404");
+    body_refused("HTTP/1.1 301 Moved\r\nLocation: /elsewhere\r\n\r\n<html/>", "a 301");
+    body_refused("HTTP/1.1 500 Internal Server Error\r\n\r\n{}", "a 500");
+    body_refused("HTTP/1.1 204 No Content\r\n\r\nx", "a 204");
+
+    /* The "HTTP/1." prefix is required, so arbitrary text whose first line
+    ** happens to contain a space and three digits is not a reply. */
+    body_refused("ICY 200 OK\r\n\r\nbody", "a status line that is not HTTP/1.x");
+    body_refused("{\"status\":\"OK\"}", "a bare JSON body with no reply around it");
+    body_refused("HTTP/1.1 OK\r\n\r\nbody", "a status line with no numeric code");
+    body_refused("HTTP/1.1\r\n\r\nbody", "a status line with nothing after the version");
+
+    /* The server itself saying the body is incomplete. */
+    body_refused("HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\n{\"status\":\"OK\"}",
+                 "Content-Length longer than what arrived");
+    body_refused("HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\nbody",
+                 "Content-Length with no digits");
+    body_refused("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nbody",
+                 "Content-Length of zero");
+    body_refused("HTTP/1.1 200 OK\r\nContent-Length: 99999999999999999999\r\n\r\nbody",
+                 "Content-Length past any size this can hold");
+
+    /* Chunked framing that ran out. A reply cut off mid-transfer is precisely
+    ** what chunked framing exists to make detectable, and the accumulator's old
+    ** behaviour -- keep what arrived, report success -- is what these pin. */
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "5\r\nabcde\r\n",
+                 "chunks with no terminating zero");
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "10\r\nabcde\r\n0\r\n\r\n",
+                 "a chunk shorter than its announced size");
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "\r\nabcde\r\n0\r\n\r\n",
+                 "a chunk header with no size in it");
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "zz\r\nabcde\r\n0\r\n\r\n",
+                 "a chunk size that is not hex");
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "5\r\nabcdeX0\r\n\r\n",
+                 "no CRLF after a chunk's data");
+
+    /* The three cases below exist because three mutations survived the rest of
+    ** this suite. Each of them is the same shape: a stream that is wrong in a
+    ** way that happens to be re-interpretable as a shorter complete body, so a
+    ** parser missing one check hands back something plausible instead of
+    ** failing. The cases above are refused by the pristine subject for a
+    ** different reason than the check being tested, which is why they could not
+    ** tell the difference.
+    **
+    ** Two junk bytes where a chunk's CRLF belongs, followed by a well-formed
+    ** chunk. Without the CRLF check the two bytes are skipped as if they were
+    ** the CRLF and "abcdefgh" comes back. */
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "5\r\nabcdeXX3\r\nfgh\r\n0\r\n\r\n",
+                 "junk where a chunk's CRLF belongs");
+
+    /* A good chunk, then a chunk header that is not a number. Without the
+    ** no-digits check the size stays 0, which reads as the terminating chunk,
+    ** and "abcde" comes back as a complete body. */
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "5\r\nabcde\r\nzz\r\n",
+                 "a good chunk followed by a non-numeric chunk header");
+
+    /* The same shape with the stream simply stopping: a chunk header position
+    ** holding nothing at all. */
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "5\r\nabcde\r\n;x\r\n",
+                 "a good chunk followed by a header with only an extension");
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "5",
+                 "a reply that ends inside a chunk header");
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "0\r\n\r\n",
+                 "chunked framing carrying no body at all");
+    body_refused("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "FFFFFFFFFFFFFFFF\r\nabcde\r\n0\r\n\r\n",
+                 "a chunk size past any size this can hold");
+}
+
+static void test_body_rejects_bad_arguments(void)
+{
+    char raw[] = "HTTP/1.1 200 OK\r\n\r\nbody";
+    char *body = NULL;
+    uint32_t len = 0;
+
+    printf("-- bad arguments --\n");
+
+    ok(EZPI_FAILED == EZPI_core_http_body_in_place(NULL, &body, &len), "NULL reply is refused");
+    ok(EZPI_FAILED == EZPI_core_http_body_in_place(raw, NULL, &len), "NULL body-out is refused");
+    ok(EZPI_FAILED == EZPI_core_http_body_in_place(raw, &body, NULL), "NULL length-out is refused");
+    ok(NULL == body, "and nothing was written through the one that was valid");
+}
+
 int main(void)
 {
     printf("ezlopi-core-http response accumulator host tests\n\n");
@@ -560,6 +972,11 @@ int main(void)
     test_failed_growth_changes_nothing();
     test_loop_stops_on_failure();
     test_size_ceiling();
+    test_body_unchunked();
+    test_body_chunked();
+    test_the_suntime_reply();
+    test_body_refusals();
+    test_body_rejects_bad_arguments();
 
     printf("\n%d check(s), %d failure(s)\n", g_checks, g_fails);
 

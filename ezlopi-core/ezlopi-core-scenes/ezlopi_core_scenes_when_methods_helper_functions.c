@@ -53,6 +53,7 @@
 #include "ezlopi_core_scenes_expressions.h"
 #include "ezlopi_core_scenes_when_methods_helper_functions.h"
 #include "ezlopi_core_scenes_delete.h"
+#include "ezlopi_core_scenes_suntime.h"
 
 #include "ezlopi_cloud_constants.h"
 #include "EZLOPI_USER_CONFIG.h"
@@ -1692,55 +1693,154 @@ static uint8_t __isdate_find_nth_week_curr_month(struct tm *info)
     // TRACE_S("[1-7] : %dth_Day  lies in week[%dth] of the current month", (info->tm_wday), tmp_week_num);
     return tmp_week_num;
 }
+/**
+ * Fetch today's sunrise or sunset and store it in `user_data`.
+ *
+ * WHAT THIS USED TO DO
+ *
+ * It read the stored coordinates, traced them, and then ignored them: both
+ * branches of the `if (lat_long_vals)` wrote the same hardcoded Kathmandu URL,
+ * so the only effect of having coordinates was one extra trace line. It wrote
+ * that URL into `.url`, which an uncredentialed GET never reads -- the request
+ * line comes from `.target_page` -- so every request went out as "GET /". It
+ * then discarded whatever came back without freeing it, assigned
+ * 05:48:42 (or 17:48:42 for a sunset), and tested that literal for being
+ * all-zero, which it cannot be, leaving the failure branch below it
+ * unreachable. The result was an isSunState scene that fired at 05:48 or 17:48
+ * local time anywhere on earth, and leaked a reply per day while doing it.
+ *
+ * WHAT IT DOES NOW
+ *
+ * The three parts that can be got wrong -- the query, the reply shape and the
+ * clock arithmetic -- are in ezlopi-core-scenes/ezlopi_core_scenes_suntime.c
+ * with 109 host-tested assertions behind them, and the framing of the reply is
+ * removed by EZPI_core_http_body_in_place. What is left here is the part that
+ * genuinely needs a radio, which is why it is still here and still untested.
+ *
+ * `curr_tm_day` is cleared first and set only once a time has actually been
+ * parsed, so every way out of this function that does not produce one leaves
+ * the caller's "no data for today" signal set. The caller -- ISSUNSTATE_get_suntime
+ * -- re-enters here whenever `curr_tm_day` differs from today, which means a
+ * failed lookup is retried on the next condition evaluation rather than
+ * remembered. That is deliberate for a transient network failure and is a
+ * known gap for a persistent one: there is no backoff, so a hub that cannot
+ * reach the service will ask again every time the scene is evaluated.
+ */
 static void __issunsate_update_sunstate_tm(int tm_mday, s_sunstate_data_t *user_data)
 {
-    if (tm_mday && user_data)
+    if ((0 == tm_mday) || (NULL == user_data))
     {
-        char tmp_url[100] = {0};
-        char tmp_headers[] = "Host: api.sunrisesunset.io\r\nAccept: */*\r\nConnection: keep-alive\r\n";
-        char tmp_web_server[] = "api.sunrisesunset.io";
-        char *lat_long_vals = EZPI_core_nvs_read_latidtude_longitude();
-        if (lat_long_vals)
-        {
-            TRACE_S("long_lat_co-ordinate : %s", lat_long_vals);
-            snprintf(tmp_url, 95, "%s", "https://api.sunrisesunset.io/json?lat=27.700769&lng=85.300140");
-            ezlopi_free(__FUNCTION__, lat_long_vals);
-        }
-        else
-        {
-            // send httprequest to 'sunrisesunset.io' // use the latitude and longitude from NVS
-            snprintf(tmp_url, 95, "%s", "https://api.sunrisesunset.io/json?lat=27.700769&lng=85.300140");
-        }
+        return;
+    }
 
-        s_ezlopi_core_http_mbedtls_t tmp_config = {
-            .method = HTTP_METHOD_GET,
-            .url = tmp_url,
-            .url_maxlen = sizeof(tmp_url),
-            .web_port = 443,
-            .header = tmp_headers,
-            .header_maxlen = sizeof(tmp_headers),
-            .web_server = tmp_web_server,
-            .web_server_maxlen = sizeof(tmp_web_server),
-            .response = NULL,
-            .response_maxlen = 0,
-        };
-        /*Make API call here and extract the suntime[according to 'user_data->sunstate_mode']*/
+    user_data->curr_tm_day = 0;
 
-        EZPI_core_http_mbedtls_req(&tmp_config);
-        // e.g. after valid extraction
-        user_data->curr_tm_day = tm_mday;                                                    // this stores day for which data is extracted
-        user_data->choosen_suntime.tm_hour = 5 + ((user_data->sunstate_mode == 2) ? 12 : 0); // sunrise = 1 ; sunset = 2
-        user_data->choosen_suntime.tm_min = 48;
-        user_data->choosen_suntime.tm_sec = 42;
+    char *lat_long_vals = EZPI_core_nvs_read_latidtude_longitude();
+    if (NULL == lat_long_vals)
+    {
+        TRACE_E("no coordinates stored; set them with hub.coordinates.set before using a sunrise/sunset scene");
+        return;
+    }
 
-        // now check if sunset and sunrise time are not zero
-        if ((0 == user_data->choosen_suntime.tm_hour) &&
-            (0 == user_data->choosen_suntime.tm_min) &&
-            (0 == user_data->choosen_suntime.tm_sec))
+    /* 64 bytes against a longest possible output of 36 -- "json?lat=-90.000000&lng=-180.000000"
+    ** and its terminator -- which is bounded by the %.6f in build_query. The
+    ** truncation check in there is what makes that a bound and not a hope. */
+    char tmp_target[64] = {0};
+    const ezlopi_error_t query_err = EZPI_core_suntime_build_query(tmp_target, sizeof(tmp_target), lat_long_vals);
+
+    ezlopi_free(__FUNCTION__, lat_long_vals);
+
+    if (EZPI_SUCCESS != query_err)
+    {
+        /* build_query has already traced which of the three things was wrong:
+        ** unparseable JSON, absent coordinates, or coordinates out of range.
+        ** No default location is substituted -- sunrise at a place the user
+        ** never chose is a plausible-looking wrong answer, and those are the
+        ** hardest kind to notice. */
+        return;
+    }
+
+    /* "Connection: close", which this used to send as "keep-alive". The read
+    ** loop in __ezlopi_http_req_via_mbedTLS ends on a close-notify or a
+    ** zero-length read, and no timeout is configured anywhere on that socket
+    ** -- mbedtls_ssl_conf_read_timeout is never called in this tree -- so a
+    ** server honouring keep-alive leaves mbedtls_ssl_read blocked on a
+    ** connection it is deliberately holding open, with the scene-evaluation
+    ** task inside it. That cost nothing while the reply was being thrown away.
+    ** It is a hang as soon as anything waits for the body. */
+    char tmp_headers[] = "Host: api.sunrisesunset.io\r\nAccept: */*\r\nConnection: close\r\n";
+    char tmp_web_server[] = "api.sunrisesunset.io";
+
+    s_ezlopi_core_http_mbedtls_t tmp_config = {
+        .method = HTTP_METHOD_GET,
+        /* target_page, not url: for a GET with no credentials
+        ** __ezlopi_http_generate_request writes "GET /%s" from target_page and
+        ** never looks at url. The path was the one thing the old code built
+        ** and the one thing it did not send. */
+        .target_page = tmp_target,
+        .targe_page_maxlen = (uint16_t)sizeof(tmp_target),
+        /* Not a url -- there is none -- but url_maxlen is also the term that
+        ** sizes the request buffer in EZPI_core_http_mbedtls_req, and the path
+        ** has to be accounted for there. */
+        .url_maxlen = (uint16_t)sizeof(tmp_target),
+        .web_port = 443,
+        .header = tmp_headers,
+        .header_maxlen = sizeof(tmp_headers),
+        .web_server = tmp_web_server,
+        .web_server_maxlen = sizeof(tmp_web_server),
+        .response = NULL,
+        .response_maxlen = 0,
+    };
+
+    EZPI_core_http_mbedtls_req(&tmp_config);
+
+    if (NULL == tmp_config.response)
+    {
+        TRACE_E("no reply from %s for '%s'", tmp_web_server, tmp_target);
+        return;
+    }
+
+    char *body = NULL;
+    uint32_t body_len = 0;
+
+    if (EZPI_SUCCESS == EZPI_core_http_body_in_place(tmp_config.response, &body, &body_len))
+    {
+        int hour = 0;
+        int min = 0;
+        int sec = 0;
+
+        if (EZPI_SUCCESS == EZPI_core_suntime_from_reply(body, user_data->sunstate_mode, &hour, &min, &sec))
         {
-            TRACE_E(" Failed... clearing 'sunrise/sunset tm_mday'.. ");
-            user_data->curr_tm_day = 0;
+            user_data->choosen_suntime.tm_hour = hour;
+            user_data->choosen_suntime.tm_min = min;
+            user_data->choosen_suntime.tm_sec = sec;
+
+            /* Last, so that the day is recorded only for a time that was
+            ** actually read. */
+            user_data->curr_tm_day = tm_mday;
+
+            TRACE_S("%s today is %02d:%02d:%02d",
+                    (EZPI_SUNTIME_MODE_SUNSET == user_data->sunstate_mode) ? "sunset" : "sunrise",
+                    hour, min, sec);
         }
+    }
+
+    /* The reply is allocated inside __ezlopi_http_req_via_mbedTLS and handed
+    ** out through config->response; nothing in the HTTP component frees it, so
+    ** it belongs to whoever called the request. Nothing freed it here, so each
+    ** isSunState scene leaked one reply per day.
+    **
+    ** The leak also gets bigger with this change, for a reason worth naming:
+    ** the old code sent "GET /", which api.sunrisesunset.io answers with a
+    ** short error page. Now that the path is actually sent, the reply is a
+    ** real one. So fixing the request without fixing the free would have made
+    ** the leak worse than it was. */
+    ezlopi_free(__FUNCTION__, tmp_config.response);
+
+    if (0 == user_data->curr_tm_day)
+    {
+        TRACE_E("could not read today's %s time; this scene will not fire on it today",
+                (EZPI_SUNTIME_MODE_SUNSET == user_data->sunstate_mode) ? "sunset" : "sunrise");
     }
 }
 static void __issunstate_add_offs(e_issunstate_offset_t tmoffs_type, struct tm *choosen_suntime, struct tm *defined_moment, const char *tm_offs_val)

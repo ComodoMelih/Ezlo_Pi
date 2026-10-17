@@ -73,7 +73,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
-           test_httpresp
+           test_httpresp test_suntime
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -644,6 +644,48 @@ $(BUILD)/test_httpresp: test_httpresp.c $(HTTP_DIR)/ezlopi_core_http_buf.c | $(B
 	$(CC) $(HTTPRESP_CFLAGS) -c -o $(BUILD)/test_httpresp_main.o test_httpresp.c
 	$(CC) $(HTTPRESP_CFLAGS) -c -o $(BUILD)/httpresp_subject.o $(HTTP_DIR)/ezlopi_core_http_buf.c
 	$(CC) -o $@ $(BUILD)/test_httpresp_main.o $(BUILD)/httpresp_subject.o $(LDFLAGS)
+
+# The isSunState suntime helpers: the 12-hour clock parser, the query built
+# from the stored coordinates, and the extraction of one time from a reply
+# body. These were split out of __issunsate_update_sunstate_tm, which is in
+# the 4000-line when-methods helper file and needs a radio, a clock and an NVS
+# partition; the three functions here need none of those and carry all of the
+# arithmetic that can be got wrong.
+#
+# The clock parser is the reason this rule exists. "12:00:00 AM" is hour 0 and
+# "12:00:00 PM" is hour 12, and a +12 on every PM reading is both the obvious
+# implementation and wrong twice a day. test_suntime walks all 1440 minutes
+# through both renderings, which is a check no amount of reading substitutes
+# for.
+#
+# ezlopi_cloud_keywords.c is compiled rather than stubbed, for the reason given
+# at length in the test_httpurl rule: ezlopi_latitude_str and
+# ezlopi_longitude_str are the same constants that named the fields when the
+# coordinates were stored, and a stubbed copy of them would let this test pass
+# against key names the firmware does not use.
+#
+# stubs-scenes/ comes first on the include path for CONFIG_EZPI_SERV_ENABLE_MESHBOTS,
+# shared with test_scenefields and test_httpurl rather than copied. The nm
+# guard is load-bearing for exactly that reason: the subject is wrapped end to
+# end in that #ifdef, so without the macro it preprocesses to nothing, the link
+# still succeeds for as long as the test references no symbol from it, and the
+# suite would report a pass having compiled an empty object.
+SUNTIME_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                  -I$(SCENES_DIR) -I$(ERRORS_DIR) -I$(CJEXT_DIR) \
+                  -I$(CONSTANTS_DIR) \
+                  -I stubs-scenes -I$(STUBS_DIR) \
+                  $(SANITIZERS)
+$(BUILD)/test_suntime: test_suntime.c $(SCENES_DIR)/ezlopi_core_scenes_suntime.c \
+                       $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                       $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(SUNTIME_CFLAGS) -c -o $(BUILD)/test_suntime_main.o test_suntime.c
+	$(CC) $(SUNTIME_CFLAGS) -c -o $(BUILD)/suntime_subject.o $(SCENES_DIR)/ezlopi_core_scenes_suntime.c
+	@nm $(BUILD)/suntime_subject.o | grep -q ' T EZPI_core_suntime_parse_clock' \
+	  || { echo "ezlopi_core_scenes_suntime.c compiled to an empty object -- CONFIG_EZPI_SERV_ENABLE_MESHBOTS is not reaching it"; exit 1; }
+	$(CC) $(SUNTIME_CFLAGS) -c -o $(BUILD)/suntime_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(SUNTIME_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/suntime_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_suntime_main.o $(BUILD)/suntime_subject.o \
+	      $(BUILD)/suntime_keywords.o $(BUILD)/suntime_cjext.o $(LDFLAGS) -lm
 
 # The BLE chunk accumulator: the linked list that holds a payload too large for
 # one ATT write until the last chunk arrives. Four characteristics use it and

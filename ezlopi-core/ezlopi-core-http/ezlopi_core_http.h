@@ -170,6 +170,39 @@ extern "C"
     ezlopi_error_t EZPI_core_http_resp_append(char **buf, uint32_t *cap, uint32_t *used, const char *chunk, uint32_t chunk_len);
 
     /**
+     * @brief Finds the entity body inside a raw HTTP reply, reassembling it in
+     *        place when it arrived chunked.
+     *
+     * EZPI_core_http_mbedtls_req() hands back everything the socket produced:
+     * status line, headers, blank line, then the body in whatever framing the
+     * server chose. A caller that wants to parse the body -- the isSunState
+     * suntime lookup is the first one in this tree -- cannot do that until the
+     * framing is removed, and `Transfer-Encoding: chunked` is not an exotic
+     * case to skip: it is what an HTTP/1.1 server sends whenever it does not
+     * know the length in advance.
+     *
+     * De-chunking is done in place because the reassembled body is always
+     * shorter than the chunked form, and because the buffer belongs to the
+     * caller and is about to be freed. `resp` is therefore modified.
+     *
+     * A reply this cannot account for in full -- no blank line, a status other
+     * than 200, a Content-Length longer than what arrived, a chunk sequence
+     * that ends without its terminating zero -- is a failure rather than a
+     * best-effort body, because a body that is missing its middle parses as
+     * well as a complete one and is worse than no body at all.
+     *
+     * Defined in ezlopi_core_http_buf.c so that a host test can run it.
+     *
+     * @param resp      [ NUL-terminated raw reply; modified when chunked. ]
+     * @param body      [ Out: points into 'resp'. NUL-terminated at body_len. ]
+     * @param body_len  [ Out: the body's length in bytes. ]
+     *
+     * @return EZPI_SUCCESS when a complete, non-empty body was found. On
+     *         failure both outputs are left untouched.
+     */
+    ezlopi_error_t EZPI_core_http_body_in_place(char *resp, char **body, uint32_t *body_len);
+
+    /**
      * @brief This Task , generates a http request, by combining information contained in '*config'.
      *
      * @param config : config_struct [ complete_url + webserver-name + web_port + headers + content + username + password + response ]
