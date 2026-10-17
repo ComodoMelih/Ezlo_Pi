@@ -6845,6 +6845,19 @@ Listed because a changelog that only mentions what was finished is misleading.
   `ezlopi_main.c:296`. It is an opt-in leak tracer for a developer who turns
   it on deliberately.
 
+  Two things were checked before leaving it, because "nothing compiles it" is
+  a reason to look rather than a reason to stop. It does still build: flipping
+  the symbol to `=y` in `sdkconfig.defaults.esp32` and building esp32 succeeds,
+  `ezlopi_core_heap.c.obj` is produced, `EZPI_core_util_heap_trace` is in the
+  ELF, and the image goes from 1683856 to 1698720 bytes, +14864. So the tracer
+  has not rotted while unbuilt, which was the thing actually worth knowing.
+  And the compiler is no help on the class: that build emits zero diagnostics
+  at any line of the file and zero `-Wformat` anywhere, despite `-Wall
+  -Wextra` on the translation unit, because a signed/unsigned format mismatch
+  needs `-Wformat-signedness`, which neither of those implies. The six are
+  left as they are on the strength of having no effect, then — not because
+  anything would catch them.
+
   None of these categories is in CI. The committed check matches
   `nullPointer*` only, so they do not gate anything today, and adding
   suppressions for findings no gate reads would be noise. The platform model
