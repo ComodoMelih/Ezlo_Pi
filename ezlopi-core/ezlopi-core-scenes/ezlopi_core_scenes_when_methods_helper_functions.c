@@ -83,6 +83,30 @@ typedef struct s_sunstate_data
     int curr_tm_day;                   // today's day number
     struct tm choosen_suntime;         // unique suntime
     struct tm defined_moment;          // offset+suntime
+
+    /* The day `defined_moment` was last computed for, and whether that
+     * computation worked. 0 means never attempted.
+     *
+     * These two replace a test on `defined_moment` being all-zero, which was
+     * standing in for both of them and could do neither job. It could not say
+     * "already done", because midnight is a time a real offset produces, so a
+     * scene whose moment landed on 00:00:00 recomputed it on every evaluation.
+     * And it could not say "do it again tomorrow", because nothing ever put
+     * the zeroes back: the moment was computed on the first evaluation and
+     * then kept for as long as the hub stayed up, while `choosen_suntime` was
+     * refreshed daily underneath it. An isSunState scene therefore tracked the
+     * sun for exactly one day and then became a fixed-time scene -- drifting
+     * by roughly a minute or two a day, in the direction that looks like the
+     * hub is slightly wrong rather than broken.
+     *
+     * Keeping the day rather than a plain "done" flag is what makes this work
+     * in either field order. The dispatch loop walks the scene's own field
+     * list, so `time` can be visited before `sunrise`; comparing against
+     * `curr_tm_day` -- which only advances once a suntime has actually been
+     * read -- means the moment is never computed from yesterday's suntime, at
+     * worst one evaluation later than it could have been. */
+    int moment_tm_day;
+    bool moment_valid;
 } s_sunstate_data_t;
 
 /*******************************************************************************
@@ -92,7 +116,7 @@ static int __compare_item_values(l_ezlopi_item_t *curr_item, l_fields_v2_t *valu
 static uint8_t __isdate_check_endweek_conditon(e_isdate_modes_t mode_type, struct tm *info);
 static uint8_t __isdate_find_nth_week_curr_month(struct tm *info);
 static void __issunsate_update_sunstate_tm(int tm_mday, s_sunstate_data_t *user_data);
-static void __issunstate_add_offs(e_issunstate_offset_t tmoffs_type, struct tm *choosen_suntime, struct tm *defined_moment, const char *tm_offs_val);
+static bool __issunstate_add_offs(e_issunstate_offset_t tmoffs_type, struct tm *choosen_suntime, struct tm *defined_moment, const char *tm_offs_val);
 static bool __and_when_block_condition(l_scenes_list_v2_t *scene_node, l_when_block_v2_t *when_block);
 static uint8_t __isitemState_vs_field_compare(s_item_exp_data_t *new_extract_data, l_fields_v2_t *tmp_field, uint8_t bit_mode_position);
 static void __replace_old_with_new_data_val(s_item_exp_data_t *new_extract_data, s_item_exp_data_t *prev_extract_data);
@@ -536,18 +560,45 @@ uint8_t ISSUNSTATE_get_suntime(l_scenes_list_v2_t *scene_node, l_fields_v2_t *cu
 uint8_t ISSUNSTATE_get_offs_tmval(l_scenes_list_v2_t *scene_node, l_fields_v2_t *curr_field, struct tm *info, uint8_t curr_sunstate_mode)
 {
     uint8_t flag_check = 0;
-    if ((EZLOPI_VALUE_TYPE_HMS_INTERVAL == curr_field->value_type) && (NULL != curr_field->field_value.u_value.value_string))
+    if (EZLOPI_VALUE_TYPE_HMS_INTERVAL == curr_field->value_type)
     {
         s_sunstate_data_t *user_data = (s_sunstate_data_t *)(scene_node->when_block->fields->user_arg);
         if ((user_data) && (0 != user_data->sunstate_mode))
         {
-            if ((0 == user_data->defined_moment.tm_hour) &&
-                (0 == user_data->defined_moment.tm_min) &&
-                (0 == user_data->defined_moment.tm_sec))
+            /* Once per day, and once per failure -- not once per evaluation
+            ** and not once per lifetime. See the s_sunstate_data_t comment. */
+            if (user_data->moment_tm_day != user_data->curr_tm_day)
             {
-                TRACE_D(".... Adding offset:  +/- (hh:mm:ss) ....");
-                __issunstate_add_offs(user_data->tmoffs_type, &(user_data->choosen_suntime), &(user_data->defined_moment), curr_field->field_value.u_value.value_string);
-                TRACE_S("\r\nSunMode[%d]{sunrise=1,sunset=2,0=NULL},\r\nChoosen_suntime(hh:mm:ss = %d:%d:%d),\r\ndefined_moment(hh:mm:ss = %d:%d:%d),\r\nOffset(%s)\r\n",
+                /* e_type, not value_type. value_type is the label the
+                ** controller attached to the field; e_type is what
+                ** EZPI_scenes_populate_fields_get_value actually put in the
+                ** union, and it chooses by the JSON type it was handed. A
+                ** `hms_interval` field whose value arrives as an object or an
+                ** array is stored as `u_value.cj_value`, and reading
+                ** `u_value.value_string` out of the same union then hands a
+                ** cJSON node's address to snprintf("%s") -- the old
+                ** `NULL != value_string` test passes for any of them, since
+                ** every member of that union is nonzero when it is set. */
+                const char *tm_offs_val = (VALUE_TYPE_STRING == curr_field->field_value.e_type)
+                                              ? curr_field->field_value.u_value.value_string
+                                              : NULL;
+
+                user_data->moment_tm_day = user_data->curr_tm_day;
+                user_data->moment_valid = false;
+
+                if ((VALUE_TYPE_STRING != curr_field->field_value.e_type) &&
+                    (ISSUNSTATE_INTIME_MODE != user_data->tmoffs_type))
+                {
+                    TRACE_E("isSunState offset field holds a %d, not a string; the offset cannot be read",
+                            (int)curr_field->field_value.e_type);
+                }
+
+                user_data->moment_valid = __issunstate_add_offs(user_data->tmoffs_type,
+                                                                &(user_data->choosen_suntime),
+                                                                &(user_data->defined_moment),
+                                                                tm_offs_val);
+
+                TRACE_S("\r\nSunMode[%d]{sunrise=1,sunset=2,0=NULL},\r\nChoosen_suntime(hh:mm:ss = %d:%d:%d),\r\ndefined_moment(hh:mm:ss = %d:%d:%d),\r\nOffset(%s),\r\nvalid(%d)\r\n",
                         user_data->sunstate_mode,
                         user_data->choosen_suntime.tm_hour,
                         user_data->choosen_suntime.tm_min,
@@ -555,7 +606,8 @@ uint8_t ISSUNSTATE_get_offs_tmval(l_scenes_list_v2_t *scene_node, l_fields_v2_t 
                         user_data->defined_moment.tm_hour,
                         user_data->defined_moment.tm_min,
                         user_data->defined_moment.tm_sec,
-                        curr_field->field_value.u_value.value_string);
+                        (tm_offs_val) ? tm_offs_val : "none",
+                        (int)user_data->moment_valid);
             }
         }
     }
@@ -591,7 +643,14 @@ uint8_t ISSUNSTATE_eval_range(l_scenes_list_v2_t *scene_node, l_fields_v2_t *cur
         {
             // TRACE_S("checking midnight range offset");
             flag_check |= (1 << 7); // indicates : midnight-range
-            flag_check |= ISSUNSTATE_check_mdrn(user_data->sunstate_mode, curr_field->field_value.u_value.value_string, info, &(user_data->defined_moment));
+            /* Only a moment that was actually computed is worth comparing
+            ** against. Without this the struct's own zeroes are a time --
+            ** 00:00:00 -- so a scene whose offset was rejected, or whose
+            ** suntime has not been read yet, matched at midnight. */
+            if (user_data->moment_valid)
+            {
+                flag_check |= ISSUNSTATE_check_mdrn(user_data->sunstate_mode, curr_field->field_value.u_value.value_string, info, &(user_data->defined_moment));
+            }
         }
     }
     return flag_check;
@@ -655,7 +714,12 @@ int ISSUNSTATE_check_flag_result(l_scenes_list_v2_t *scene_node, struct tm *info
     s_sunstate_data_t *user_data = (s_sunstate_data_t *)(scene_node->when_block->fields->user_arg);
     if (user_data)
     {
-        if ((0 != user_data->curr_tm_day) && (0 != user_data->sunstate_mode) && (flag_check & MASK_TIME_FLAG)) // defined_moment should have the current day
+        /* `moment_valid` as well as `curr_tm_day`: the day says a suntime was
+        ** read, which is not the same as the trigger having been worked out
+        ** from it. The two come apart whenever the offset field is unreadable,
+        ** and the all-zero defined_moment left behind in that case is
+        ** midnight -- a time the clock reaches every night. */
+        if ((0 != user_data->curr_tm_day) && (0 != user_data->sunstate_mode) && (user_data->moment_valid) && (flag_check & MASK_TIME_FLAG)) // defined_moment should have the current day
         {
             // 1. Set 'time-flag', when defined moment is matched : [sunrise/sunset_moment + offsets (if any)]
             if ((info->tm_hour == user_data->defined_moment.tm_hour) &&
@@ -1843,83 +1907,91 @@ static void __issunsate_update_sunstate_tm(int tm_mday, s_sunstate_data_t *user_
                 (EZPI_SUNTIME_MODE_SUNSET == user_data->sunstate_mode) ? "sunset" : "sunrise");
     }
 }
-static void __issunstate_add_offs(e_issunstate_offset_t tmoffs_type, struct tm *choosen_suntime, struct tm *defined_moment, const char *tm_offs_val)
+static bool __issunstate_add_offs(e_issunstate_offset_t tmoffs_type, struct tm *choosen_suntime, struct tm *defined_moment, const char *tm_offs_val)
 {
-    if (choosen_suntime && defined_moment && tm_offs_val) // choosen_suntime => sunrise or sunset
+    if ((NULL == choosen_suntime) || (NULL == defined_moment))
     {
-        // Default values to store start and end boundries
-        struct tm tmp_time = {0};
+        return false;
+    }
 
-        // Nox, extract & add :'tm_offs_val'
-        char time_diff[10];
-        snprintf(time_diff, 10, "%s", tm_offs_val);
-        time_diff[9] = '\0';
-        char *ptr1 = NULL;
-        char *ptr2 = NULL;
-        if (0 != strlen(time_diff))
+    int offs_sec = 0;
+
+    /* INTIME wants the suntime itself, and the old switch did not look at the
+    ** parsed offset in that arm either -- so an absent or unreadable offset is
+    ** not a reason to refuse here. It is for the other two, where the offset
+    ** is the whole instruction. */
+    if (ISSUNSTATE_INTIME_MODE != tmoffs_type)
+    {
+        if (NULL == tm_offs_val)
         {
-            tmp_time.tm_hour = strtoul(time_diff, &ptr1, 10);
-            if (NULL != ptr1)
-            {
-                tmp_time.tm_min = strtoul(ptr1 + 1, &ptr2, 10);
-                if (NULL != ptr2)
-                {
-                    tmp_time.tm_sec = strtoul(ptr2 + 1, NULL, 10);
-                }
-                else // only has minutes and seconds
-                {
-                    tmp_time.tm_sec = tmp_time.tm_min;
-                    tmp_time.tm_min = tmp_time.tm_hour;
-                    tmp_time.tm_hour = 0;
-                }
-            }
-            else // only has seconds
-            {
-                tmp_time.tm_sec = tmp_time.tm_hour;
-                tmp_time.tm_min = 0;
-                tmp_time.tm_hour = 0;
-            }
+            TRACE_E("isSunState wants an offset for %s mode and the field has none",
+                    (ISSUNSTATE_BEFORE_MODE == tmoffs_type) ? "before" : "after");
+            return false;
         }
-        // Combined  'tm_offs_val' & 'curr_suntime'
-        switch (tmoffs_type)
+
+        if (EZPI_SUCCESS != EZPI_core_suntime_parse_offset(tm_offs_val, &offs_sec))
         {
-        case ISSUNSTATE_INTIME_MODE:
-        {
-            TRACE_S("offset : Intime");
-            defined_moment->tm_hour = choosen_suntime->tm_hour;
-            defined_moment->tm_min = choosen_suntime->tm_min;
-            defined_moment->tm_sec = choosen_suntime->tm_sec;
-            break;
-        }
-        case ISSUNSTATE_BEFORE_MODE:
-        {
-            TRACE_S("offset : Before");
-            defined_moment->tm_hour = (choosen_suntime->tm_hour - tmp_time.tm_hour);
-            defined_moment->tm_hour = (defined_moment->tm_hour < 0) ? (24 + defined_moment->tm_hour) : defined_moment->tm_hour; // check the hour-range
-            defined_moment->tm_min = (choosen_suntime->tm_min - tmp_time.tm_min);
-            defined_moment->tm_min = (defined_moment->tm_min < 0) ? (60 + defined_moment->tm_min) : defined_moment->tm_min; // check the min-range
-            defined_moment->tm_sec = (choosen_suntime->tm_sec - tmp_time.tm_sec);
-            defined_moment->tm_sec = (defined_moment->tm_sec < 0) ? (60 + defined_moment->tm_sec) : defined_moment->tm_sec; // check the sec-range
-            break;
-        }
-        case ISSUNSTATE_AFTER_MODE:
-        {
-            TRACE_S("offset : After");
-            defined_moment->tm_hour = (choosen_suntime->tm_hour + tmp_time.tm_hour);
-            defined_moment->tm_hour = (defined_moment->tm_hour > 23) ? (defined_moment->tm_hour - 24) : defined_moment->tm_hour; // check the hour-range
-            defined_moment->tm_min = (choosen_suntime->tm_min + tmp_time.tm_min);
-            defined_moment->tm_min = (defined_moment->tm_min > 59) ? (defined_moment->tm_min - 60) : defined_moment->tm_min; // check the min-range
-            defined_moment->tm_sec = (choosen_suntime->tm_sec + tmp_time.tm_sec);
-            defined_moment->tm_sec = (defined_moment->tm_sec > 59) ? (defined_moment->tm_sec - 60) : defined_moment->tm_sec; // check the sec-range
-            break;
-        }
-        case ISSUNSTATE_UNDEFINED:
-        {
-            TRACE_D(" INVALID isSunState_offset_type ... No time-offset added.");
-            break;
-        }
+            /* Refusing is the point. The shipped parser accepted anything and
+            ** produced a number from it -- "99:99:99" became a trigger at
+            ** 81:39:39, and "-1" an hour's shift the other way -- and because
+            ** the moment is matched against the wall clock by equality, every
+            ** one of those was a scene that sat in the list looking configured
+            ** and could never fire. A trace and no trigger is the same outcome
+            ** the user gets, with a reason attached. */
+            TRACE_E("isSunState offset '%s' is not ss, mm:ss or h:mm:ss", tm_offs_val);
+            return false;
         }
     }
+
+    switch (tmoffs_type)
+    {
+    case ISSUNSTATE_INTIME_MODE:
+    {
+        offs_sec = 0;
+        break;
+    }
+    case ISSUNSTATE_BEFORE_MODE:
+    {
+        offs_sec = -offs_sec;
+        break;
+    }
+    case ISSUNSTATE_AFTER_MODE:
+    {
+        break;
+    }
+    default:
+    {
+        /* Not reachable from ISSUNSTATE_get_offs_tmval, which only runs once
+        ** sunstate_mode is set, and ISSUNSTATE_get_suntime releases the whole
+        ** user_arg rather than leaving an UNDEFINED type behind. Refused
+        ** anyway, because the alternative is applying some other mode's
+        ** meaning to the user's offset. */
+        TRACE_E("isSunState offset type %d is not one of intime/before/after", (int)tmoffs_type);
+        return false;
+    }
+    }
+
+    int hour = 0;
+    int min = 0;
+    int sec = 0;
+
+    if (EZPI_SUCCESS != EZPI_core_suntime_shift(choosen_suntime->tm_hour,
+                                                choosen_suntime->tm_min,
+                                                choosen_suntime->tm_sec,
+                                                offs_sec, &hour, &min, &sec))
+    {
+        TRACE_E("isSunState suntime %d:%d:%d is not a time of day",
+                choosen_suntime->tm_hour, choosen_suntime->tm_min, choosen_suntime->tm_sec);
+        return false;
+    }
+
+    /* Written together and only now, so a refusal above leaves the previous
+    ** moment untouched rather than half-replaced. */
+    defined_moment->tm_hour = hour;
+    defined_moment->tm_min = min;
+    defined_moment->tm_sec = sec;
+
+    return true;
 }
 static bool __and_when_block_condition(l_scenes_list_v2_t *scene_node, l_when_block_v2_t *when_block)
 {

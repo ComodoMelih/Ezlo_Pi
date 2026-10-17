@@ -511,6 +511,463 @@ static void test_the_old_hardcoded_time_is_gone(void)
     ok(!((17 == h) && (48 == m) && (42 == s)), "and it is not the stub's 17:48:42");
 }
 
+/*******************************************************************************
+ *                          the offset parser
+ *******************************************************************************/
+
+/* Assert an offset string parses to an exact number of seconds. Seeded with a
+** value the function cannot legitimately produce, so a success return that
+** wrote nothing fails here rather than matching by luck. */
+static void offs_is(const char *in, int expect_sec)
+{
+    int got = -12345;
+    char what[96];
+
+    if (EZPI_SUCCESS != EZPI_core_suntime_parse_offset(in, &got))
+    {
+        snprintf(what, sizeof(what), "offset '%s' should parse", in);
+        ok(0, what);
+        return;
+    }
+
+    snprintf(what, sizeof(what), "offset '%s' -> %ds", in, expect_sec);
+    ok(expect_sec == got, what);
+    if (expect_sec != got)
+    {
+        printf("    got %ds\n", got);
+    }
+}
+
+/* Assert an offset is rejected AND that the output was left alone. The second
+** half carries the weight: the shipped parser had no failure path at all, so
+** every caller was a caller that ignored a return value it never got. */
+static void offs_rejected(const char *in)
+{
+    int got = -12345;
+    char what[96];
+
+    snprintf(what, sizeof(what), "offset '%s' is rejected and writes nothing", in);
+    ok((EZPI_SUCCESS != EZPI_core_suntime_parse_offset(in, &got)) && (-12345 == got), what);
+}
+
+static void test_offset_field_count_sets_the_units(void)
+{
+    printf("-- how many fields an offset has decides what they mean --\n");
+
+    /* One field is seconds. This is the case the shipped code could not
+    ** reach: its "only has seconds" branch sat behind `if (NULL != ptr1)`,
+    ** and strtoul always stores an end pointer, so "30" was thirty hours. */
+    offs_is("0", 0);
+    offs_is("1", 1);
+    offs_is("30", 30);
+    offs_is("59", 59);
+
+    /* Two fields are minutes and seconds -- the other dead branch. */
+    offs_is("0:00", 0);
+    offs_is("5:30", (5 * 60) + 30);
+    offs_is("20:00", 20 * 60);
+    offs_is("59:59", (59 * 60) + 59);
+
+    /* Three fields are hours, minutes and seconds: the one form that worked
+    ** before, so these are the checks that guard against the repair changing
+    ** an answer that was already right. */
+    offs_is("0:00:00", 0);
+    offs_is("0:20:00", 20 * 60);
+    offs_is("1:05:30", 3600 + (5 * 60) + 30);
+    offs_is("23:59:59", (23 * 3600) + (59 * 60) + 59);
+
+    /* Leading zeros are the same number, in every position. */
+    offs_is("05", 5);
+    offs_is("05:30", (5 * 60) + 30);
+    offs_is("00:00:30", 30);
+    offs_is("01:05:03", 3600 + (5 * 60) + 3);
+}
+
+static void test_offset_rejections(void)
+{
+    printf("-- offsets that are refused --\n");
+
+    /* Nothing to parse. */
+    offs_rejected("");
+    offs_rejected(":");
+    offs_rejected("::");
+
+    /* A field missing on either side of a colon. */
+    offs_rejected("5:");
+    offs_rejected(":5");
+    offs_rejected("1:2:");
+    offs_rejected("1::2");
+
+    /* More fields than there are units. "20:00:00:00" parsing as twenty
+    ** hours and ignoring the rest is the failure mode worth naming. */
+    offs_rejected("1:2:3:4");
+    offs_rejected("20:00:00:00");
+
+    /* Signs. strtoul accepts a leading '-' and negates the unsigned result,
+    ** so the shipped code read "-1" as 4294967295, truncated it to -1 in an
+    ** int, and quietly shifted the trigger an hour the other way. */
+    offs_rejected("-1");
+    offs_rejected("+1");
+    offs_rejected("-0:20:00");
+
+    /* Padding and units. An offset comes from the scene the user configured,
+    ** not from a wire format with its own spacing rules. */
+    offs_rejected(" 30");
+    offs_rejected("30 ");
+    offs_rejected("30s");
+    offs_rejected("0:20:00 ");
+    offs_rejected("20 min");
+
+    /* Three digits in a field. "123" is not two minutes three seconds and it
+    ** is not one hour twenty-three; it is not an offset. */
+    offs_rejected("123");
+    offs_rejected("1:234");
+    offs_rejected("100:00:00");
+
+    /* Out of range per field. */
+    offs_rejected("60");
+    offs_rejected("5:60");
+    offs_rejected("60:00");
+    offs_rejected("24:00:00");
+    offs_rejected("0:60:00");
+    offs_rejected("0:00:60");
+
+    /* The one from the probe. The shipped code turned this into a trigger at
+    ** 81:39:39 -- a scene that sits in the list looking configured and cannot
+    ** fire, because the moment is matched against the wall clock. */
+    offs_rejected("99:99:99");
+
+    /* Not numbers. */
+    offs_rejected("abc");
+    offs_rejected("1:2:3a");
+    offs_rejected("0x10");
+    offs_rejected("1e3");
+
+    /* Nine digits: the input that made the shipped code read
+    ** time_diff[10] out of a char[10]. ASan confirms that read is real when
+    ** the same byte is loaded directly, and says nothing when strtoul does
+    ** it -- libc is not instrumented. So this check is not a formality; it is
+    ** the only instrument that sees this input at all. */
+    offs_rejected("123456789");
+    offs_rejected("999999999");
+
+    {
+        int sink = 0;
+        ok(EZPI_SUCCESS != EZPI_core_suntime_parse_offset(NULL, &sink), "a NULL offset string is refused");
+        ok(EZPI_SUCCESS != EZPI_core_suntime_parse_offset("30", NULL), "a NULL output is refused");
+    }
+}
+
+/*******************************************************************************
+ *                          moving a suntime by an offset
+ *******************************************************************************/
+
+static void shift_is(int sh, int sm, int ss, int offs, int eh, int em, int es)
+{
+    int h = -1;
+    int m = -1;
+    int s = -1;
+    char what[128];
+
+    if (EZPI_SUCCESS != EZPI_core_suntime_shift(sh, sm, ss, offs, &h, &m, &s))
+    {
+        snprintf(what, sizeof(what), "%02d:%02d:%02d %+ds should shift", sh, sm, ss, offs);
+        ok(0, what);
+        return;
+    }
+
+    snprintf(what, sizeof(what), "%02d:%02d:%02d %+ds -> %02d:%02d:%02d", sh, sm, ss, offs, eh, em, es);
+    ok((eh == h) && (em == m) && (es == s), what);
+    if ((eh != h) || (em != m) || (es != s))
+    {
+        printf("    got %02d:%02d:%02d\n", h, m, s);
+    }
+}
+
+/* The defect, stated as the cases that produced it.
+ *
+ * The shipped code reduced hours, minutes and seconds independently, each with
+ * its own one-period wrap, and never carried between them. So the minute
+ * borrowed and the hour did not. Every one of these came out exactly one hour
+ * away from the right answer, in the wrong direction -- and "twenty minutes
+ * before sunrise" is close to the canonical reason to write an isSunState
+ * scene at all. */
+static void test_shift_carries_between_fields(void)
+{
+    printf("-- the borrow and the carry --\n");
+
+    /* 20 minutes before a 06:10:00 sunrise. The shipped code said 06:50:00:
+    ** forty minutes *after* sunrise, for a scene configured to fire before
+    ** it. */
+    shift_is(6, 10, 0, -(20 * 60), 5, 50, 0);
+
+    /* 20 minutes after a 06:50:00 sunrise. The shipped code said 06:10:00. */
+    shift_is(6, 50, 0, 20 * 60, 7, 10, 0);
+
+    /* 30 seconds before 06:10:10, where only the second field borrows. */
+    shift_is(6, 10, 10, -30, 6, 9, 40);
+
+    /* 90 minutes before 06:10:00, written as 1:30:00, where the hour field is
+    ** nonzero *and* the minutes still borrow -- the shipped code said
+    ** 05:40:00 instead of 04:40:00. */
+    shift_is(6, 10, 0, -((1 * 3600) + (30 * 60)), 4, 40, 0);
+
+    /* Both fields borrowing at once. */
+    shift_is(6, 0, 0, -((0 * 3600) + (20 * 60) + 30), 5, 39, 30);
+
+    /* And the carries, in the other direction. */
+    shift_is(6, 50, 30, (0 * 3600) + (20 * 60) + 45, 7, 11, 15);
+
+    /* Where no borrow is needed the old code was already right, so these are
+    ** the ones that must not have moved. */
+    shift_is(6, 10, 0, -(1 * 3600), 5, 10, 0);
+    shift_is(6, 10, 0, 1 * 3600, 7, 10, 0);
+    shift_is(6, 50, 30, 0, 6, 50, 30);
+}
+
+static void test_shift_wraps_at_midnight(void)
+{
+    printf("-- midnight, from both sides --\n");
+
+    shift_is(0, 10, 0, -(20 * 60), 23, 50, 0);
+    shift_is(23, 50, 0, 20 * 60, 0, 10, 0);
+    shift_is(0, 0, 0, -1, 23, 59, 59);
+    shift_is(23, 59, 59, 1, 0, 0, 0);
+    shift_is(0, 0, 0, 0, 0, 0, 0);
+
+    /* The extremes the parser can hand over: one second short of a full day,
+    ** either way. */
+    shift_is(0, 0, 0, 86399, 23, 59, 59);
+    shift_is(0, 0, 0, -86399, 0, 0, 1);
+    shift_is(12, 0, 0, 86399, 11, 59, 59);
+    shift_is(12, 0, 0, -86399, 12, 0, 1);
+}
+
+/* An explicit carry chain -- the shape the shipped code was reaching for,
+** written so that it actually carries. Used as an independent reference for
+** the seconds-since-midnight arithmetic, so the sweep below is a cross-check
+** between two different methods rather than a restatement of one. */
+static void ref_step(int *h, int *m, int *s, int dir)
+{
+    *s += dir;
+    if (*s < 0)
+    {
+        *s = 59;
+        (*m)--;
+    }
+    else if (*s > 59)
+    {
+        *s = 0;
+        (*m)++;
+    }
+
+    if (*m < 0)
+    {
+        *m = 59;
+        (*h)--;
+    }
+    else if (*m > 59)
+    {
+        *m = 0;
+        (*h)++;
+    }
+
+    if (*h < 0)
+    {
+        *h = 23;
+    }
+    else if (*h > 23)
+    {
+        *h = 0;
+    }
+}
+
+static void test_shift_every_second_of_the_day(void)
+{
+    int bad_fwd = 0;
+    int bad_back = 0;
+    int bad_trip = 0;
+    int bad_zero = 0;
+    int t;
+
+    /* One each side of every minute, hour and day boundary there is. */
+    static const int k_offs[] = {1, -1, 59, -59, 60, -60, 61, -61,
+                                 3599, -3599, 3600, -3600, 3601, -3601,
+                                 20 * 60, -(20 * 60), 86399, -86399};
+
+    printf("-- all 86400 seconds of the day, stepped and round-tripped --\n");
+
+    for (t = 0; t < 86400; t++)
+    {
+        const int sh = t / 3600;
+        const int sm = (t / 60) % 60;
+        const int ss = t % 60;
+
+        int h = -1;
+        int m = -1;
+        int s = -1;
+        size_t i;
+
+        /* Forward one second, against the explicit carry chain. */
+        {
+            int rh = sh;
+            int rm = sm;
+            int rs = ss;
+            ref_step(&rh, &rm, &rs, +1);
+
+            if ((EZPI_SUCCESS != EZPI_core_suntime_shift(sh, sm, ss, 1, &h, &m, &s)) ||
+                (h != rh) || (m != rm) || (s != rs))
+            {
+                if (0 == bad_fwd)
+                {
+                    printf("    first +1s mismatch at %02d:%02d:%02d: got %02d:%02d:%02d, carry chain says %02d:%02d:%02d\n",
+                           sh, sm, ss, h, m, s, rh, rm, rs);
+                }
+                bad_fwd++;
+            }
+        }
+
+        /* And back one second. */
+        {
+            int rh = sh;
+            int rm = sm;
+            int rs = ss;
+            ref_step(&rh, &rm, &rs, -1);
+
+            if ((EZPI_SUCCESS != EZPI_core_suntime_shift(sh, sm, ss, -1, &h, &m, &s)) ||
+                (h != rh) || (m != rm) || (s != rs))
+            {
+                if (0 == bad_back)
+                {
+                    printf("    first -1s mismatch at %02d:%02d:%02d: got %02d:%02d:%02d, carry chain says %02d:%02d:%02d\n",
+                           sh, sm, ss, h, m, s, rh, rm, rs);
+                }
+                bad_back++;
+            }
+        }
+
+        /* A zero offset must be the identity, everywhere. */
+        if ((EZPI_SUCCESS != EZPI_core_suntime_shift(sh, sm, ss, 0, &h, &m, &s)) ||
+            (h != sh) || (m != sm) || (s != ss))
+        {
+            bad_zero++;
+        }
+
+        /* Shift by an offset and back by the same, which has to land where it
+        ** started -- including across midnight, where it is the wrap that has
+        ** to be symmetric. This is a property rather than a recomputation, so
+        ** it holds the arithmetic without assuming it. */
+        for (i = 0; i < (sizeof(k_offs) / sizeof(k_offs[0])); i++)
+        {
+            int bh = -1;
+            int bm = -1;
+            int bs = -1;
+
+            if ((EZPI_SUCCESS != EZPI_core_suntime_shift(sh, sm, ss, k_offs[i], &h, &m, &s)) ||
+                (EZPI_SUCCESS != EZPI_core_suntime_shift(h, m, s, -k_offs[i], &bh, &bm, &bs)) ||
+                (bh != sh) || (bm != sm) || (bs != ss))
+            {
+                if (0 == bad_trip)
+                {
+                    printf("    first round-trip mismatch at %02d:%02d:%02d offset %+d: came back %02d:%02d:%02d\n",
+                           sh, sm, ss, k_offs[i], bh, bm, bs);
+                }
+                bad_trip++;
+            }
+        }
+    }
+
+    ok(0 == bad_fwd, "+1s agrees with an explicit carry chain at all 86400 seconds");
+    ok(0 == bad_back, "-1s agrees with an explicit carry chain at all 86400 seconds");
+    ok(0 == bad_zero, "a zero offset is the identity at all 86400 seconds");
+    ok(0 == bad_trip, "every offset round-trips at all 86400 seconds");
+}
+
+static void test_shift_rejections(void)
+{
+    int h = -7;
+    int m = -7;
+    int s = -7;
+
+    printf("-- shifts that are refused --\n");
+
+    /* A suntime that is not a time of day. The caller's choosen_suntime comes
+    ** from a parsed reply so it should always be in range -- which is exactly
+    ** why this is worth refusing rather than assuming: if it ever is not, the
+    ** alternative is a trigger computed from it. */
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(24, 0, 0, 0, &h, &m, &s), "hour 24 is refused");
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(-1, 0, 0, 0, &h, &m, &s), "hour -1 is refused");
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(0, 60, 0, 0, &h, &m, &s), "minute 60 is refused");
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(0, -1, 0, 0, &h, &m, &s), "minute -1 is refused");
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(0, 0, 60, 0, &h, &m, &s), "second 60 is refused");
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(0, 0, -1, 0, &h, &m, &s), "second -1 is refused");
+
+    /* An offset of a whole day or more. */
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(6, 0, 0, 86400, &h, &m, &s), "an offset of a full day is refused");
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(6, 0, 0, -86400, &h, &m, &s), "a negative full day is refused");
+
+    ok((-7 == h) && (-7 == m) && (-7 == s), "and none of those wrote an output");
+
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(6, 0, 0, 0, NULL, &m, &s), "a NULL hour output is refused");
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(6, 0, 0, 0, &h, NULL, &s), "a NULL min output is refused");
+    ok(EZPI_SUCCESS != EZPI_core_suntime_shift(6, 0, 0, 0, &h, &m, NULL), "a NULL sec output is refused");
+
+    /* The widest offset the parser can produce has to be accepted, or the two
+    ** functions disagree about their shared range. */
+    ok(EZPI_SUCCESS == EZPI_core_suntime_shift(6, 0, 0, 86399, &h, &m, &s), "86399s is accepted");
+    ok(EZPI_SUCCESS == EZPI_core_suntime_shift(6, 0, 0, -86399, &h, &m, &s), "-86399s is accepted");
+}
+
+/* The shipped answers, asserted in the direction of the bug, so that
+** reintroducing any of them fails here rather than somewhere on a roof at
+** sunrise. Each number below is one this code actually produced -- measured,
+** not reasoned about, by compiling the function verbatim and running it. */
+static void test_the_shipped_offset_answers_are_gone(void)
+{
+    int sec = -12345;
+    int h = -1;
+    int m = -1;
+    int s = -1;
+
+    printf("-- the answers the shipped parser gave --\n");
+
+    /* "30" meant thirty hours, which the one-period wrap then turned into an
+    ** offset of six. */
+    ok((EZPI_SUCCESS == EZPI_core_suntime_parse_offset("30", &sec)) && (30 == sec),
+       "'30' is thirty seconds, not thirty hours");
+
+    /* "5:30" meant five hours thirty minutes. */
+    ok((EZPI_SUCCESS == EZPI_core_suntime_parse_offset("5:30", &sec)) && (330 == sec),
+       "'5:30' is five minutes thirty, not five hours thirty");
+
+    /* Twenty minutes before sunrise landed forty minutes after it. */
+    ok(EZPI_SUCCESS == EZPI_core_suntime_shift(6, 10, 0, -(20 * 60), &h, &m, &s), "the canonical case shifts");
+    ok(!((6 == h) && (50 == m) && (0 == s)), "and 20m before 06:10 is not 06:50");
+    ok((5 == h) && (50 == m) && (0 == s), "it is 05:50");
+
+    /* "99:99:99" became a trigger at 81:39:39 in 'after' mode. There is no
+    ** such time, so the scene could never fire; it is refused outright now. */
+    sec = -12345;
+    ok(EZPI_SUCCESS != EZPI_core_suntime_parse_offset("99:99:99", &sec), "'99:99:99' is refused outright");
+    ok(-12345 == sec, "and leaves nothing behind to be used by mistake");
+
+    /* "-1" became a one-hour shift in the opposite direction. */
+    sec = -12345;
+    ok(EZPI_SUCCESS != EZPI_core_suntime_parse_offset("-1", &sec), "'-1' is refused, not read as 4294967295");
+
+    /* '500:00:00' produced an hour of -470. */
+    sec = -12345;
+    ok(EZPI_SUCCESS != EZPI_core_suntime_parse_offset("500:00:00", &sec), "'500:00:00' is refused");
+
+    /* And the input whose minute field came out of never-written stack: the
+    ** probe measured 7777717 for "5" with the stack primed. There is no
+    ** assertion that can see that from here, which is the point -- the only
+    ** defence is that the string is now parsed in full or not at all. */
+    sec = -12345;
+    ok((EZPI_SUCCESS == EZPI_core_suntime_parse_offset("5", &sec)) && (5 == sec),
+       "'5' is five seconds and reads no further than the string");
+}
+
 int main(void)
 {
     printf("ezlopi-core-scenes suntime host tests\n\n");
@@ -525,6 +982,13 @@ int main(void)
     test_reply_extraction();
     test_reply_shape_mismatches_are_rejected();
     test_the_old_hardcoded_time_is_gone();
+    test_offset_field_count_sets_the_units();
+    test_offset_rejections();
+    test_shift_carries_between_fields();
+    test_shift_wraps_at_midnight();
+    test_shift_every_second_of_the_day();
+    test_shift_rejections();
+    test_the_shipped_offset_answers_are_gone();
 
     printf("\n%d check(s), %d failure(s)\n", g_checks, g_fails);
     if (g_fails)

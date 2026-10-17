@@ -121,6 +121,58 @@ extern "C"
      */
     ezlopi_error_t EZPI_core_suntime_from_reply(const char *body, uint8_t sunstate_mode, int *hour, int *min, int *sec);
 
+    /**
+     * Parse an `hms_interval` offset into a count of seconds.
+     *
+     * The number of fields chooses their meaning, which is the rule the
+     * shipped parser meant to implement and never could:
+     *
+     *     "30"         30 seconds
+     *     "5:30"       5 minutes 30 seconds
+     *     "1:05:30"    1 hour 5 minutes 30 seconds
+     *
+     * One or two digits per field, nothing before or after, no sign. Rejects
+     * rather than salvages: a minute or second above 59, an hour above 23, a
+     * fourth field, a trailing colon, a space, an empty string.
+     *
+     * The range check is the part that matters, and not for the usual reason.
+     * An out-of-range offset does not fault and does not get noticed -- the
+     * caller compares the moment it produces against the wall clock for
+     * equality, so "99:99:99" yields a trigger at 81:39:39 that no clock ever
+     * reaches. The scene stays in the list, reports no error, and never fires.
+     *
+     * @param str       the offset; not modified
+     * @param offs_sec  out, 0-86399, untouched on failure
+     *
+     * @return EZPI_SUCCESS only when the whole string was accounted for.
+     */
+    ezlopi_error_t EZPI_core_suntime_parse_offset(const char *str, int *offs_sec);
+
+    /**
+     * Move a suntime by a signed number of seconds, within the day.
+     *
+     * `offs_sec` is negative for "before sunrise" and positive for "after", so
+     * the two directions are one code path; the result wraps at midnight in
+     * both.
+     *
+     * Seconds-since-midnight internally, on purpose. Subtracting hours,
+     * minutes and seconds as three separate fields requires a borrow between
+     * them, and getting that wrong is not conspicuous: it yields a time that
+     * looks like a time. The shipped code reduced each field independently and
+     * put "20 minutes before" a 06:10:00 sunrise at 06:50:00.
+     *
+     * @param sun_hour  0-23, the suntime
+     * @param sun_min   0-59
+     * @param sun_sec   0-59
+     * @param offs_sec  -86399 to 86399
+     * @param hour      out, 0-23, untouched on failure
+     * @param min       out, 0-59
+     * @param sec       out, 0-59
+     *
+     * @return EZPI_SUCCESS unless an input was out of range.
+     */
+    ezlopi_error_t EZPI_core_suntime_shift(int sun_hour, int sun_min, int sun_sec, int offs_sec, int *hour, int *min, int *sec);
+
 #ifdef __cplusplus
 }
 #endif

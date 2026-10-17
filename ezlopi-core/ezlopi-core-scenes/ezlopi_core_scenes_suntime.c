@@ -288,6 +288,138 @@ ezlopi_error_t EZPI_core_suntime_from_reply(const char *body, uint8_t sunstate_m
     return ret;
 }
 
+ezlopi_error_t EZPI_core_suntime_parse_offset(const char *str, int *offs_sec)
+{
+    if ((NULL == str) || (NULL == offs_sec))
+    {
+        return EZPI_FAILED;
+    }
+
+    const char *p = str;
+    /* The loop bound below, not this size, is what limits the field count, so
+    ** growing this array changes no behaviour -- a mutation sweep records
+    ** widening it to [4] as an equivalent mutant for exactly that reason. The
+    ** fourth field is refused by the trailing-character check instead. */
+    int field[3] = {0, 0, 0};
+    int count = 0;
+
+    /* No leading-whitespace skip, unlike the clock parser. A clock reading
+    ** comes from a web service whose spacing is its own business; an offset
+    ** comes from the scene the user configured, where " 20" and "20" differing
+    ** in meaning would be a trap and accepting both hides a sender that is
+    ** sending something else entirely. */
+    while (count < 3)
+    {
+        if (EZPI_SUCCESS != __read_clock_field(&p, &field[count]))
+        {
+            return EZPI_FAILED;
+        }
+        count++;
+
+        if (':' != *p)
+        {
+            break;
+        }
+        p++;
+    }
+
+    /* Anything left over is a rejection. A fourth field, a trailing colon, a
+    ** sign, a space, a unit -- none of those are offsets this understands, and
+    ** parsing the part that looks familiar would turn "20:00:00:00" into
+    ** twenty hours. */
+    if ('\0' != *p)
+    {
+        return EZPI_FAILED;
+    }
+
+    int h = 0;
+    int m = 0;
+    int s = 0;
+
+    /* The widths shift with the number of fields given, which is the rule the
+    ** shipped code tried to implement and could not reach: its two fallback
+    ** branches sat behind `if (NULL != ptr1)`, and strtoul always stores an
+    ** end pointer, so the test never failed and the branches never ran. "30"
+    ** therefore meant thirty hours. Here one field is seconds, two are minutes
+    ** and seconds, three are hours, minutes and seconds. */
+    switch (count)
+    {
+    case 1:
+    {
+        s = field[0];
+        break;
+    }
+    case 2:
+    {
+        m = field[0];
+        s = field[1];
+        break;
+    }
+    default:
+    {
+        h = field[0];
+        m = field[1];
+        s = field[2];
+        break;
+    }
+    }
+
+    /* Range-checked because an out-of-range offset is not a loud failure
+    ** downstream, it is a silent one: the caller compares the resulting moment
+    ** against the wall clock for equality, so an hour of 81 is a scene that
+    ** simply never fires and never says why. 24 hours is the limit for a
+    ** once-a-day trigger -- a whole day either side of sunrise is sunrise. */
+    if ((h > 23) || (m > 59) || (s > 59))
+    {
+        return EZPI_FAILED;
+    }
+
+    *offs_sec = (h * 3600) + (m * 60) + s;
+
+    return EZPI_SUCCESS;
+}
+
+ezlopi_error_t EZPI_core_suntime_shift(int sun_hour, int sun_min, int sun_sec, int offs_sec, int *hour, int *min, int *sec)
+{
+    if ((NULL == hour) || (NULL == min) || (NULL == sec))
+    {
+        return EZPI_FAILED;
+    }
+
+    if ((sun_hour < 0) || (sun_hour > 23) ||
+        (sun_min < 0) || (sun_min > 59) ||
+        (sun_sec < 0) || (sun_sec > 59))
+    {
+        return EZPI_FAILED;
+    }
+
+    if ((offs_sec < -86399) || (offs_sec > 86399))
+    {
+        return EZPI_FAILED;
+    }
+
+    /* One number, not three. The whole reason this is seconds-since-midnight
+    ** rather than three subtractions is that three subtractions have to carry
+    ** between themselves, and the shipped code did not: it reduced each field
+    ** on its own, so "20 minutes before" a 06:10:00 sunrise came out as
+    ** 06:50:00 -- the minute borrowed, the hour did not, and the trigger
+    ** landed forty minutes *after* sunrise instead of twenty before. Every
+    ** offset whose minutes exceeded the sunrise's was wrong by an hour, in the
+    ** wrong direction, which covers most of the ones anyone would set. */
+    int t = (sun_hour * 3600) + (sun_min * 60) + sun_sec + offs_sec;
+
+    /* Both directions. C's % keeps the sign of the dividend, so a negative t
+    ** needs the extra day added before the second reduction; `t % 86400`
+    ** alone would leave -600 as -600. */
+    t = ((t % 86400) + 86400) % 86400;
+
+    *hour = t / 3600;
+    *min = (t / 60) % 60;
+    *sec = t % 60;
+
+    return EZPI_SUCCESS;
+}
+
 /*******************************************************************************
  *                          Static Function Definitions
  *******************************************************************************/

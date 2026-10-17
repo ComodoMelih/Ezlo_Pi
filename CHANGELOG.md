@@ -943,6 +943,251 @@ None of these have been exercised on physical hardware; see Known gaps.
   chain: which scenes behave differently now. See Known gaps, including why the
   risk is asymmetric.
 
+- **"20 minutes before sunrise" fired forty minutes after it, and "30 seconds
+  after" fired six hours later.** The offset half of an isSunState trigger —
+  [`__issunstate_add_offs`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1910)
+  — had seven defects in it. Its companion entry under *Scene HTTP requests*
+  fixed the half that fetches the suntime; this is the half that moves it, and
+  until now it moved it to the wrong place for every offset anybody would
+  actually type.
+
+  Each one was established by compiling the shipped function **verbatim** and
+  running it, not by reading it. Every number below is from that probe.
+
+  **The parser could only read the three-field form.** It parsed `hms_interval`
+  by finding colons with `strtoul`, and its two fallback branches — the ones
+  that give `"30"` and `"5:30"` their meanings — both sat behind
+  `if (NULL != ptr1)`. `strtoul` *always* stores through a non-NULL `endptr`,
+  including the no-conversion case, where it stores the input pointer back. So
+  the test never failed, the branches never ran, and the first field was always
+  hours. Measured against a 00:00:00 suntime in `after` mode, so that the
+  result *is* the offset:
+
+  | offset | meant | the shipped code produced |
+  |---|---|---|
+  | `"30"` | 00:00:30 | **06:00:00** |
+  | `"5:30"` | 00:05:30 | **05:30:00** |
+  | `"12:34:56"` | 12:34:56 | 12:34:56 — correct |
+
+  Only the shape that names all three fields worked. `"30"` became thirty
+  hours, which the function's single wrap guard reduced to six.
+
+  **The arithmetic had no borrow or carry.** It reduced hours, minutes and
+  seconds as three independent fields, so a minute that needed to borrow from
+  the hour borrowed from nothing:
+
+  | | wanted | got |
+  |---|---|---|
+  | `0:20:00` *before* a 06:10:00 sunrise | 05:50:00 | **06:50:00** |
+  | `0:20:00` *after* a 06:50:00 sunset | 07:10:00 | **06:10:00** |
+  | `0:00:30` *before* 06:10:10 | 06:09:40 | **06:10:40** |
+  | `1:30:00` *before* 06:10:00 | 04:40:00 | **05:40:00** |
+  | `1:00:00` *before* 06:10:00 | 05:10:00 | 05:10:00 — correct |
+
+  The second row is the one worth staring at: *after* moved the trigger
+  earlier. Both directions were wrong, and wrong in the opposite direction to
+  the one requested, whenever the offset's minutes exceeded the suntime's —
+  which is most of the offsets a person would set. Only a whole number of
+  hours, needing no borrow, came out right.
+
+  **Nothing was range-checked, and `strtoul` accepts a leading minus.** An
+  out-of-range result is not a loud failure here. The moment is compared to the
+  wall clock *for equality* by
+  [`ISSUNSTATE_check_mdrn`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L658),
+  so a trigger at 81:39:39 is not an error — it is a scene that sits in the
+  list, reports nothing, and never fires:
+
+  | offset, against a 06:00:00 suntime | the shipped code produced |
+  |---|---|
+  | `"-1"`, `after` | **05:00:00** — a negative offset silently inverted the direction |
+  | `"99:99:99"`, `after` | **81:39:39** |
+  | `"500:00:00"`, `before` | **−470:00:00** |
+
+  **It read uninitialised stack.** The offset was copied into a `char[10]` with
+  `snprintf`, which writes the string and one terminator; index `[9]` was then
+  set by hand. For any offset shorter than nine characters the bytes between
+  are never written, and `strtoul(ptr1 + 1)` reads straight into them. With the
+  stack primed with a known byte, `"5"` against a 00:00:00 suntime produced
+  **05:7777717:00** — the minutes came out of the gap, not the offset.
+
+  **And it read one byte past the end of that array.** Nine digits put `ptr1`
+  on `time_diff[9]`, so `ptr1 + 1` is `time_diff[10]`. `"123456789"` produced
+  **123456765:08:00**.
+
+  **The same array also truncated silently**, which is the third defect that
+  one `char[10]` carried. `snprintf(time_diff, 10, "%s", tm_offs_val)` keeps
+  nine characters and a terminator, so a longer offset lost its tail with no
+  return-value check and no trace — and truncation is the failure mode that
+  turns a string the parser would have refused into one it accepts, since what
+  is cut off is the end, where the trailing-character check would have looked.
+  This one is read off the code rather than probed: unlike the two above it
+  needs no primed stack to see.
+
+  That last one is the most useful result in this entry, because **the
+  sanitizers do not catch it.** Under `-fsanitize=address,undefined` the probe
+  read that byte and exited 0 with no report. Rather than assume why, a second
+  probe read the identical byte two ways: read directly it is a reported
+  `stack-buffer-overflow ... READ of size 1 ... <== Memory access at offset 106
+  overflows this variable`; read through `strtoul` it is silent. ASan
+  instruments the code it compiles, and libc is neither compiled with it nor
+  interposed for `strtoul`. So this defect was invisible to the one tool most
+  likely to be pointed at it — which is a fair part of the answer to how it
+  survived in shipped firmware.
+
+  **Two more were in the caller, not the parser.**
+  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L560)
+  used "is `defined_moment` all-zero?" as its do-this-once test, and that
+  sentinel cannot do either job it was given. It cannot mean *already done*,
+  because 00:00:00 is a time a real offset produces, so a scene whose moment
+  landed on midnight recomputed it on every single evaluation. And it cannot
+  mean *do it again tomorrow*, because nothing ever put the zeroes back — in
+  the whole translation unit the only writes to `defined_moment` were the ones
+  inside `__issunstate_add_offs` itself, reached only through that same
+  all-zero test. The moment was therefore
+  computed on the first evaluation after boot and kept for as long as the hub
+  stayed up, while the suntime underneath it was refreshed daily. **An
+  isSunState scene tracked the sun for one day and then became a fixed-time
+  scene**, drifting a minute or two per day — in the direction that looks like
+  a hub with a slightly wrong clock rather than a hub with a bug.
+
+  The other was a union read without its tag. The caller tested
+  `NULL != value_string` before using it, which is not the question: `e_type`
+  is the discriminant, and `value_string` and `cj_value` are the same bytes. It
+  matters here specifically, because
+  [`EZLOPI_VALUE_TYPE_HMS_INTERVAL`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_populate.c#L578)
+  is named explicitly in the `cJSON_Array` arm of field population, which
+  stores
+  [`VALUE_TYPE_CJSON`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_populate.c#L581).
+  An offset arriving as an array or an object is a `cJSON *`, and
+  `NULL != value_string` passes for it — every member of that union is nonzero
+  when it is set — so a node address went to `snprintf("%s")`.
+
+  **Read as a chain, every one of these hid the next.** It did not matter that
+  the offset was unrange-checked, because the field widths were wrong anyway.
+  It did not matter that the field widths were wrong, because the arithmetic
+  could not carry. It did not matter that the arithmetic could not carry,
+  because the answer was computed once and then frozen. And none of it
+  surfaced, because the failure mode throughout is a scene that fires at a
+  plausible-looking wrong time or does not fire at all — never a crash, never a
+  log line.
+
+  **The fix moves both calculations out to where they can be run on a
+  development machine**, next to the three functions the companion entry moved
+  there:
+  [`EZPI_core_suntime_parse_offset`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L291)
+  and
+  [`EZPI_core_suntime_shift`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L382).
+  The parser counts its fields and lets the count choose their meaning, which
+  is the rule the shipped code was reaching for; the shift works in
+  seconds-since-midnight, so there is no borrow to get wrong — a single
+  `((t % 86400) + 86400) % 86400` handles both directions and the midnight wrap,
+  and C's sign rule for `%` is why the addition is in the middle. Both
+  range-check and both reject rather than salvage. `__issunstate_add_offs` is
+  now a `bool`: parse, apply the sign, shift, and write the three outputs
+  together only on success.
+
+  The caller keeps two new fields instead of the sentinel,
+  [`moment_tm_day`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L108)
+  and
+  [`moment_valid`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L109),
+  so the moment is computed once per day and once per failure. Storing the
+  *day* rather than a plain done-flag is what makes it correct in either field
+  order — the dispatch loop walks the scene's own field list, so the offset
+  field can be visited before the sunrise field, and comparing against
+  `curr_tm_day`, which only advances once a suntime has actually been read,
+  means the moment is never computed from yesterday's suntime. And both places
+  that compare the moment to the clock —
+  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L636)
+  and
+  [`ISSUNSTATE_check_flag_result`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L703)
+  — now require `moment_valid` first, because the struct's own zeroes read as
+  00:00:00, a time the clock reaches every night.
+
+  **Evidence.**
+  [`tests/host/test_suntime.c`](tests/host/test_suntime.c) grew from **109**
+  checks to **206**, at **0** failures. The load-bearing one is a sweep over
+  **all 86400** seconds of the day: each is stepped forward and back one second
+  and compared against an independent reference, and then round-tripped through
+  **18** offsets. **0** mismatches. The reference is deliberately *not* the
+  subject's method — it is an explicit three-field carry chain, the shape the
+  shipped code was trying to be, written so that it actually carries. Two
+  different methods agreeing at every second of the day is worth more than one
+  method restating itself.
+
+  **22** mutations of the two new functions were run. The control row — no
+  mutation — sits at **206** checks and **0** failures both before the sweep
+  and after the restore, which is the row that makes the 22 mean anything:
+  without it, "21 detected" and "the harness fails on everything" print the
+  same. **21** were detected and **1** survived.
+
+  **Three** of the 21 were caught by a sanitizer and by nothing else, and that
+  is the methodological finding worth recording: UBSan recovers by default, so
+  a mutant can trip a runtime error and still print a tally. These three
+  printed no tally at all — inverting the colon test, dropping the input NULL
+  guard, and dropping the output NULL guard each killed the binary outright. A
+  sweep that scored only the failure count would have filed all three as
+  survivors. Counting a sanitizer report as a detection in its own right is
+  what caught them.
+
+  The survivor is an **equivalent** mutant and is recorded as one rather than
+  chased. Growing `int field[3]` to `field[4]` changes no behaviour, because
+  the array size is not what limits the field count — `while (count < 3)` is,
+  so `count` only ever takes 0, 1 or 2 and the fourth slot is unreachable
+  storage. That was measured rather than reasoned: the four-field rejections
+  `"1:2:3:4"` and `"20:00:00:00"` are among the **9** checks that fail when the
+  *trailing-character* check is removed instead, which is where the rejection
+  actually comes from. The mutant stays in the list so the claim is re-measured
+  next time rather than remembered.
+
+  **Ten** checks assert in the direction of the bug, each number taken from the
+  probe above rather than from the new implementation: `"30"` is 30 seconds and
+  not 30 hours, `"5:30"` is 330 seconds, twenty minutes before a 06:10:00
+  sunrise is *not* 06:50:00 and *is* 05:50:00, `"99:99:99"`, `"-1"` and
+  `"500:00:00"` are refused with the output left untouched, and `"5"` is five
+  seconds. Reinstating any of the shipped answers fails the suite. The
+  uninitialised-stack read is the one defect with no assertion of its own, and
+  the test says so at the site rather than leaving the gap implicit: there is
+  nothing observable from outside the function to assert on, and the only
+  defence is that the string is now accounted for in full or refused.
+
+  All four targets build and link clean — esp32, esp32s2, esp32s3 and esp32c3 —
+  and all three `EZPI_core_suntime_*` symbols are present in every one of the
+  four images. On its own that proves only that *something* compiled, so the
+  sweep was run twice: once against this tree and once against a `git archive`
+  of the committed tree, eight builds in total. Both new symbols are **absent**
+  from all four baseline images and **present** in all four fixed ones. The
+  absence half is the half that carries weight here, because the whole scenes
+  translation unit sits behind `CONFIG_EZPI_SERV_ENABLE_MESHBOTS`: with
+  meshbots off these functions compile to nothing, the image still links, and
+  the build still reports OK. A guard that stopped reaching the file is now
+  caught by the symbol check rather than quietly shipping none of this.
+
+  | target | image delta | `.flash.text` | `.flash.rodata` |
+  |---|---|---|---|
+  | esp32 | +480 | +336 | +152 |
+  | esp32s2 | +464 | +308 | +144 |
+  | esp32s3 | +448 | +296 | +152 |
+  | esp32c3 | +320 | +168 | +160 |
+
+  The two loadable sections sum to +488, +452, +448 and +328, so the image
+  delta lands 8 bytes below that sum on esp32, 12 above on esp32s2, exactly on
+  it on esp32s3 and 8 below on esp32c3 — segment alignment padding, and the
+  same shape of residual the earlier suntime change reported. Reported rather
+  than rounded: a reconciliation forced to balance exactly stops being a check.
+  The all-sections total the sweep script printed is *not* this figure and
+  should not be read as it — that line sums debug sections too, and on esp32c3
+  it comes out negative against a positive image delta for exactly that reason.
+
+  The full host suite is **27** binaries and **5758** checks at **0** failures.
+
+  **One thing here is assumed rather than verified, and it is flagged in Known
+  gaps:** the wire shape of `hms_interval`. There is no sample payload anywhere
+  in this tree, so whether the controller sends `"0:20:00"` as a JSON string or
+  an object is undetermined. The `e_type` gate makes either safe — the
+  non-string case now traces what it got and refuses, rather than reading a
+  cJSON node as a string — but which branch a real controller takes is
+  untested. Nothing in this entry has been run on hardware.
+
 ### UART sensor dispatch — [sec]
 
 - **The UART receive task invoked its callback with a NULL buffer on every
@@ -5760,7 +6005,7 @@ enumerators — so the live half of this component was never affected.
   `web_server`, and the
   [`web_port = port`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L306)
   on the next line still runs with the real port. The third caller,
-  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1729),
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1793),
   was never at risk: its `web_server` is a `char` array initialised from a
   literal.
 
@@ -5892,7 +6137,7 @@ enumerators — so the live half of this component was never affected.
   [DELETE](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L764) arms of
   `__ezlopi_http_generate_request()`. And the field is NULL on a path with no
   malloc on it at all.
-  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1729)
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1793)
   — the third caller, the one the previous entry establishes was never at risk
   for `web_server` — builds its config with a
   [designated initializer](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1774)
@@ -6217,7 +6462,7 @@ enumerators — so the live half of this component was never affected.
 
 - **An isSunState scene fired at 05:48 or 17:48 local time, anywhere on
   earth.** The function that was supposed to fetch today's sunrise or sunset,
-  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1729),
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1793),
   was 51 lines long and had five independent defects in them. What makes it
   worth writing up as one entry rather than five is that each defect made the
   next one undetectable.
@@ -6257,7 +6502,8 @@ enumerators — so the live half of this component was never affected.
   [`EZPI_core_suntime_from_reply`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L221)
   and
   [`EZPI_core_suntime_parse_clock`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.c#L48)
-  in a **358**-line translation unit. The boundary was drawn where it is for
+  in what is now a **490**-line translation unit. The boundary was drawn where
+  it is for
   one reason: everything on this side of it can be compiled and run on a
   development machine. Its only dependencies beyond `stdio.h` and `string.h`
   are `cjext.h`, the trace macros and the cloud keyword table, and the host
@@ -6265,12 +6511,14 @@ enumerators — so the live half of this component was never affected.
   `ezlopi_cloud_keywords.c` — nothing in the calculation is standing in for
   anything.
   [`tests/host/test_suntime.c`](tests/host/test_suntime.c) compiles the real
-  file and makes **109** assertions against it, including every one of the 1440
+  file and makes **206** assertions against it, **109** of them for the three
+  functions in this entry and the rest for the offset arithmetic described under
+  *Scene triggers*. They include every one of the 1440
   minutes in a day put through both the 12-hour and the 24-hour rendering and
   compared against each other — **0** mismatches either way. The rule carries
   the same `nm` guard as the rest of the suite, so if
   `CONFIG_EZPI_SERV_ENABLE_MESHBOTS` ever stops reaching the file and it
-  compiles to an empty object, the build fails rather than reporting 109 checks
+  compiles to an empty object, the build fails rather than reporting 206 checks
   against nothing.
 
   Ten mutations of the subject were run and all **10** were detected: `+12` on
@@ -8477,11 +8725,11 @@ Listed because a changelog that only mentions what was finished is misleading.
   51 lines, recorded here because it needed rewriting rather than patching.
   That rewrite is done and is described under *Scene HTTP requests*; what is
   left of the gap is one thing the rewrite deliberately did not do.
-  [`ISSUNSTATE_get_suntime`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L480)
+  [`ISSUNSTATE_get_suntime`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L504)
   calls
-  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1729)
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1793)
   whenever the recorded day differs from today, and on a cleared
-  [`curr_tm_day`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L519)
+  [`curr_tm_day`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L543)
   it releases the whole `user_arg` block and returns 0 — so the next evaluation
   allocates a fresh zeroed one and the lookup runs again from nothing. A hub
   that cannot reach `api.sunrisesunset.io` therefore opens a TLS connection to
@@ -8493,16 +8741,55 @@ Listed because a changelog that only mentions what was finished is misleading.
   The fix is a per-day attempt counter or a timestamped backoff.
 
   **The isSunState path is also the one fix in this branch whose top-level
-  function has no test that can fail.** The query, the reply parsing and the
-  clock arithmetic were extracted precisely so that they could have one, and
-  they have 109 assertions between them. The function that calls them does not,
-  because it needs a radio: a test for it means a seam at
+  functions have no test that can fail.** The query, the reply parsing, the
+  clock arithmetic, the offset parser and the shift were extracted precisely so
+  that they could have one, and they have **206** assertions between them. The
+  two functions that call them do not.
+  `__issunsate_update_sunstate_tm` needs a radio: a test for it means a seam at
   `EZPI_core_http_mbedtls_req` — a function pointer or a weak symbol — which is
-  a larger change to the HTTP component than this defect warranted. Stated
-  rather than implied, since the entry above reports a lot of green: the five
-  original defects are fixed by reading and by a four-target build that checks
-  the symbols are in the image, and only the three extracted pieces are fixed
-  by anything that can fail.
+  a larger change to the HTTP component than this defect warranted.
+  `ISSUNSTATE_get_offs_tmval` needs a populated scene, a field list and a
+  `struct tm`, so the once-per-day recomputation and the `e_type` gate are
+  likewise argued rather than demonstrated. Stated rather than implied, since
+  the entries above report a lot of green: of the twelve defects across the two
+  halves, the ones inside the extracted functions are fixed by something that
+  can fail, and the rest are fixed by reading and by a four-target build that
+  checks the symbols are in the image.
+
+- **The wire shape of `hms_interval` is assumed, not verified.** The isSunState
+  offset parser described under *Scene triggers* takes a string — `"30"`,
+  `"5:30"`, `"1:05:30"` — because that is what the shipped code tried to parse
+  and what the field's name implies. But there is no sample payload for an
+  `isSunState` block anywhere in this tree, and field population names
+  [`EZLOPI_VALUE_TYPE_HMS_INTERVAL`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_populate.c#L578)
+  explicitly in its `cJSON_Array` arm, which stores a duplicated `cJSON *`
+  rather than a string. So the controller may well send an array or an object,
+  and which it sends is undetermined here.
+  The consequence is bounded on purpose rather than by luck: the caller gates
+  on `e_type`, so a non-string arrives as a refusal and a trace line naming the
+  type it got, not as a cJSON node handed to `snprintf("%s")`. An offset the
+  hub cannot read means the scene does not fire and says so. What is *not*
+  known is whether that is the branch a real controller takes — in which case
+  every isSunState offset is refused and the correct fix is to read the fields
+  out of the object. One captured payload settles it, and that needs a hub
+  paired to the cloud.
+
+  **The same union-without-its-tag read is still present two lines away, and
+  was deliberately not fixed in that change.**
+  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L636)
+  gates on [`value_string`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L639)
+  being non-NULL for its `EZLOPI_VALUE_TYPE_TOKEN` field, with
+  no `e_type` check, and the `cJSON_Object` arm of field population stores
+  `VALUE_TYPE_CJSON` for any value_type it does not name — `TOKEN` is not among
+  the ones it names. So an object-valued range field puts a `cJSON *` where a
+  string is expected here too. It is recorded rather than fixed because the
+  consequence is different in kind: the pointer is only ever handed to
+  `EZPI_STRNCMP_IF_EQUAL` against a fixed set of tokens, so it fails to match
+  and the range check does not fire — no `snprintf("%s")` of a node address. A
+  sweep of every `u_value.value_string` read in the scenes component against
+  its `e_type` is the right shape for this, rather than one more site at a
+  time, and it wants the captured payload above first so the cases can be
+  ordered by which ones a controller actually produces.
 
 - **Arm nine of the URL ladder puts a leading slash on the path and truncates a
   long one in silence.** The credentialed-URL defect this gap used to hold open
