@@ -9636,6 +9636,27 @@ Listed because a changelog that only mentions what was finished is misleading.
   then is removing the file a tidy-up rather than a false reassurance. Flagged
   here rather than quietly edited.
 
+  **The provenance is upstream's, and it was checked rather than assumed,
+  because the answer decides who can act on it.** Exactly one commit in the
+  entire history touches this file: `f2a74e5`, *Merge pull request #236 from
+  ezloteam/development*, authored by an Ezlo developer on 2025-01-31. The blob
+  is byte-identical at `origin/master`, at `fork/master` and at this branch
+  (`4db010f`), so it is already published in `ezloteam/Ezlo_Pi` and was already
+  published in the fork before any work recorded in this changelog began. No
+  commit on this branch touches the file at all.
+
+  Two consequences, and the second is the one that was initially got wrong
+  here. The first: this is an **upstream disclosure**, so the useful action is
+  reporting it to Ezlo, who hold the devices and the cloud account — not
+  deleting the file in a fork, which would retract nothing and would make the
+  fork diverge from upstream for no security gain. The second: because the
+  material is already public and untouched by this branch, **pushing this
+  branch does not publish it**. An earlier note treated the push as the
+  exposure event and advised holding it on that basis; that was wrong, and the
+  distinction matters because "a push would leak the keys" is an argument for
+  never pushing, while "the keys are already upstream and public" is an
+  argument for filing a report. Only the second is true.
+
 - **Only `esp32` has been run on hardware.** All four targets now compile
   cleanly, but compiling is not running. `esp32s2`, `esp32s3` and `esp32c3`
   have never been flashed or booted, so for those three "supported" means "the
