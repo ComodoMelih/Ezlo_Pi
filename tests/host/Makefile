@@ -37,6 +37,7 @@ EVENTGRP_DIR := ../../ezlopi-core/ezlopi-core-event-group
 CONSTANTS_DIR := ../../ezlopi-cloud/ezlopi-cloud-constants
 BLEBUF_DIR   := ../../ezlopi-core/ezlopi-core-ble
 I2C_HAL_DIR  := ../../ezlopi-hal/ezlopi-hal-i2c
+HTTP_DIR     := ../../ezlopi-core/ezlopi-core-http
 
 # cjext needs two headers that do not exist on a host: EZLOPI_USER_CONFIG.h
 # (whose real version includes driver/uart.h and the generated sdkconfig.h) and
@@ -71,7 +72,8 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mb1013 test_gps6mv2 test_uuid test_actions test_localkey \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
-           test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl
+           test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
+           test_httpresp
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -579,13 +581,23 @@ HTTPURL_INC := -I$(SCENES_DIR) -I$(ERRORS_DIR) -I$(CJEXT_DIR) \
                -I stubs-httpurl -I stubs-scenes -I$(STUBS_DIR)
 $(BUILD)/test_httpurl: HTTPURL_CFLAGS := -std=c99 -O1 -g -D_GNU_SOURCE \
                                          $(HTTPURL_INC) $(SANITIZERS)
+#
+# ezlopi_core_http_buf.c is linked rather than stubbed. stub_httpurl.c used to
+# carry a third reimplementation, EZPI_core_http_dyna_relloc, because the only
+# copy of it was in the un-compilable ezlopi_core_http.c. It moved to
+# ezlopi_core_http_buf.c when the response accumulator needed a host test, and
+# that file does compile here -- so the copy is deleted and the real function
+# grows the `Host:` header this test asserts on. Two reimplementations remain
+# (mem_malloc, calc_empty_bufsize); both are still stuck in ezlopi_core_http.c.
 $(BUILD)/test_httpurl: test_httpurl.c stub_httpurl.c \
+                       $(HTTP_DIR)/ezlopi_core_http_buf.c \
                        $(SCENES_DIR)/ezlopi_core_scenes_then_methods_helper_func.c \
                        $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
                        $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c \
                        $(CJEXT_DIR)/cjext.c | $(BUILD)
 	$(CC) $(HTTPURL_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_httpurl_main.o test_httpurl.c
 	$(CC) $(HTTPURL_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/httpurl_stub.o stub_httpurl.c
+	$(CC) $(HTTPURL_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/httpurl_httpbuf.o $(HTTP_DIR)/ezlopi_core_http_buf.c
 	$(CC) $(HTTPURL_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/httpurl_subject.o $(SCENES_DIR)/ezlopi_core_scenes_then_methods_helper_func.c
 	@nm $(BUILD)/httpurl_subject.o | grep -q ' T EZPI_parse_http_url' \
 	  || { echo "ezlopi_core_scenes_then_methods_helper_func.c compiled to an object without EZPI_parse_http_url in it -- CONFIG_EZPI_SERV_ENABLE_MESHBOTS is not reaching it"; exit 1; }
@@ -593,8 +605,45 @@ $(BUILD)/test_httpurl: test_httpurl.c stub_httpurl.c \
 	$(CC) $(HTTPURL_CFLAGS) -c -o $(BUILD)/httpurl_valuetypes.o $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c
 	$(CC) $(HTTPURL_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/httpurl_cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_httpurl_main.o $(BUILD)/httpurl_stub.o \
+	      $(BUILD)/httpurl_httpbuf.o \
 	      $(BUILD)/httpurl_subject.o $(BUILD)/httpurl_keywords.o \
 	      $(BUILD)/httpurl_valuetypes.o $(BUILD)/httpurl_cjext.o $(LDFLAGS) -lm
+
+# The HTTPS response accumulator. ezlopi_core_http_buf.c is the one file in
+# ezlopi-core-http that can be compiled here, and it is that file because the
+# accumulator was moved into it for this test: ezlopi_core_http.c needs ten
+# headers this repository does not ship, nine of them under mbedtls/ and
+# esp_tls/, which is also why stub_httpurl.c still reimplements two of its
+# buffer helpers rather than linking them. It carried a third until this file
+# existed; see the test_httpurl rule above.
+#
+# The move was worth making because the defect being regressed -- an snprintf
+# size argument that counted the terminator, so every 255-byte read lost its
+# last byte -- is invisible to everything else in this repository. It writes
+# less than it has room for, so ASan sees no overflow; it is not a crash, so no
+# target build reports it. A test that compares the reassembled body against
+# what was sent is the only instrument that can see it, and that test has to run
+# the real code to be worth anything.
+#
+# stubs-httpresp/ comes first on the include path and shadows exactly one macro
+# from stubs/EZLOPI_USER_CONFIG.h: ezlopi_realloc, routed through a function the
+# test can make fail. The contract on a failed growth is that nothing is
+# appended and none of *buf, *cap or *used moves, and the only way to check that
+# is to make growth fail. See that header for why --wrap and giant sizes were
+# rejected.
+#
+# No nm guard here, and that is a deliberate difference from test_httpurl and
+# test_ble_buffer rather than an omission: ezlopi_core_http_buf.c is not wrapped
+# in any #ifdef, so there is no macro whose absence could silently empty the
+# object. If one is ever added, add the guard with it.
+HTTPRESP_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                   -I$(HTTP_DIR) -I$(ERRORS_DIR) -I$(CJEXT_DIR) \
+                   -I stubs-httpresp -I stubs-httpurl -I$(STUBS_DIR) \
+                   $(SANITIZERS)
+$(BUILD)/test_httpresp: test_httpresp.c $(HTTP_DIR)/ezlopi_core_http_buf.c | $(BUILD)
+	$(CC) $(HTTPRESP_CFLAGS) -c -o $(BUILD)/test_httpresp_main.o test_httpresp.c
+	$(CC) $(HTTPRESP_CFLAGS) -c -o $(BUILD)/httpresp_subject.o $(HTTP_DIR)/ezlopi_core_http_buf.c
+	$(CC) -o $@ $(BUILD)/test_httpresp_main.o $(BUILD)/httpresp_subject.o $(LDFLAGS)
 
 # The BLE chunk accumulator: the linked list that holds a payload too large for
 # one ATT write until the last chunk arrives. Four characteristics use it and

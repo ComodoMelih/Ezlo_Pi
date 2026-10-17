@@ -43,6 +43,7 @@
  *                          Include Files
  *******************************************************************************/
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -147,6 +148,26 @@ extern "C"
      * @return (int) [EZPI_FAILED ==> Fail ; EZPI_SUCCESS ==> Success]
      */
     ezlopi_error_t EZPI_core_http_dyna_relloc(char **Buf, int reqSize);
+
+    /**
+     * @brief Appends one received chunk to a response buffer, growing it if
+     *        needed, and keeps the buffer NUL-terminated at '*used'.
+     *
+     * Defined in ezlopi_core_http_buf.c rather than ezlopi_core_http.c so that
+     * a host test can compile and run it; the header note there explains why
+     * that mattered for this particular function.
+     *
+     * @param buf       [ Address of the buffer pointer; growth may move it. ]
+     * @param cap       [ Address of the capacity in bytes; updated on growth. ]
+     * @param used      [ Address of the payload length so far, excluding the
+     *                    terminator; updated only on success. ]
+     * @param chunk     [ Bytes to append. Need not be NUL-terminated. ]
+     * @param chunk_len [ How many bytes of 'chunk' to append. ]
+     *
+     * @return EZPI_SUCCESS when every byte was appended; on EZPI_FAILED
+     *         nothing is appended and all three outputs are unchanged.
+     */
+    ezlopi_error_t EZPI_core_http_resp_append(char **buf, uint32_t *cap, uint32_t *used, const char *chunk, uint32_t chunk_len);
 
     /**
      * @brief This Task , generates a http request, by combining information contained in '*config'.

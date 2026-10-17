@@ -2120,7 +2120,7 @@ of reading the serial console would have revealed it.
   [`HTTP_EVENT_ON_DATA`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L845),
   which printed every chunk of every `esp_http_client` response body. Both live
   callers of that handler are
-  [`EZPI_core_http_get_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L272)
+  [`EZPI_core_http_get_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L258)
   calls in `ezlopi_service_webprov.c`, and the second is
   [provision-sync](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L583)
   — whose reply `__provision_update()` reads
@@ -2137,8 +2137,8 @@ of reading the serial console would have revealed it.
 
   The other two live sites are the request/response pair in
   `EZPI_core_http_mbedtls_req`
-  ([`:249`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L249),
-  [`:259`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L259)), reached by a
+  ([`:235`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L235),
+  [`:245`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L245)), reached by a
   `sendHttpRequest` scene action. `request` is a credential envelope rather than
   a string: for a GET,
   [`__ezlopi_http_generate_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L701)
@@ -2152,8 +2152,8 @@ of reading the serial console would have revealed it.
   switch because it is the chosen server's reply, `Set-Cookie` included.
 
   The fourth,
-  [the per-chunk dump](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L439) in
-  [`EZPI_core_http_post_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L364),
+  [the per-chunk dump](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L425) in
+  [`EZPI_core_http_post_request`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L350),
   is gated for its shape and not for a leak that shipped. That function has no
   caller in the tree — header declaration and component readme only — and the
   linker agrees: its `.text`, `.literal` and `.rodata…str1.1` sections are all
@@ -5547,9 +5547,189 @@ enumerators — so the live half of this component was never affected.
 
 ### Scene HTTP requests — [bug]
 
+- **Every response body on the mbedTLS request path was truncated, by one byte
+  for every 255 received.** The read loop inside
+  [`__ezlopi_http_req_via_mbedTLS`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L463)
+  grew its buffer correctly and then filled it with two `snprintf` calls:
+
+  ```c
+  snprintf(resp_buf_dummy, len, "%s", tmp_buf);                        /* first chunk */
+  snprintf(resp_buf_dummy + strlen(resp_buf_dummy), len, "%s", tmp_buf); /* later chunks */
+  ```
+
+  `snprintf`'s size argument counts the terminator it writes, so a limit of
+  `len` stores `len - 1` bytes of payload. `len` here is the byte count
+  `mbedtls_ssl_read` just returned, so each chunk lost its last byte. The read
+  is issued with
+  [`tmp_buf_size - 1`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L617),
+  which is **255**, so the loss is one byte per 255 received — and a reply that
+  arrives in a single read loses its final character, which for a JSON body is
+  the closing brace.
+
+  **Which paths this reaches, stated narrowly, because the first draft of this
+  entry said "every HTTPS response this firmware received" and that is false.**
+  There are two response paths in this file and only one of them is affected.
+  The other —
+  [`HTTP_EVENT_ON_DATA`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L845),
+  used by `EZPI_core_http_get_request` and `EZPI_core_http_post_request` —
+  accumulates with `memcpy(tmp_data, evt->data, evt->data_len)` into a chunk
+  list and loses nothing. That is the path provisioning uses, and
+  `__provision_update()` does parse its reply successfully. So "nothing in this
+  firmware has ever parsed a response body" — which the first draft also said —
+  is wrong twice over.
+
+  The affected path has exactly **three** callers, and the reason the defect
+  survived this long is that none of them could see it:
+
+  | caller | what it does with the body |
+  |---|---|
+  | `sendHttpRequest` then-method | never reads it; frees it |
+  | `hub.scenes.action.block.test` | reads only the status line |
+  | `__issunsate_update_sunstate_tm` | never reads it, and leaks it |
+
+  `block.test` is the only one that reads anything, and what it reads is
+  `sscanf(response, "HTTP/1.1 %d %99s[^\n]", …)` — the status line, which sits
+  at the front of the first chunk, where a loss at the *end* of each chunk never
+  reaches it. So no existing caller was visibly broken. The defect was latent,
+  not dormant: any caller that wanted the body could not have one, which is
+  precisely the obstacle in front of the sunstate feature, whose whole purpose
+  is to read sunrise and sunset times out of a JSON reply.
+
+  Measured against the loop as it was, with only `mbedtls_ssl_read` replaced by
+  a generator handing out a known body:
+
+  | body | came back as | lost |
+  |---|---|---|
+  | 15 bytes (`{"status":"OK"}`) | 14 | 1 |
+  | 255 bytes — one full read | 254 | 1 |
+  | 256 bytes — two reads | 254 | 2 |
+  | 1299 bytes — six reads | 1293 | 6 |
+
+  **Nothing could have reported this.** It wrote strictly *less* than it had
+  room for, so there was no overflow for AddressSanitizer to trap and no
+  truncation for a compiler to warn about. It was not a crash, so no target
+  build showed it. The trace that printed the body printed the damaged copy with
+  nothing to mark where the byte had gone. The only instrument that can see a
+  defect of this shape is a check that compares what came out against what went
+  in, byte for byte.
+
+  **Two further defects in the same twenty lines**, both found while writing
+  that check rather than before:
+
+  The append offset was `strlen(resp_buf_dummy)`, which is the accumulated
+  length only while the body contains no NUL. Nothing requires an HTTP body to
+  be text — any image, gzip stream or protobuf has NULs — and for such a body
+  every chunk after the first was written *on top of* the earlier ones. The
+  replacement carries the length as a parameter instead. The test measures the
+  difference: for a 600-byte body with a NUL at offset 10, `strlen` reports
+  **10**.
+
+  When the buffer could not grow, the old loop dropped that chunk and kept
+  reading. A reply the heap could not hold therefore came back as a shorter
+  reply that looked complete — the same class of defect as the off-by-one,
+  reached from the other direction. The accumulator now reports the failure, the
+  loop stops, and the handover discards the partial body rather than passing it
+  off as whole: `if (strlen(resp_buf_dummy) > 0)` became
+  [`if ((resp_used > 0) && (false == resp_truncated))`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L662).
+
+  **That last change costs `block.test` something, and the trade is deliberate
+  rather than overlooked.** On an allocation failure part-way through a reply,
+  the status line is already in the buffer, so the old behaviour — drop the
+  chunk, carry on, hand back what there is — let `block.test` still report the
+  server's real status code. It now gets `NULL` and reports **404** instead.
+  Taken on its own that is worse. It is still the right default: the reason the
+  old behaviour looked harmless is that the only caller reading the body reads
+  the four bytes least likely to be affected, and preserving that convenience
+  means every future caller receives bodies it cannot distinguish from complete
+  ones. An allocation failure mid-reply is also not a condition where the status
+  code is the useful signal. Handing back the partial body *and* a truncation
+  flag would serve both, and is not done here because it means a new field on
+  `s_ezlopi_core_http_mbedtls_t` for a case no caller currently distinguishes;
+  recorded here so that the next caller to want it knows the trade was made
+  knowingly.
+
+  **The fix is a new function in a new translation unit**, and the second half
+  of that matters. `ezlopi_core_http.c` cannot be compiled on a host — it needs
+  **10** headers this repository does not ship, **9** of them under `mbedtls/`
+  and `esp_tls/` — so a defect that only a host test can see could not be
+  regressed while it lived there. The accumulator is pure buffer arithmetic with
+  no ESP-IDF surface at all, so it went into
+  [`ezlopi_core_http_buf.c`](ezlopi-core/ezlopi-core-http/ezlopi_core_http_buf.c),
+  which includes `ezlopi_core_http.h` and nothing else of consequence.
+  [`EZPI_core_http_dyna_relloc`](ezlopi-core/ezlopi-core-http/ezlopi_core_http_buf.c#L56)
+  moved with it, unchanged: the accumulator grows through it, and a test that
+  stubbed the growth would be testing the half that was never in doubt. The
+  component's `CMakeLists.txt` uses `file(GLOB_RECURSE config_src "*.c")`, so
+  the new file needed no build change on target, and its other caller in the
+  scenes then-methods helper is unaffected — same component, same declaration in
+  the same header.
+
+  **[`tests/host/test_httpresp.c`](tests/host/test_httpresp.c) — 60 checks.** It
+  compiles the real `ezlopi_core_http_buf.c` under
+  `-fsanitize=address,undefined` and transcribes the firmware's read loop around
+  it, keeping the buffer sizes, the 255-byte reads and the growth policy. It
+  keeps the *old* loop too, as a second arm, so each case reports the size of
+  the loss rather than only asserting its absence — the table above is the test's
+  own output. Five assertions per body, including one in the direction of the
+  bug (`the old loop did lose bytes on this body`), so a future edit that
+  reintroduces the `snprintf` calls fails rather than passes.
+
+  **Six mutations, all detected**, and the fourth earned its keep. Reverting the
+  copy to `chunk_len - 1` fails 8 checks; restoring the `strlen` offset fails 2;
+  growing to a tight fit instead of geometrically fails the realloc-count check;
+  reporting a growth failure as success fails 3; removing the terminator fails 2.
+
+  The fourth mutation restored the overflow guard I had written first, and it
+  did not merely fail — it crashed with an AddressSanitizer SEGV on a 4GB write,
+  inside `memcpy`, from the one input that distinguishes the two guards. My
+  first version tested the 32-bit sum with `need < chunk_len`, which is the
+  standard idiom for catching a wrap and is wrong at exactly one point: with
+  `*used == UINT32_MAX` the sum wraps to `chunk_len` itself, the comparison is
+  false, and the function proceeds to `memcpy` at an offset of four gigabytes.
+  No reply this firmware can receive comes near that — the heap is a few hundred
+  kilobytes — so the hole was unreachable in practice. It is rewritten rather
+  than documented, in 64-bit arithmetic bounded against `INT_MAX`, because
+  "nearly right, and the shortfall is unreachable" is precisely the shape of the
+  defect this whole function exists to remove. `INT_MAX` and not `UINT32_MAX`
+  because `dyna_relloc` takes its size as an `int`: a larger request would be
+  narrowed to a negative and refused as though the heap had failed.
+
+  **Growth is geometric, and the test measures it rather than trusting it.** The
+  caller is in a read loop, so a tight-fitting `realloc` per chunk is a `realloc`
+  per 255 bytes. For a 1300-byte body in six reads the policy costs **3**
+  reallocations where a tight fit costs **5**; the assertion is set at ≤ 4, which
+  discriminates between the two without breaking if the growth factor is
+  retuned.
+
+  **One stub directory was added for one macro.**
+  [`tests/host/stubs-httpresp/EZLOPI_USER_CONFIG.h`](tests/host/stubs-httpresp/EZLOPI_USER_CONFIG.h)
+  shadows the shared stub on the include path and changes only `ezlopi_realloc`,
+  routing it through a function the test can make return NULL. The contract on a
+  failed growth is that nothing is appended and none of `*buf`, `*cap` or
+  `*used` moves, and the only way to check that is to make growth fail.
+  Requesting a size the real `realloc` would refuse makes the test depend on the
+  host's overcommit settings and aborts under ASan rather than returning NULL;
+  `-Wl,--wrap=realloc` hides the mechanism in the link line and collides with
+  ASan's own interceptor for that symbol; defining the macro on the command line
+  trips `-Werror` against the shared header's `#define`. Three other macros are
+  byte-for-byte the shared stub's, so ASan still watches every block the subject
+  touches.
+
+  No `nm` guard on this test's subject object, which is a deliberate difference
+  from `test_httpurl` and `test_ble_buffer` rather than an omission:
+  `ezlopi_core_http_buf.c` is not wrapped in any `#ifdef`, so there is no macro
+  whose absence could silently empty the object.
+
+  **What is checked by reading and not by running**, since the loop itself lives
+  in the file that cannot be compiled: that it passes `ret` as the chunk length
+  (it does — `len = ret` immediately precedes the call), that it stops on a
+  failed append instead of continuing, and that the handover reads `resp_used`
+  rather than measuring with `strlen`. The transcription in the test is only as
+  good as that reading.
+
 - **A request with no host is no longer assembled, logged and handed to the
   resolver.**
-  [`EZPI_core_http_mbedtls_req()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L178)
+  [`EZPI_core_http_mbedtls_req()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L164)
   is the one entry point for every outbound request a scene makes, and it used
   to check its argument and nothing in it:
 
@@ -5559,7 +5739,7 @@ enumerators — so the live half of this component was never affected.
   ```
 
   `web_server` is the host, and the
-  [`__ezlopi_http_req_via_mbedTLS` call](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L255)
+  [`__ezlopi_http_req_via_mbedTLS` call](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L241)
   passes it on unexamined, from where it reaches `mbedtls_net_connect()` and
   `getaddrinfo()`.
 
@@ -5574,7 +5754,7 @@ enumerators — so the live half of this component was never affected.
   `if (succ_parsing)` branch, so a `url` that matches none of the nine arms —
   or an action carrying no `url` field at all — leaves the field as the zero it
   was memset to. The second route is subtler and survives a *successful* parse:
-  [`EZPI_core_http_mem_malloc()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L116)
+  [`EZPI_core_http_mem_malloc()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L117)
   returns the size it wanted even when `ezlopi_malloc` returned nothing, so an
   allocation failure leaves `web_server_maxlen` positive beside a NULL
   `web_server`, and the
@@ -5596,7 +5776,7 @@ enumerators — so the live half of this component was never affected.
   = 17001, and the port reached here is 0 on the parse-failure route or the
   URL's own port on the allocation-failure one. The damage is upstream of the
   connect. The whole request is built first, and the
-  [`TRACE_I`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L249) below it
+  [`TRACE_I`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L235) below it
   printed the assembled buffer in full — including any `Authorization` header
   the action put in `header`, and the `?username=…&password=…` the GET branch
   writes into the same buffer. So a request that could never be delivered was
@@ -5734,8 +5914,8 @@ enumerators — so the live half of this component was never affected.
   The claim holds for this firmware, now on its own evidence.
 
   **The fix is two changes, and the upstream one is the one that matters.**
-  [`EZPI_core_http_mem_malloc()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L116)
-  now [returns 0](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L148) when
+  [`EZPI_core_http_mem_malloc()`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L117)
+  now [returns 0](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L149) when
   `ezlopi_malloc` returns nothing, instead of returning the capacity it wanted.
   Every one of its call sites assigns the result straight into a `*_maxlen`
   field, so the old contract advertised a capacity beside a pointer that the
@@ -5877,14 +6057,14 @@ enumerators — so the live half of this component was never affected.
 
   **Two of the function's four traces are now behind
   `CONFIG_EZPI_HTTP_LOG_PAYLOADS`,** the switch
-  [`ezlopi_core_http.c:248`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L248)
+  [`ezlopi_core_http.c:234`](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L234)
   already uses for the assembled request and the server's reply. `*source` is
   the URL verbatim and is the only trace here that can still print a password.
   `page` is the second one, and that is a correction to the gap entry's
   reasoning rather than a copy of it: arms 1, 2, 5 and 6 put everything after
   the host into `page`, query string and all, and `…/v1/thing?api_key=…` is an
   ordinary way to authenticate an HTTP request — so withholding the *generated*
-  `?username=…&password=…` at `ezlopi_core_http.c:249` while printing the
+  `?username=…&password=…` at `ezlopi_core_http.c:235` while printing the
   action's own query would have left the same door open. `host` and `port` stay
   unconditional: they are what distinguishes a parse that worked from one that
   aimed somewhere unexpected, and after the split neither can carry userinfo.
@@ -5943,21 +6123,38 @@ enumerators — so the live half of this component was never affected.
   two kinds: **10** are unreachable from the subject and `abort()` with a
   message naming themselves rather than returning a plausible value, so a future
   test that wanders into the expression engine stops instead of passing on a
-  stub's invention. The other **3** are on the hot path and are
+  stub's invention. The other **2** are on the hot path and are
   reimplementations carrying the line ranges they came from —
-  `EZPI_core_http_mem_malloc` (`ezlopi_core_http.c:116-157`),
-  `EZPI_core_http_calc_empty_bufsize` (`:105-114`) and
-  `EZPI_core_http_dyna_relloc` (`:159-176`). Linking the real file instead was
+  `EZPI_core_http_mem_malloc` (`ezlopi_core_http.c:117-158`) and
+  `EZPI_core_http_calc_empty_bufsize` (`:106-115`).
+
+  There were **3** of those until the response-accumulator work below.
+  `EZPI_core_http_dyna_relloc` was the third, and it was a copy only because the
+  single definition of it sat in a file no host can compile. That stopped being
+  true when the accumulator was moved into
+  [`ezlopi_core_http_buf.c`](ezlopi-core/ezlopi-core-http/ezlopi_core_http_buf.c)
+  and took `dyna_relloc` with it, so the copy is deleted and `tests/host/Makefile`
+  links the real function into this test. The `Host:` header these 153
+  assertions check is now grown by the same code the device runs.
+
+  That swap also answered a question the copy left open. The assertions were
+  written against the copy, so if the copy had drifted from the original they
+  would have been asserting the copy's behaviour — and replacing the copy with
+  the original is the one experiment that can tell. All **153** still pass
+  unchanged, and `nm` confirms the symbol now comes from the firmware object and
+  not from `stub_httpurl.o`. That is the only evidence available that the copy
+  had been faithful, and it is worth more than the eye-diff the line ranges were
+  there to support. Linking the real `ezlopi_core_http.c` instead was
   measured and rejected: it needs **10** absent headers, nine of them `mbedtls/`
   and `esp_tls/`, and leaves **44** further diagnostics, most of them designated
   initializers against `esp_http_client_config_t` — a stub reproducing the IDF's
-  HTTP-client config layout field for field is a far worse copy than three leaf
+  HTTP-client config layout field for field is a far worse copy than two leaf
   functions. The six string constants are **not** stubbed: the real
   `ezlopi_cloud_keywords.c` and `ezlopi_cloud_value_type_str.c` are linked,
   because both are self-contained and a stubbed string constant is the kind of
   copy that goes wrong quietly.
 
-  Because the three copies sit on the path the test exercises, the test asserts
+  Because the two remaining copies sit on the path the test exercises, the test asserts
   on **two** independent surfaces: the struct the subject fills, and a recorded
   log of every `(destination, string)` pair the subject handed the allocator.
   The second does not pass through the copies at all, so a copy that drifts
@@ -5968,8 +6165,11 @@ enumerators — so the live half of this component was never affected.
   fails with `web_server 'example.com' (got 'user:pass@example.com')` — the
   defect demonstrated by running the firmware's own code, which the gap entry's
   copied-ladder measurement could not do. After the fix the suite reports
-  **153** checks and the whole of `tests/host` reports **4967** checks across
-  **23** binaries, **0** failures.
+  **153** checks and the whole of `tests/host` reports **5027** checks across
+  **24** binaries, **0** failures. (Both figures were **4967** across **23**
+  when this entry was written; `test_httpresp` and its 60 checks are the
+  difference, and the 153 are unchanged by having the real `dyna_relloc`
+  linked in place of the copy.)
 
   **Then the assertions written *with* the fix were checked the same way,
   because passing tests had not yet been shown capable of failing.** The suite

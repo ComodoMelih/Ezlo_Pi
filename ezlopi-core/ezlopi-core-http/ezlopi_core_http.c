@@ -40,6 +40,7 @@
  *                          Include Files
  *******************************************************************************/
 #include <time.h>
+#include <stdbool.h>
 #include "esp_tls.h"
 #include "mbedtls/platform.h"
 #include "mbedtls/net_sockets.h"
@@ -156,24 +157,9 @@ int EZPI_core_http_mem_malloc(char **__dest_ptr, const char *src_ptr)
     return ret;
 }
 
-ezlopi_error_t EZPI_core_http_dyna_relloc(char **Buf, int reqSize)
-{
-    ezlopi_error_t ret = EZPI_FAILED;
-    if ((NULL != *Buf) && (reqSize > 0)) // strictly:  (new-size != 0)
-    {
-        void *NewBuf = ezlopi_realloc(__FUNCTION__, *Buf, reqSize); // reqSize ≤ 1.6 * n
-        if (NULL == NewBuf)
-        {
-            TRACE_E("Reallocation - failed");
-        }
-        else
-        {
-            *Buf = NewBuf;
-            ret = EZPI_SUCCESS; // return success
-        }
-    }
-    return ret;
-}
+/* EZPI_core_http_dyna_relloc moved to ezlopi_core_http_buf.c, unchanged, so
+** that the response accumulator it serves can be compiled by a host test --
+** this file cannot be. See that file's header comment. */
 
 void EZPI_core_http_mbedtls_req(s_ezlopi_core_http_mbedtls_t *config)
 {
@@ -607,7 +593,25 @@ static void __ezlopi_http_req_via_mbedTLS(const char *host_web_server, int web_p
     if (resp_buf_dummy)
     {
         bzero(resp_buf_dummy, resp_buf_size); // clear the buffer
-        uint8_t reply_count = 0;
+        /* The length so far, carried rather than recovered with strlen(). The
+        ** two accumulating snprintf calls that used to live below each lost a
+        ** byte per read -- snprintf's size counts the terminator -- so every
+        ** 255 bytes of every reply arrived one byte short, and a reply that
+        ** fit in a single read lost its last character -- for a JSON body, the
+        ** closing brace.
+        **
+        ** This path's three callers are why that survived: two never read the
+        ** body, and the third reads only the status line at the front of the
+        ** first chunk, where a loss at the end of each chunk cannot reach it.
+        ** The esp_http_client path in this same file is unaffected -- it
+        ** memcpy's each chunk exactly -- so provisioning, which does parse its
+        ** reply, was never involved.
+        **
+        ** EZPI_core_http_resp_append now does the copy, the growth and the
+        ** termination together; it is in ezlopi_core_http_buf.c so that a host
+        ** test can run it, since this file cannot be compiled on a host. */
+        uint32_t resp_used = 0;
+        bool resp_truncated = false;
         do
         {
             len = tmp_buf_size - 1;
@@ -637,29 +641,25 @@ static void __ezlopi_http_req_via_mbedTLS(const char *host_web_server, int web_p
 
             len = ret;
 
-            if (ret > 0)
+            if (EZPI_SUCCESS != EZPI_core_http_resp_append(&resp_buf_dummy, &resp_buf_size, &resp_used, tmp_buf, (uint32_t)len))
             {
-                reply_count++;
-                if (reply_count > 1)
-                {
-                    resp_buf_size += (len + 5); // (+2)makes sure ; additional space for '\0'
-                    if (EZPI_SUCCESS == EZPI_core_http_dyna_relloc(&resp_buf_dummy, resp_buf_size))
-                    {
-                        snprintf(resp_buf_dummy + strlen(resp_buf_dummy), len, "%s", tmp_buf);
-                    }
-                    else
-                    {
-                        resp_buf_size -= (len + 5);
-                    }
-                }
-                else
-                {
-                    snprintf(resp_buf_dummy, len, "%s", tmp_buf); // 513
-                }
+                /* The old loop dropped a chunk it could not fit and kept
+                ** reading, so a reply the heap could not hold came back as a
+                ** shorter reply that looked complete. Stop and say so: a
+                ** caller can handle a missing response, but not a plausible
+                ** one that is missing its middle. */
+                TRACE_E("response buffer could not grow past %u bytes; reply is incomplete", (unsigned)resp_used);
+                resp_truncated = true;
+                break;
             }
         } while (1);
 
-        if (strlen(resp_buf_dummy) > 0)
+        /* `resp_used` rather than strlen(): the two agree for a text body, but
+        ** the length is already known here and a body containing a NUL would
+        ** make strlen report the wrong one. A reply that could not be held
+        ** whole is handed back as no reply at all -- see the trace above for
+        ** why a partial one is worse than none. */
+        if ((resp_used > 0) && (false == resp_truncated))
         {
             *resp_buf = resp_buf_dummy;
         }

@@ -27,19 +27,26 @@
  * engine or the NVS layer and pass on the strength of a stub's invention. If
  * the test ever reaches one, the suite stops and says which.
  *
- * The other three are on the path the test exercises, and are reimplementations
- * rather than stubs:
+ * The other three were on the path the test exercises, and were
+ * reimplementations rather than stubs. Two still are:
  *
- *   EZPI_core_http_mem_malloc          ezlopi_core_http.c:116-157
- *   EZPI_core_http_calc_empty_bufsize  ezlopi_core_http.c:105-114
- *   EZPI_core_http_dyna_relloc         ezlopi_core_http.c:159-176
+ *   EZPI_core_http_mem_malloc          ezlopi_core_http.c:117-158
+ *   EZPI_core_http_calc_empty_bufsize  ezlopi_core_http.c:106-115
+ *
+ * The third, EZPI_core_http_dyna_relloc, was a copy of ezlopi_core_http.c and
+ * is no longer: it was moved into ezlopi_core_http_buf.c so that the HTTPS
+ * response accumulator could be host-tested, and that file -- unlike
+ * ezlopi_core_http.c -- compiles here. The Makefile links it into this test, so
+ * the real function is used and the copy is deleted. Nothing about this test
+ * changed in the swap, which is itself the evidence that the copy had been
+ * faithful.
  *
  * EZPI_parse_http_url reaches all three: mem_malloc fills web_server,
  * target_page, username and password, while calc_empty_bufsize and dyna_relloc
  * between them decide how the `Host:` header is grown. So the header contents
- * the test asserts on are produced jointly by the subject and these three
- * copies, which is the one shape of copy this suite's Makefile argues against
- * at length.
+ * the test asserts on are produced jointly by the subject, the real
+ * dyna_relloc, and the two copies that remain -- fewer copies than before, but
+ * still the one shape of copy this suite's Makefile argues against at length.
  *
  * Linking the real ezlopi_core_http.c instead was measured before settling for
  * copies, and it is not available: that file needs ten absent headers, nine of
@@ -47,7 +54,7 @@
  * designated initializers against esp_http_client_config_t, whose full struct
  * layout a stub would then have to reproduce field for field. A stub carrying
  * the IDF's HTTP client config layout is a far worse copy than three leaf
- * functions, so three leaf functions it is. (The number 10 is also a
+ * functions, so two leaf functions it now is. (The number 10 is also a
  * correction: an earlier pass of this audit recorded 12.)
  *
  * What makes the copies tolerable is that they are leaves -- no branching on
@@ -113,8 +120,8 @@ const char *stub_malloc_arg(int nth)
  * Reimplementations. Each mirrors the cited range of ezlopi_core_http.c.
  * ------------------------------------------------------------------------- */
 
-/* ezlopi_core_http.c:105-114. The real one spells strlen through the
-** GET_STRING_SIZE macro at :85, which is NULL-tolerant; written out here. */
+/* ezlopi_core_http.c:106-115. The real one spells strlen through the
+** GET_STRING_SIZE macro at :86, which is NULL-tolerant; written out here. */
 int EZPI_core_http_calc_empty_bufsize(char *dest_buff, int dest_size, int reqd_size)
 {
     int limit = dest_size - (int)((NULL != dest_buff) ? strlen(dest_buff) : 0);
@@ -126,7 +133,7 @@ int EZPI_core_http_calc_empty_bufsize(char *dest_buff, int dest_size, int reqd_s
     return 0;
 }
 
-/* ezlopi_core_http.c:116-157, plus the recording. The `+ 5` and the
+/* ezlopi_core_http.c:117-158, plus the recording. The `+ 5` and the
 ** free-the-old-first order are both load-bearing and both copied; the `ret = 0`
 ** on allocation failure is the contract this audit corrected upstream, and it
 ** is reproduced so that a test for the failure path would see the same answer
@@ -176,23 +183,17 @@ int EZPI_core_http_mem_malloc(char **__dest_ptr, const char *src_ptr)
     return ret;
 }
 
-/* ezlopi_core_http.c:159-176. ezlopi_realloc is a macro for plain realloc in
-** this suite -- see stubs/EZLOPI_USER_CONFIG.h -- so the body is the original
-** with the macro expanded. */
-ezlopi_error_t EZPI_core_http_dyna_relloc(char **Buf, int reqSize)
-{
-    ezlopi_error_t ret = EZPI_FAILED;
-    if ((NULL != *Buf) && (reqSize > 0))
-    {
-        void *NewBuf = realloc(*Buf, reqSize);
-        if (NULL != NewBuf)
-        {
-            *Buf = NewBuf;
-            ret = EZPI_SUCCESS;
-        }
-    }
-    return ret;
-}
+/* EZPI_core_http_dyna_relloc was the third reimplementation here. It is gone,
+** and the real one is linked instead: it now lives in
+** ezlopi_core_http_buf.c, which -- unlike ezlopi_core_http.c -- compiles on a
+** host, so the Makefile adds that file to this test's sources. One fewer copy
+** to diff by eye, and the `Host:` header this test asserts on is now grown by
+** the same code the device runs.
+**
+** The swap was a check as much as a cleanup: the 153 assertions in
+** test_httpurl.c were written against the copy, so if the copy had drifted from
+** the original they would have said so when the original replaced it. They did
+** not, which is the only evidence available that the copy had been faithful. */
 
 /* -------------------------------------------------------------------------
  * Unreachable from the subject under test. Loud rather than plausible.
