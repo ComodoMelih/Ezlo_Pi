@@ -4877,6 +4877,99 @@ enumerators — so the live half of this component was never affected.
   delete/detach family is 187 bytes, so it could not have been the answer even
   if it had been dropped.
 
+- **A `NULL` assignment that cleared a copy, leaving the caller's websocket
+  handle pointing at freed memory.**
+  [`EZPI_core_websocket_client_kill()`](ezlopi-core/ezlopi-core-websocket_client/ezlopi_core_websocket_client.c#L142)
+  took its handle by value and ended with `client = NULL`, which assigns the
+  parameter and nothing else. `esp_websocket_client_destroy()` had already freed
+  what it pointed at, so the caller was left holding a dangling handle.
+
+  The one caller in the tree is `EZPI_service_web_provisioning_deinit()` in
+  [`ezlopi_service_webprov.c`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L187),
+  and its handle is not a local that goes out of scope: `wss_client` is a
+  file-static, read from other tasks by `__send_str_data_to_nma_websocket()` at
+  `:531` and by `EZPI_service_webprov_is_connected()` at `:156`. The first is
+  registered as a broadcast method at `:265`, so it runs on whichever task is
+  sending.
+
+  **The statement that makes that window look closed is itself dead.** `deinit()`
+  opens with `if (_task_handle) { vTaskDelete(_task_handle); }`, which reads as
+  though the task that sends on the handle is stopped before the handle is
+  destroyed. `_task_handle` is declared `NULL` at `:149` and is never assigned
+  anywhere — the only other mentions in the file are those two reads — so the
+  test is always false. GCC reaches the same conclusion and has already acted on
+  it: in the esp32c3 image, before and after, the entire function is three
+  instructions with no reference to `vTaskDelete` in it. That is the compiler
+  constant-folding a static it can prove never changes, not the symbol being
+  absent — `vTaskDelete` is in the image, reached from elsewhere.
+
+  The function now takes the handle **by address**, and clears it **before** the
+  teardown rather than after, so a reader that loads `wss_client` at any point
+  during `stop()` and `destroy()` sees `NULL` instead of a pointer about to be
+  freed. No new guards were added, because every IDF entry point these readers
+  reach already rejects `NULL`: `esp_websocket_client_is_connected` at
+  `esp_websocket_client.c:898`, the shared send path at `:848`, `destroy` at
+  `:448`, `stop` at `:740`.
+
+  The whole change is two instructions of the caller, which is the clearest
+  statement of what it does. Baseline `lui a5` / `lw a0,-216(a5)` loads the
+  *value* of `wss_client`; fixed `lui a0` / `addi a0,a0,-216` computes its
+  *address*. Both then tail-jump into the same function.
+
+  **This narrows the race; it does not close it**, and the source says so. A
+  reader that loaded the old value before the store still holds it. Closing that
+  needs a lock around the handle rather than a wider parameter, and is not
+  attempted here.
+
+  Why this is **[bug]** and not **[sec]**: the only caller of `deinit()` is
+  `EZPI_core_reset_reboot()`, which calls `esp_restart()` on the next statement.
+  Fifteen sites call that function, including BLE and UART paths, so it is
+  reachable — but the device is restarting either way, so the worst outcome is a
+  crash microseconds before an intended reboot rather than anything an attacker
+  gains from.
+
+  Found as `uselessAssignmentPtrArg` by the header-aware `cppcheck` sweep, and
+  **it is only findable that way**, which is the part worth recording.
+  `esp_websocket_client_handle_t` is an opaque typedef; without headers cppcheck
+  does not know `client` is a pointer and reports nothing on this file — before
+  or after the fix. Reproduced with the 250 `-I`/`-D` flags for this translation
+  unit taken from a compilation database: **1 finding at `:128` before, 0 after.**
+
+  No check was added for the class, and the reason is a measurement rather than a
+  judgement. Reinstating the old signature is *not* caught by the build: a tree
+  with the fixed definition and the old by-value call site **compiles and links
+  successfully**, with one `-Wincompatible-pointer-types` warning at
+  `webprov.c:194` — and this tree already carries 87 of those on the Xtensa
+  targets and 90 on esp32c3, all pre-existing, so a new one would not stand out.
+  A static check cannot cover the class either: the only instance cppcheck sees
+  without headers is
+  [`EZPI_core_factory_info_v3_free()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L135),
+  which is deliberately left alone. It takes `void *`, and its **39 live call
+  sites** all pass a function local or one heap struct member freed on the next
+  line — checked, none is a file-scope object — so the dead store there is
+  unobservable, and a `void **` signature would need a cast at all 39.
+
+  Built on four targets, baseline and fixed. `CONFIG_EZPI_WEBSOCKET_CLIENT=y` in
+  all four defaults was confirmed rather than assumed, because `webprov.c` is
+  wrapped end to end in that guard from line 90 and a target with it off would
+  compile the call site to nothing and still link.
+
+  | Target | Baseline | Fixed | Delta |
+  |---|---|---|---|
+  | esp32 | 1 683 856 | 1 683 856 | 0 |
+  | esp32s2 | 1 374 192 | 1 374 192 | 0 |
+  | esp32s3 | 1 698 720 | 1 698 720 | 0 |
+  | esp32c3 | 1 757 104 | 1 757 120 | **+16** |
+
+  The one nonzero delta is accounted for rather than waved through:
+  `EZPI_core_websocket_client_kill` grows from **58 to 68 bytes** on esp32c3 —
+  the `NULL` test and the store — `.flash.text` grows by exactly those 10 bytes,
+  `.dram0.data`, `.dram0.bss`, `.iram0.text` and `.flash.rodata` are identical,
+  and the remaining 6 bytes are end-of-image alignment. The three Xtensa targets
+  absorb the same 10 bytes into alignment and report 0. Both touched files
+  produce object files and both functions are in the ELF on all four targets,
+  with no warning at a line of either file.
+
 ### Format strings — [bug]
 
 - **Five format strings that disagreed with their arguments — nine `cppcheck`

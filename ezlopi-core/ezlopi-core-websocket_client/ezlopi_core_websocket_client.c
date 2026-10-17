@@ -120,12 +120,36 @@ bool EZPI_core_websocket_client_is_connected(esp_websocket_client_handle_t clien
     return esp_websocket_client_is_connected(client);
 }
 
-void EZPI_core_websocket_client_kill(esp_websocket_client_handle_t client)
+/* Takes the handle by address so that clearing it is visible to the caller.
+** This used to take it by value and end with `client = NULL`, which assigned
+** to the local parameter and left the caller's handle pointing at memory
+** esp_websocket_client_destroy() had just freed.
+**
+** The one caller is EZPI_service_web_provisioning_deinit(), whose handle is
+** the file-static `wss_client` that __send_str_data_to_nma_websocket() and
+** EZPI_service_webprov_is_connected() both read from other tasks. Those
+** readers are not dead code: the vTaskDelete() above the call is, because
+** the `_task_handle` it tests is never assigned anywhere.
+**
+** The teardown happens after the handle is cleared rather than before, so a
+** reader that loads `wss_client` at any point during stop() and destroy()
+** sees NULL instead of a pointer about to be freed. Every IDF entry point
+** these readers reach already rejects NULL -- is_connected at
+** esp_websocket_client.c:898, the send path at :848 -- so no new guards are
+** needed here. Note this narrows the race, it does not close it: a reader
+** that loaded the old value before the store still holds it, and closing
+** that would need a lock around the handle rather than a wider parameter. */
+void EZPI_core_websocket_client_kill(esp_websocket_client_handle_t *client)
 {
-    esp_websocket_client_stop(client);
-    TRACE_S("Websocket Stopped");
-    esp_websocket_client_destroy(client);
-    client = NULL;
+    if (client)
+    {
+        esp_websocket_client_handle_t handle = *client;
+        *client = NULL;
+
+        esp_websocket_client_stop(handle);
+        TRACE_S("Websocket Stopped");
+        esp_websocket_client_destroy(handle);
+    }
 }
 
 esp_websocket_client_handle_t EZPI_core_websocket_client_init(cJSON *uri, int (*msg_upcall)(char *, uint32_t, time_t time_stamp), void (*connection_upcall)(bool connected),

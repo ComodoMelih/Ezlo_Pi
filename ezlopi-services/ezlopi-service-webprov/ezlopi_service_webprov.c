@@ -191,7 +191,7 @@ void EZPI_service_web_provisioning_deinit(void)
         vTaskDelete(_task_handle);
     }
 
-    EZPI_core_websocket_client_kill(wss_client);
+    EZPI_core_websocket_client_kill(&wss_client);
 }
 
 /*******************************************************************************

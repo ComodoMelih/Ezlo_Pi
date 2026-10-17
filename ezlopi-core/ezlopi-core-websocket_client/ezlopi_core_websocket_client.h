@@ -116,9 +116,12 @@ extern "C"
     /**
      * @brief Function to destroy websocket client
      *
-     * @param client  Target Client
+     * Stops and destroys the client, then sets the caller's handle to NULL so
+     * that it is not left pointing at freed memory. Passing NULL is a no-op.
+     *
+     * @param client  Address of the target client handle
      */
-    void EZPI_core_websocket_client_kill(esp_websocket_client_handle_t client);
+    void EZPI_core_websocket_client_kill(esp_websocket_client_handle_t *client);
 
 #if 0
     class websocket_client
