@@ -91,6 +91,8 @@
 static int __ezlopi_core_scenes_then_sendhttp_relloc_header(s_ezlopi_core_http_mbedtls_t *tmp_http_data, int append_size, const char *append_str);
 static int __ezlopi_core_scenes_then_create_fresh_header(s_ezlopi_core_http_mbedtls_t *tmp_http_data);
 static void __ezlopi_core_scenes_then_append_to_header(s_ezlopi_core_http_mbedtls_t *tmp_http_data, const char *str1, const char *str2);
+static char __ezlopi_core_scenes_then_lower_ascii(char ch);
+static bool __ezlopi_core_scenes_then_split_url(const char *url, char *authority, size_t authority_size, int *port_out, const char **page_out);
 static char *__ezlopi_core_scenes_then_split_authority(char *authority, char **user_out, char **pass_out, int *port_io);
 /*******************************************************************************
  *                          Static Data Definitions
@@ -145,117 +147,82 @@ void EZPI_parse_http_url(s_ezlopi_core_http_mbedtls_t *tmp_http_data, l_fields_v
             // __ezlopi_core_scenes_then_sendhttp_parse_host_name(tmp_http_data, field_value_string);
             //--------------------------------------------
 
-            // tests[0] = "http://www.testhttp.com:8090/foo_page";
-            // tests[1] = "https://www.testhttp.com:8090/foo_page";
-            // tests[2] = "http://www.testhttp.com/foo_page";
-            // tests[3] = "https://www.testhttp.com/foo_page";
-            // tests[4] = "http://www.testhttp.com:8090";
-            // tests[5] = "https://www.testhttp.com:8090";
-            // tests[6] = "http://www.testhttp.com";
-            // tests[7] = "https://www.testhttp.com";
-            int succ_parsing = 0; // Whether the parsing has been
-            int port = 80;        // Port field of the HTTP uri if found
-            char host[100] = {0}; // IP field of the HTTP uri
-            char page[200] = {0}; // Page field of the uri if found
-            if (sscanf(field_value_string, "http://%99[^:]:%i/%199[^\n]", host, &port, page) == 3)
-            {
-                succ_parsing = 1;
-            }
-            else if (sscanf(field_value_string, "https://%99[^:]:%i/%199[^\n]", host, &port, page) == 3)
-            {
-                // port = 443;
-                succ_parsing = 1;
-            }
-            else if (sscanf(field_value_string, "http://%99[^:]:%i[^\n]", host, &port) == 2)
-            {
-                succ_parsing = 1;
-            }
-            else if (sscanf(field_value_string, "https://%99[^:]:%i[^\n]", host, &port) == 2)
-            {
-                // port = 443;
-                succ_parsing = 1;
-            }
-            else if (sscanf(field_value_string, "http://%99[^/]/%199[^\n]", host, page) == 2)
-            {
-                succ_parsing = 1;
-            }
-            else if (sscanf(field_value_string, "https://%99[^/]/%199[^\n]", host, page) == 2)
-            {
-                port = 443;
-                succ_parsing = 1;
-            }
-            else if (sscanf(field_value_string, "http://%99[^\n]", host) == 1)
-            {
-                succ_parsing = 1;
-            }
-            else if (sscanf(field_value_string, "https://%99[^\n]", host) == 1)
-            {
-                port = 443;
-                succ_parsing = 1;
-            }
-            /* The fallback arm, for a URL whose scheme is neither http:// nor
-            ** https://. It used to spell its conversions `%[^:]` and `%s`,
-            ** neither of which carries a field width, writing straight into
-            ** host[100] and page[200] above.
+            /* This used to be nine sscanf arms: eight spelling out the
+            ** combinations of "http"/"https" against present/absent port and
+            ** present/absent path, and a ninth fallback for any other scheme.
+            ** What replaced them is one pass that finds the authority and the
+            ** path by position, because the arms disagreed with each other in
+            ** eight measured ways and every disagreement was silent. The
+            ** replaced behaviour, read off the real translation unit:
             **
-            ** Reaching it needs a non-http scheme, which is why the eight arms
-            ** above do not protect it. Each of them opens with a literal
-            ** "http://" or "https://", and the seventh and eighth are
-            ** catch-alls for those two prefixes -- so a 599-character host
-            ** behind an http:// prefix lands on the seventh arm and is bounded
-            ** at 99 there. Give it any other scheme and arms one to eight all
-            ** fail their literal, leaving this one.
+            **   - Arms one to four scanned the port with %i, which is not a
+            **     decimal conversion. ":0x50" was port 80 and ":010" was port
+            **     8 -- the author wrote base-10 digits and got hex and octal.
+            **   - ":08080" was port 0. %i read the leading "0" as octal, stopped
+            **     at the '8', failed the '/' that follows, and dropped through
+            **     to arm three, which asks for no path and kept the 0.
+            **   - ":8090junk" was port 8090 with the junk discarded. Arm three's
+            **     format ends "%i[^\n]", and that trailing [^\n] is not a
+            **     conversion there -- it is five literal characters that never
+            **     have to match, so nothing checks what follows the digits.
+            **   - ":99999", ":65536" and ":0" were all accepted as written.
+            **     Nothing range-checked the result.
+            **   - ":-1" was port -1, passed to mbedtls as the string "-1".
+            **   - ":99999999999999" was port 276447231. An out-of-range %i is
+            **     undefined behaviour, and it is inside libc, so the sanitizers
+            **     the host suite runs under cannot see it.
+            **   - A scheme is case-insensitive (RFC 3986 section 3.1), but the
+            **     eight literals are not, so "HTTP://host:8090/x" missed all
+            **     eight and landed on the ninth arm -- and "HTTP://host/x",
+            **     with no explicit port, matched nothing at all and was
+            **     reported unparseable.
+            **   - Arm nine ended "%d%199s", so its page kept the '/' that the
+            **     other arms consume ("GET //x"), stopped at the first space,
+            **     and was cut to 199 characters in silence.
             **
-            ** `field_value_string` is the `url` field of a sendHttpRequest
-            ** action. EZPI_scenes_populate_fields_get_value allocates it at
-            ** strlen(valuestring) + 1 with no cap, so its length is whatever
-            ** the request said, and hub.scenes.action.block.test runs this
-            ** parse on a block taken straight from the request without a scene
-            ** ever being stored.
+            ** Every one of those is a wrong request rather than a refused one,
+            ** which is the reason none of them was reported.
             **
-            ** Measured, with this ladder reproduced verbatim under
-            ** AddressSanitizer: "ftp://" + 599 characters + ":80/x" is a
-            ** stack-buffer-overflow write past the end of host, and
-            ** "ftp://h:80/" + 599 characters is a 601-byte write past the end
-            ** of page.
-            **
-            ** The widths are each buffer minus its terminator. A host longer
-            ** than 99 now fails the ':' that follows the conversion, so the
-            ** arm returns 1 instead of 3 and the URL is reported unparseable.
-            ** That is the right answer rather than a regression: truncating a
-            ** host silently would send the request to a different host than
-            ** the one the action named. */
-            else if (sscanf(field_value_string, "%*[^:]%*[:/]%99[^:]:%d%199s", host, &port, page) == 3)
-            {
-                succ_parsing = 1;
-            }
-            else
-            {
-                TRACE_E("ERROR !! Unknown REQUEST-format. ");
-            }
+            ** The port is not parsed here at all. __ezlopi_core_scenes_then_
+            ** split_authority already does it for the arms that scanned the
+            ** authority whole, and it does it properly: all digits, 1 to 65535,
+            ** and bracket-aware so an IPv6 literal survives. Routing every URL
+            ** through that one implementation is most of this fix -- the
+            ** correct code was already in the file, and four arms were going
+            ** around it. */
+            int port = 80;
+            char authority[256] = {0};
+            const char *page = "";
+            char *url_user = NULL;
+            char *url_pass = NULL;
+            char *bare_host = NULL;
 
-            TRACE_W("url scan status: %d\n", succ_parsing);
-
-            if (succ_parsing)
+            if (__ezlopi_core_scenes_then_split_url(field_value_string, authority, sizeof(authority), &port, &page))
             {
-                /* Arms five to eight scan the whole authority into 'host',
-                ** credentials and port included: their conversions are
-                ** %99[^/] and %99[^\n], and neither stops at an '@' or at the
-                ** ':' before a port. So "http://user:pass@example.com:8080/x"
-                ** reaches arm five and leaves host = "user:pass@example.com:8080",
-                ** which then became the web_server, the "Host:" header value
-                ** and the subject of the traces below -- while web_port stayed
-                ** at the scheme default, because arm five never looks for one.
+                bare_host = __ezlopi_core_scenes_then_split_authority(authority, &url_user, &url_pass, &port);
+
+                /* A NULL here is a port the split refused, and it has already
+                ** said so. The empty-string case is separate: "http://user@/x"
+                ** parses as far as having a userinfo and nothing after it, and
+                ** an empty host would reach the allocator and emit a literal
+                ** "Host: \r\n" -- the same header the comment below describes
+                ** as the cost of an unparseable URL, so it is refused in the
+                ** same way rather than sent.
                 **
-                ** The split is done here rather than inside the ladder because
-                ** every arm's output has the same shape. Arms one to four and
-                ** nine consume the port themselves and cannot put a ':' or an
-                ** '@' in host -- their conversion is %99[^:] -- so for those
-                ** this is a no-op and 'port' keeps the value they scanned. */
-                char *url_user = NULL;
-                char *url_pass = NULL;
-                char *bare_host = __ezlopi_core_scenes_then_split_authority(host, &url_user, &url_pass, &port);
+                ** The trace names neither the authority nor the host: by this
+                ** point the authority buffer has had its terminators written
+                ** in, so printing it would print the userinfo, which is where
+                ** a password lives. The NULL test has to come first for the
+                ** same reason it usually does. */
+                if ((NULL != bare_host) && ('\0' == *bare_host))
+                {
+                    TRACE_E("URL has a userinfo but no host");
+                    bare_host = NULL;
+                }
+            }
 
+            if (NULL != bare_host)
+            {
                 /* Only when the 'credential' field has not already supplied
                 ** them. Field order is whatever the request listed, so this is
                 ** the rule that makes the outcome independent of it: an
@@ -279,8 +246,8 @@ void EZPI_parse_http_url(s_ezlopi_core_http_mbedtls_t *tmp_http_data, l_fields_v
                 ** '*source' is the URL verbatim, userinfo included, so before
                 ** the split above it was one of three traces here that printed
                 ** a password and it is now the only one left. 'page' is the
-                ** second: arms one, two, five and six put everything after the
-                ** host into it, query string and all, and a URL of the form
+                ** second: everything after the authority goes into it, query
+                ** string and all, and a URL of the form
                 ** ".../v1/thing?api_key=..." is an ordinary way to authenticate
                 ** an HTTP request. The generated query is already withheld at
                 ** ezlopi_core_http.c:249, so printing the action's own here
@@ -306,8 +273,8 @@ void EZPI_parse_http_url(s_ezlopi_core_http_mbedtls_t *tmp_http_data, l_fields_v
                 tmp_http_data->web_port = port;
 
                 /* Appending the Host header belongs in here, not after the
-                ** branch. `host` is `{0}` until one of the arms above fills
-                ** it, so an unparseable URL used to emit a literal
+                ** branch. The host buffer is `{0}` until a successful parse
+                ** fills it, so an unparseable URL used to emit a literal
                 ** "Host: \r\n" into the request -- a header no server will
                 ** route and the one part of the request a reader cannot see
                 ** is missing. */
@@ -835,8 +802,194 @@ static void __ezlopi_core_scenes_then_append_to_header(s_ezlopi_core_http_mbedtl
 }
 
 /**
- * @brief Splits an authority -- the "[userinfo@]host[:port]" that arms five to
- * eight of the ladder in EZPI_parse_http_url scan whole -- into its parts.
+ * @brief Lowercases one ASCII letter, for comparing a URL scheme.
+ *
+ * Hand-rolled rather than tolower() because a scheme is ASCII by definition
+ * (RFC 3986 section 3.1 gives its grammar as ALPHA *( ALPHA / DIGIT / "+" /
+ * "-" / "." )), so this needs none of what tolower() brings with it: no
+ * <ctype.h>, no dependence on the C locale, and no sign-extension question
+ * about passing a plain char to a function that is specified in terms of
+ * unsigned char.
+ */
+static char __ezlopi_core_scenes_then_lower_ascii(char ch)
+{
+    return ((ch >= 'A') && (ch <= 'Z')) ? (char)(ch - 'A' + 'a') : ch;
+}
+
+/**
+ * @brief Finds the authority and the path in a URL whose scheme this firmware
+ * can speak, and refuses every other scheme rather than guessing.
+ *
+ * Refusing is the answer to the question the nine-arm ladder left open. There
+ * is exactly one transport on this path: EZPI_core_http_mbedtls_req always
+ * calls __ezlopi_http_req_via_mbedTLS, which always performs a TLS handshake.
+ * So a scheme does not select a transport here -- it only selects a default
+ * port -- and a scheme this code does not implement is a request that cannot
+ * be served however carefully it is parsed. A refusal says so in the log; the
+ * ladder's ninth arm instead sent an HTTPS request to whatever port an ftp://
+ * URL named.
+ *
+ * Nothing is scanned and nothing is bounded by a conversion width. The
+ * authority is copied out so that the split below can write terminators into
+ * it, and is refused rather than truncated when it does not fit -- truncating
+ * a host aims the request at a different machine, which the replaced arms
+ * seven and eight did at 99 characters without a word. The path is not copied
+ * at all: '*page_out' points into the caller's URL, so there is no width to
+ * truncate it at and no second buffer to size.
+ *
+ * @param url            [ The URL as the action supplied it. ]
+ * @param authority      [ Out. The "[userinfo@]host[:port]", for
+ *                         __ezlopi_core_scenes_then_split_authority to take
+ *                         apart in place. ]
+ * @param authority_size [ sizeof that buffer. ]
+ * @param port_out       [ Out. The scheme's default port, 80 or 443. The
+ *                         authority split overwrites it if the URL names one. ]
+ * @param page_out       [ Out. Points into 'url', at the character after the
+ *                         '/' that ends the authority, or at a '?' or '#'
+ *                         because those have no separator to drop, or at "" if
+ *                         the URL is bare authority. Never NULL. ]
+ * @return bool [ false if the scheme is not http or https, if there is no
+ *                authority, or if the authority does not fit. ]
+ */
+static bool __ezlopi_core_scenes_then_split_url(const char *url, char *authority, size_t authority_size, int *port_out, const char **page_out)
+{
+    /* Order does not matter here, and that is worth stating because a prefix
+    ** table usually has to be longest-first: neither of these two is a prefix
+    ** of the other. "http://" against an https URL disagrees at index 4 (':'
+    ** against 's') and "https://" against an http URL disagrees at the same
+    ** index the other way, so at most one can ever match. */
+    static const struct
+    {
+        const char *prefix;
+        int port;
+    } k_schemes[] = {
+        {"http://", 80},
+        {"https://", 443},
+    };
+
+    if ((NULL == url) || (NULL == authority) || (0 == authority_size) ||
+        (NULL == port_out) || (NULL == page_out))
+    {
+        return false;
+    }
+
+    /* No space and no control character, anywhere in the URL, before anything
+    ** else is looked at.
+    **
+    ** This is not tidiness. __ezlopi_http_generate_request writes the page into
+    ** "GET /%s HTTP/1.1\r\n" and the host into "Host: %s\r\n", so a space in
+    ** either splits the request line -- "GET /a b HTTP/1.1" has the path "/a"
+    ** and the version "b" -- and a CR or LF ends it early and starts whatever
+    ** follows as a new header. The `url` field of a sendHttpRequest action is
+    ** request-supplied and uncapped, and hub.scenes.action.block.test runs this
+    ** parse on a block taken straight off the wire without a scene ever being
+    ** stored, so this is reachable without storing anything.
+    **
+    ** Against the ladder this both fixes and does not regress, which is why the
+    ** check is here rather than left as a note. Arm five's `%199[^\n]` stopped
+    ** at a newline, so dropping the conversion without replacing this would
+    ** have let one through for the first time -- the measured shipped answer
+    ** for "http://example.com/a\nb" is the page "a", silently the wrong path
+    ** rather than an injected request. But the same conversion accepted a
+    ** space and a tab and a carriage return, so "http://example.com/a b" was a
+    ** request line in two pieces and "http://exam ple.com/x" was a Host:
+    ** header in two pieces, both shipped and both refused now.
+    **
+    ** 0x20 and below, and 0x7F. Cast through unsigned char because plain char's
+    ** signedness is implementation-defined -- it is signed on the host this is
+    ** tested on and unsigned on xtensa -- and a comparison that depends on that
+    ** would pass here and do something else on the target.
+    **
+    ** High bytes are not refused. A byte above 0x7E is not a valid URI
+    ** character either (RFC 3986 is ASCII and percent-encoding is what exists
+    ** for the rest), but it cannot break the structure of a request line, and
+    ** refusing a UTF-8 host would be a behaviour change rather than a fix.
+    ** Recorded as a Known gap instead. */
+    for (const char *scan = url; '\0' != *scan; scan++)
+    {
+        if (((unsigned char)*scan <= 0x20u) || (0x7Fu == (unsigned char)*scan))
+        {
+            TRACE_E("URL holds a space or a control character at offset %d -- refusing rather than writing it into a request line",
+                    (int)(scan - url));
+            return false;
+        }
+    }
+
+    const char *rest = NULL;
+    for (unsigned idx = 0; idx < (sizeof(k_schemes) / sizeof(k_schemes[0])); idx++)
+    {
+        const char *prefix = k_schemes[idx].prefix;
+        unsigned at = 0;
+        /* Stops at the first disagreement, and the URL's terminator is a
+        ** disagreement with every character a prefix can hold, so this cannot
+        ** read past the end of a URL shorter than the prefix. */
+        while (('\0' != prefix[at]) &&
+               (__ezlopi_core_scenes_then_lower_ascii(url[at]) == prefix[at]))
+        {
+            at++;
+        }
+        if ('\0' == prefix[at])
+        {
+            rest = url + at;
+            *port_out = k_schemes[idx].port;
+            break;
+        }
+    }
+
+    if (NULL == rest)
+    {
+        TRACE_E("URL names a scheme this firmware does not speak -- only http and https are implemented");
+        return false;
+    }
+
+    /* '?' and '#' end the authority as well as '/'. Without them a URL that
+    ** carries a query and no path -- "http://example.com?q=a" -- leaves the
+    ** query inside the authority, which is how it used to reach arm seven's
+    ** catch-all and become a Host: header of "example.com?q=a". The authority
+    ** split declines to read a port out of a string holding either character
+    ** for exactly that reason; ending the authority here means it no longer
+    ** has to. */
+    const char *sep = strpbrk(rest, "/?#");
+    size_t auth_len = (NULL != sep) ? (size_t)(sep - rest) : strlen(rest);
+
+    if (0 == auth_len)
+    {
+        TRACE_E("URL has a scheme but no host");
+        return false;
+    }
+    if (auth_len >= authority_size)
+    {
+        TRACE_E("URL authority is %d characters and this parser holds %d -- refusing rather than truncating a host",
+                (int)auth_len, (int)(authority_size - 1));
+        return false;
+    }
+
+    memcpy(authority, rest, auth_len);
+    authority[auth_len] = '\0';
+
+    /* The '/' belongs to the request line, not to the page:
+    ** __ezlopi_http_generate_request writes "GET /%s", and the eight arms this
+    ** replaces consumed the separator themselves. A '?' or '#' has no
+    ** separator to drop, so it is kept and "GET /?q=a" comes out right. */
+    if (NULL == sep)
+    {
+        *page_out = "";
+    }
+    else if ('/' == *sep)
+    {
+        *page_out = sep + 1;
+    }
+    else
+    {
+        *page_out = sep;
+    }
+
+    return true;
+}
+
+/**
+ * @brief Splits an authority -- the "[userinfo@]host[:port]" that
+ * __ezlopi_core_scenes_then_split_url hands over -- into its parts.
  *
  * In place, by writing terminators into 'authority' and returning a pointer
  * into it. Nothing is copied and nothing is moved: the returned host points
@@ -852,10 +1005,14 @@ static void __ezlopi_core_scenes_then_append_to_header(s_ezlopi_core_http_mbedtl
  * @param pass_out  [ Set to the password, or left NULL if the userinfo has no
  *                    ':' at all. An empty string here means "a ':' with
  *                    nothing after it", which is not the same answer. ]
- * @param port_io   [ Overwritten only when an explicit port is found, so an
- *                    arm that scanned its own port, or that set the https
- *                    default of 443, keeps it. ]
- * @return char* [ The bare host, inside 'authority'. Never NULL. ]
+ * @param port_io   [ Overwritten only when an explicit port is found, so the
+ *                    scheme default the caller put there -- 80 or 443 --
+ *                    survives a URL that names no port. ]
+ * @return char* [ The bare host, inside 'authority'; or NULL when a ':' is left
+ *                 in it that is neither a port this function accepts nor part
+ *                 of a bracketed IPv6 literal. May be the empty string, which
+ *                 the caller refuses -- "no host" and "malformed port" are
+ *                 different messages and are reported separately. ]
  */
 static char *__ezlopi_core_scenes_then_split_authority(char *authority, char **user_out, char **pass_out, int *port_io)
 {
@@ -889,31 +1046,43 @@ static char *__ezlopi_core_scenes_then_split_authority(char *authority, char **u
         }
     }
 
-    /* The port, when the arm that produced this authority did not take one.
+    /* The port. This is now the only place in this file that reads one -- four
+    ** of the nine sscanf arms used to scan their own with %i, and did it wrong
+    ** in six measured ways, so the fix was to route every URL through here.
     **
     ** The last ':' rather than the first, because an unbracketed IPv6 address
-    ** has several and the port is after all of them. Two conditions guard the
-    ** split, and each is here because of an input that would otherwise be made
-    ** worse than it is today:
+    ** has several and the port is after all of them. The tail must then be
+    ** entirely digits denoting 1..65535, which is what leaves a bracketed IPv6
+    ** literal alone: "http://[::1]/x" leaves host = "[::1]", whose last ':' is
+    ** inside the address and whose tail is "1]". Splitting there would hand
+    ** mbedtls "[:" as a host.
     **
-    **   - the tail must be entirely digits denoting 1..65535. This is what
-    **     leaves a bracketed IPv6 literal alone: "http://[::1]/x" reaches arm
-    **     five and leaves host = "[::1]", whose last ':' is inside the
-    **     address and whose tail is "1]". Splitting there would hand mbedtls
-    **     "[:" as a host.
-    **   - the host must contain no '?' or '#'. Arms seven and eight are
-    **     catch-alls -- %99[^\n] -- so a URL with a query and no path, like
-    **     "http://example.com?q=a:5", arrives here whole. Leaving that one
-    **     alone keeps it exactly as broken as it is today rather than
-    **     inventing a port 5 for it; fixing it means parsing the query out,
-    **     which is a separate change.
+    ** The '<= 65535' inside the loop condition is what keeps 'value' from
+    ** overflowing on a long run of digits; the test after it then fails on the
+    ** digit the loop stopped at, so ":99999999999999" is refused rather than
+    ** wrapped. That input was port 276447231 under %i, undefined behaviour the
+    ** sanitizers could not see because it happened inside libc. With the bound
+    ** in place 'value' never exceeds 655359, which is what makes this correct
+    ** on a target where long is 32 bits and not merely on the 64-bit host --
+    ** and that difference is why the bound has to stay even though deleting it
+    ** is the one mutation tests/host/test_httpurl.c cannot be made to catch.
+    ** On the host the removal is harmless (99999999999999 fits in a 64-bit
+    ** long and the range test refuses it anyway); on xtensa it is signed
+    ** overflow. Measured as a survivor, kept deliberately, not dead code.
     **
-    ** There was a third, rejecting a tail containing ']'. It was removed as
-    ** dead: ']' is not a digit, so no string the all-digits test accepts can
-    ** contain one, and a mutation that deleted the ']' test changed no
-    ** observable behaviour -- which is how it was found. */
+    ** Two guards have been removed as provably dead rather than kept for
+    ** safety, each after a mutation showed deleting it changed no observable
+    ** behaviour:
+    **
+    **   - a tail containing ']' was rejected. ']' is not a digit, so no string
+    **     the all-digits test accepts can hold one.
+    **   - a host containing '?' or '#' was rejected, because the catch-all arms
+    **     %99[^\n] handed a query string in whole and "http://example.com?q=a:5"
+    **     would otherwise have grown a port 5. __ezlopi_core_scenes_then_split_url
+    **     now ends the authority at '?' and '#' as well as '/', so neither
+    **     character can reach this function from its only caller. */
     char *port_sep = strrchr(host, ':');
-    if ((NULL != port_sep) && (NULL == strpbrk(host, "?#")))
+    if (NULL != port_sep)
     {
         const char *digits = port_sep + 1;
         long value = 0;
@@ -927,6 +1096,38 @@ static char *__ezlopi_core_scenes_then_split_authority(char *authority, char **u
         {
             *port_sep = '\0';
             *port_io = (int)value;
+        }
+    }
+
+    /* And then one question about whatever ':' is left, which is what turns
+    ** every rejected port into a refusal instead of a strange host.
+    **
+    ** A successful split above wrote a terminator over its own colon, so a
+    ** colon still standing here is one this function declined to read a port
+    ** out of -- ":0x50", ":8090junk", ":99999", ":-1", or the bare trailing
+    ** ":" of "http://example.com:/x". Returning the host with the colon still
+    ** in it is what the ladder's catch-all arms did: "example.com:" went to
+    ** the resolver and into the Host: header. The colon is not a character a
+    ** host may contain, so the honest answer is to refuse the URL.
+    **
+    ** Except inside a bracketed IPv6 literal, where every colon is part of the
+    ** address and therefore sits before the ']'. One comparison covers that,
+    ** and covers the double-port "example.com:8080:9090" at the same time: the
+    ** valid port is split off the end and the colon that is left has no bracket
+    ** in front of it.
+    **
+    ** Both pointers are into 'host' when the comparison is reached, so the
+    ** relational test is between pointers into one object. The NULL case is
+    ** tested separately rather than compared, because comparing a pointer
+    ** against a null pointer with '>' is not something C defines. */
+    const char *stray_colon = strrchr(host, ':');
+    if (NULL != stray_colon)
+    {
+        const char *bracket = strrchr(host, ']');
+        if ((NULL == bracket) || (stray_colon > bracket))
+        {
+            TRACE_E("URL names a port that is not a decimal number in 1..65535, or a host holding a stray ':'");
+            return NULL;
         }
     }
 
