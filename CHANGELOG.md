@@ -5453,8 +5453,42 @@ flashed.**
   was asked for, the strip is `rgb` rather than `grb`, and the part number does
   not settle it.
 
+- **That doc named the wrong serial command and the wrong BLE characteristic,
+  and it is corrected.** The three routes in were a three-row table, and two of
+  its three rows would not have worked:
+
+  **It said serial `cmd:7`. Set-config is `cmd:3`.** `cmd:7` is
+  `EZPI_UART_CMD_SET_PROV` — the hub *provisioning* payload, serial number and
+  certificates and `cloud_server`, on a different handler. A user following the
+  doc would have sent `dev_detail` to the certificate handler and configured no
+  strip. The two numbers are adjacent in the same enum and the two documents
+  are both "the config", which is the whole reason this was easy to write and
+  hard to notice.
+
+  **It linked the BLE row to the provisioning characteristic.** The row pointed
+  at `provisioning-schema.md#ble-provisioning`, whose text says to write to
+  `0xE301`. The device configuration goes to `0xE501` on service `0x00E5`.
+  Nothing was wrong with the chunk envelope — that part really is shared — but
+  the handle a reader would have come away with was the other one.
+
+  **And it did not say the serial payload goes at the top level.** The
+  provisioning route wraps its payload as `{"cmd":7,"data":{…}}`; this one does
+  not — `ezpi_service_uart_set_config()` hands the whole parsed line to the
+  storer and reads no `data` member. A document nested the way the neighbouring
+  route nests its own parses, validates, is stored, is acknowledged, and
+  produces a hub with no devices. That is the worst available outcome, because
+  every signal the user can see says it worked. The firmware's own read-back
+  path is the corroboration: `ezpi_service_uart_get_config()` deletes `cmd`
+  from what it pulled out of flash before replying, which it would not need to
+  do unless the stored document carried it.
+
+  The table is gone and the three routes are now three subsections, because
+  what matters about them is where they differ — one of them reboots the hub,
+  one of them tells you to, one of them does neither — and a table row invites
+  a reader to skim the one column they think they need.
+
 - **That doc's example is machine-checked, so it cannot drift.**
-  `tests/host/test_aledonboard.c` reads the markdown, extracts two marked
+  `tests/host/test_aledonboard.c` reads the markdown, extracts three marked
   blocks, and runs the first through the real `EZPI_util_devcfgval_check()` and
   `EZPI_aledcfg_from_json()`, comparing the result against the shape the second
   block claims. The test holds **no copy of the JSON and no expected numbers**:
@@ -5462,8 +5496,51 @@ flashed.**
   not with the firmware would both pass. The expected chipset string is linked
   from `ezlopi_cloud_keywords.c` rather than typed, so a renamed constant cannot
   leave the test green while every real config is refused. The doc is listed as
-  a prerequisite of the binary, so editing it rebuilds the test. **13 checks**,
+  a prerequisite of the binary, so editing it rebuilds the test. **17 checks**,
   clean under ASan and UBSan.
+
+  It extracted two blocks when it was written, and the third is there because
+  the corrections above were the kind a reworded paragraph does not prevent
+  from happening again. The serial route's example is now its own marked block,
+  and four of the seventeen checks are about it: that its `cmd` is
+  **`EZPI_UART_CMD_SET_CONFIG`, taken from the real
+  `ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.h`**, that it has no
+  `data` member, and that the block with its `cmd` removed is
+  `cJSON_Compare`-equal to the worked example. There is deliberately **no `3`
+  in the test file**; the one that was wrong in the doc was a literal, and a
+  literal in the test would have agreed with it.
+
+  That is the first host test to include a header out of `ezlopi-services/`.
+  Only the header, and only for one enumerator — the service itself is FreeRTOS
+  and ESP-IDF end to end and nothing from it is compiled. It needed an empty
+  `tests/host/stubs-aledonboard/sdkconfig.h`, which is the first stub
+  `sdkconfig.h` in this suite that switches nothing on: the enum sits outside
+  every `#ifdef`, so all that was missing was the file. `CONTRIBUTING.md` is
+  updated, because the note there said a stub `sdkconfig.h` exists to switch a
+  subject *on* and now one of them does not, and the measurement that note is
+  built on — an empty shared one lets 52 more files compile and all 52 define
+  nothing — is exactly the trap this use looks like from a distance. What keeps
+  it out of the trap is that the test asserts against the symbol it linked
+  rather than compiling a translation unit and trusting it to be non-empty.
+
+  Compiling that header on a host turned up two pre-existing defects, both
+  recorded and both left alone as out of scope for a documentation fix.
+  `ezlopi_service_uart.h` uses `uint8_t` at line 141 while including nothing
+  but `"sdkconfig.h"`, so it cannot be the first header in a translation unit;
+  every real build gets `<stdint.h>` through something else, which is why this
+  has never been noticed. The test includes `<stdint.h>` ahead of it on
+  purpose, rather than relying on `cjext.h` continuing to pull it in.
+
+  `ezlopi_service_ble.h` has the same `uint8_t` problem and one of its own:
+  **its C++ guard is spelled `__cpluplus`**, at lines 61 and 348. Symmetric, so
+  nothing is unbalanced and no C build is affected — but the `extern "C"` it
+  guards is never emitted, so a C++ translation unit including it gets mangled
+  names for every BLE function and a link error that names none of this. That
+  header was read because the GATT UUIDs in the doc were a candidate for the
+  same enum treatment as the command number; they are stated in prose instead,
+  with the doc saying in as many words that they are *not* machine-checked.
+  Scraping hex out of a sentence is a fragile check, and a fragile check on a
+  true statement is worse than a labelled unchecked one.
 
   It was 14. The removed one asserted that the example asks for `grb`
   *specifically*, on the stated grounds that no other order could be honoured.
@@ -5476,35 +5553,63 @@ flashed.**
   Confirmed able to fail before being believed, which for a test whose subject
   is a *file* is the whole question — the easy mistake is one that reports
   "0 checks, 0 failures" and exits 0 when it cannot find the document, which
-  reads as a pass. Nine mutated copies of the doc under `/root` with `DOC_PATH`
-  repointed at each. Eight must be red: count changed in one block, `rgbw`
-  flipped in the other, chipset lowercased, `id_item` 9 → 11, marker deleted,
-  marker and fenced block deleted, file absent, and the claimed shape saying
-  `rbg` where the config says `grb`. The real doc passed; all eight went red at
-  the check that should catch them.
+  reads as a pass. **Fourteen mutants; thirteen red, one green, none
+  surviving.** Twelve are mutated copies of the doc under `/root` with
+  `DOC_PATH` repointed at each: count changed in one block, `rgbw` flipped in
+  another, chipset lowercased, `id_item` 9 → 11, the config marker deleted, the
+  marker and its fenced block deleted, the file absent, the claimed shape
+  saying `rbg` where the config says `grb`, the serial block's `cmd` 3 → 7, the
+  serial block nested under `data`, the serial copy drifted to 120 pixels while
+  the worked example stayed at 60, and the serial marker deleted. The real doc
+  passed; all twelve went red at the check that should catch them.
 
-  **The ninth must stay green, and it is the one that makes the other eight
-  mean anything.** It changes `pixel_count` from 60 to 120 in *both* blocks: a
-  doc describing a different strip, which is not a drift. It passes — which is
-  what demonstrates the test compares the two blocks against each other rather
-  than pinning the literal 60. Without it, all eight red mutants could have
-  been red for the wrong reason, and the test could have been a copy of the
-  numbers wearing a different hat. The eighth mutant was rewritten for the same
-  reason: it had been changing `color_order` in both blocks at once, which only
-  the deleted "must be `grb`" check was catching, so after that deletion it was
-  testing nothing. It now changes the claimed block alone.
+  Three of those are worth naming individually. **`cmd` 3 → 7 is the defect
+  this doc actually shipped with**, so that mutant is the regression test for
+  it. **The `data`-nesting mutant is the one that would otherwise be caught by
+  nothing**, because a nested document is valid JSON that the doc's reader
+  would send and the firmware would store. And **deleting the serial marker
+  reports 14 checks where the real doc reports 17** — four checks stop running
+  and the extraction counts one failure in their place, which is the difference
+  between a red test and a *smaller green*, and a smaller green is
+  indistinguishable from a pass inside a suite aggregate.
+
+  **The thirteenth red one does not touch the doc at all.** It compiles the
+  test against a copy of `ezlopi_service_uart.h` with one command inserted
+  above `SET_CONFIG`, so the enum says 4 while the real, unmutated doc still
+  says 3. That is the mutant that demonstrates the number is *linked*: a `3`
+  typed into the test would have stayed green with the document naming a
+  command that means something else. It cannot be done with `-D` — defining an
+  enumerator as a macro makes the header itself a syntax error — which is why
+  it is a header copy on the front of the include path rather than one more
+  compiler flag.
+
+  **The fourteenth must stay green, and it is the one that makes the other
+  thirteen mean anything.** It changes `pixel_count` from 60 to 120 in *all
+  three* blocks: a doc describing a different strip, which is not a drift. It
+  passes — which is what demonstrates the test compares the blocks against each
+  other rather than pinning the literal 60. Without it, every red mutant could
+  have been red for the wrong reason, and the test could have been a copy of
+  the numbers wearing a different hat. One earlier mutant was rewritten for the
+  same reason: it had been changing `color_order` in both blocks at once, which
+  only the deleted "must be `grb`" check was catching, so after that deletion
+  it was testing nothing. It now changes the claimed block alone.
 
   One of the mutants was green on the first run and **the fault was in the
   mutation, not the test**: the edit anchored on `"rgbw": true` at end of line,
-  both occurrences in the doc carry a trailing comma, so it wrote out a
+  every occurrence in the doc carries a trailing comma, so it wrote out a
   byte-identical copy. A no-op mutant is indistinguishable from a test that
   failed to notice — the same confusion as the mis-anchored aledcfg mutants
   above and the empty-toolchain `nm` skip — so the falsification script now
-  compares each mutant against the original before it will report a green.
+  compares each mutant against the original before it will report a green, and
+  the four added for the serial block refuse to run at all if their edit
+  matched nothing.
 
-- The full host suite is **6464** checks across **31** binaries, 0 failures —
-  **6390 + 61 + 13 = 6464**, where the 6390 includes `test_aled`'s 201, with
-  every binary reporting in the shape the aggregate greps for.
+- The full host suite is **6468** checks across **31** binaries, 0 failures —
+  **6390 + 61 + 17 = 6468**, where the 6390 includes `test_aled`'s 201, with
+  every binary reporting in the shape the aggregate greps for. The aggregate
+  was re-run rather than adjusted by the four checks added; it agreed, which is
+  the only reason this line says 6468 and not an arithmetic result. The figure
+  before this work was 6464.
 
 ### UUID utility — [bug]
 
@@ -9742,13 +9847,22 @@ Listed because a changelog that only mentions what was finished is misleading.
   deleted silently, because this section is the one a reader checks to find out
   whether a limitation they hit is known.
 
-  **A changed `pixel_count` needs a reboot.** `__init()` is guarded by
+  **A changed `pixel_count` needs a reboot, and one of the three routes in does
+  not say so.** `__init()` is guarded by
   `if (0 == dimmer_args->sk6812_led_strip_initialized)`, and `led_strip_init()`
   allocates the frame buffer from `length`, so re-shaping a running strip would
   mean `led_strip_free()` plus a re-init rather than an assignment. The config
   is only read in `__prepare()`, which runs at boot. Editing a provisioned
-  device's pixel count therefore takes effect on the next restart, and nothing
-  in the firmware says so to the user.
+  device's pixel count therefore takes effect on the next restart.
+
+  This entry said "nothing in the firmware says so to the user", and that was
+  wrong for two of the three routes: `hub.ezlopi.config.set` has always
+  answered `rebootRequired: true`, and the BLE dynamic-config characteristic
+  restarts the hub itself about 1.5 s after a config it accepted. It is true of
+  serial `cmd:3` and only of serial `cmd:3`, which answers `status_write: 1`
+  and leaves a hub storing one pixel count while driving another — the route a
+  production jig would use, and the one with no signal at all. Narrowed rather
+  than deleted because the gap is real; it was the scope that was wrong.
 
   **No board has driven a multi-pixel strip.** The parser is host-tested and
   the driver compiles clean on all four CI targets, c3 included, but the

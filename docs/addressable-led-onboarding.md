@@ -110,29 +110,99 @@ numbers happen to name here.
 
 ## Getting it onto the device
 
-Three routes, all of which take the whole document and store it verbatim.
-Unknown keys are preserved, so a configuration carrying a key a newer app added
-is not refused by an older hub.
+Three routes. All three validate the document, store it verbatim — unknown keys
+are preserved, so a configuration carrying a key a newer app added is not
+refused by an older hub — and then differ in what happens next. **One of them
+reboots your hub.** The differences matter more than the similarity, so each is
+stated rather than tabulated.
 
-| Route | Where it is documented |
-|---|---|
-| Serial `cmd:7` | [`provisioning-schema.md`](provisioning-schema.md#serial-cmd7) — the one worth using from a script or a jig |
-| BLE dynamic-config characteristic | [`provisioning-schema.md`](provisioning-schema.md#ble-provisioning) |
-| `hub.ezlopi.config.set` over the local websocket or the cloud | — |
+### Serial, `cmd:3`
+
+The one worth using from a script or a jig: no base64, no chunking, no
+authentication. Write one JSON line to the UART control channel (see
+[section 5 of the README](../README.md#5-the-serial-control-channel) for the
+framing) with the configuration document at the **top level**, beside `cmd`:
+
+<!-- machine-checked: strip-config-over-serial -->
+```json
+{
+  "cmd": 3,
+  "chipset": "ESP32",
+  "dev_detail": [
+    {
+      "device_id": "1002e001",
+      "id_item": 9,
+      "dev_name": "Hallway strip",
+      "dev_type": 5,
+      "gpio1": 18,
+      "pixel_count": 60,
+      "rgbw": true,
+      "color_order": "grb"
+    }
+  ]
+}
+```
+
+The hub answers `{"cmd":3,"status_write":1}`, or `status_write` `0` if the
+document was refused. **It does not reboot and does not tell you that one is
+needed** — see *What this firmware will not do with it*.
+
+Two things here are easy to get wrong, and both are the kind of mistake that
+looks like it worked:
+
+- **`cmd:3`, not `cmd:7`.** `cmd:7` is `EZPI_UART_CMD_SET_PROV`, which takes the
+  *hub provisioning* payload — serial number, certificates, `cloud_server`. It
+  is a different document on a different handler, and it is the one
+  [`provisioning-schema.md`](provisioning-schema.md#serial-cmd7) documents.
+  Sending `dev_detail` to it does not configure a strip. The number in the block
+  above is checked against `EZPI_UART_CMD_SET_CONFIG` itself by the host suite,
+  so it cannot drift from the enum.
+- **Top level, not nested under `data`.** The provisioning path wraps its
+  payload as `{"cmd":7,"data":{…}}`. This one does not: the whole received line
+  is what gets stored, `cmd` member included. A document nested under `data`
+  parses, is stored, and produces a hub with no devices.
+
+### BLE, the dynamic-config characteristic
+
+Service `0x00E5`, characteristic **`0xE501`** — *not* the provisioning
+characteristic `0xE301`. Both are listed in the GATT table in
+[`provisioning-schema.md`](provisioning-schema.md#gatt-layout), and the chunk
+envelope (`sequence`, `len`, `total_len`, base64, 400-byte chunks) is the same
+as the one documented there for provisioning.
+
+**This route restarts the hub about 1.5 seconds after a configuration it
+accepted**, which is how the strip comes up without you doing anything else. A
+refused document does not restart it. The characteristic takes writes from
+anyone in radio range, with no pairing.
+
+### `hub.ezlopi.config.set`, over the local websocket or the cloud
+
+The configuration goes in `params.config` as an object. On success the result
+carries `deviceCount` and `rebootRequired: true`; the hub does **not** restart
+itself, so the caller decides when. This route additionally refuses an entry
+whose `id_item` names a driver this image was not built with, which the other
+two do not check.
 
 **The whole document must serialise to under 4096 bytes.** It is stored in a
 `0x1000`-byte field and written with `cJSON_PrintPreallocated()` into a 4 KB
 buffer, which fails rather than truncates. The three strip keys add roughly 50
 bytes per strip, so this bites on the number of devices, not on the length of
-any one strip.
+any one strip. Only the websocket route checks that bound before storing; the
+other two let the storer refuse the write.
 
 ## What this firmware will not do with it
 
 - **Changing `pixel_count` takes effect on the next boot, not immediately.**
   The configuration is read in `__prepare()`, which runs at boot, and the strip
   is initialised once behind a latch. Re-shaping a running strip needs
-  `led_strip_free()` plus a re-init, not an assignment. Nothing in the firmware
-  currently tells the user this.
+  `led_strip_free()` plus a re-init, not an assignment.
+
+  Whether anything tells you so depends on which route you used, which is the
+  real trap: `hub.ezlopi.config.set` answers `rebootRequired: true`, BLE just
+  restarts the hub for you, and **serial `cmd:3` says nothing at all** — it
+  answers `status_write: 1` and leaves a hub that has stored your new pixel
+  count and is still driving the old one. A jig that sends a config and then
+  reads the strip will see the previous shape.
 - **The 2048-pixel cap is derived on paper, not observed.** A WS2812/SK6812 bit
   is 1.25 µs, so an RGBW pixel is 40 µs and 2048 pixels is 81.9 ms of unbroken
   transmission — about 12 frames per second before the ≥50 µs reset gap. The
@@ -153,17 +223,31 @@ measurements.
 
 ## How this file is checked
 
-The two blocks marked `<!-- machine-checked: ... -->` are extracted from this
-file by `tests/host/test_aledonboard.c` and run through the real
-`EZPI_util_devcfgval_check()` and `EZPI_aledcfg_from_json()`. The test fails if
+The three blocks marked `<!-- machine-checked: ... -->` are extracted from this
+file by `tests/host/test_aledonboard.c`. The first is run through the real
+`EZPI_util_devcfgval_check()` and `EZPI_aledcfg_from_json()`; the second is
+what its resolution is compared against; the third is compared with the first.
+The test fails if
 
 - the example is not a configuration this firmware would store, or
 - it does not resolve to the shape the second block claims, or
-- either block is missing, unparseable, or the marker cannot be found.
+- the serial block's `cmd` is not `EZPI_UART_CMD_SET_CONFIG`, taken from the
+  firmware's own enum rather than retyped here, or
+- the serial block carries a `data` wrapper, or wraps a document that is not
+  the worked example above, or
+- any block is missing, unparseable, or its marker cannot be found.
+
+The serial block is therefore a second copy of the example, which would
+normally be the thing that rots — it is safe here only because the test
+compares the two and goes red when they disagree.
 
 A documentation example that has drifted away from the code is worse than no
 example, because it is read as authoritative. This one cannot drift without
 `make -C tests/host` going red.
+
+The two GATT UUIDs and the `rebootRequired` behaviour above are **not**
+machine-checked; they were read from the source and are listed in the table
+below so the next reader can do the same.
 
 ## Source
 
@@ -174,3 +258,8 @@ example, because it is read as authoritative. This one cannot drift without
 | The driver | [`device_0009_other_RMT_SK6812.c`](../ezlopi-sensors-devices/device-0009-other-RMT-SK6812/device_0009_other_RMT_SK6812.c) |
 | What a configuration must contain | [`ezlopi_util_devcfgval.h`](../ezlopi-util/ezlopi-util-devcfgval/ezlopi_util_devcfgval.h) |
 | The 4 KB store | [`ezlopi_core_factory_info.c`](../ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c) |
+| The serial command numbers | [`ezlopi_service_uart.h`](../ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.h) |
+| The serial handler, and what it stores | [`ezlopi_service_uart.c`](../ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c) |
+| The GATT UUIDs | [`ezlopi_service_ble.h`](../ezlopi-services/ezlopi-service-ble/ezlopi_service_ble.h) |
+| The BLE route, and its restart | [`ezlopi_service_ble_dynamic_config.c`](../ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_dynamic_config.c) |
+| `rebootRequired` | [`ezlopi_cloud_devcfg.c`](../ezlopi-cloud/ezlopi-cloud-devcfg/ezlopi_cloud_devcfg.c) |

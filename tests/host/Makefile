@@ -37,6 +37,7 @@ COREEZLOPI_DIR := ../../ezlopi-core/ezlopi-core-ezlopi
 SNTP_DIR     := ../../ezlopi-core/ezlopi-core-sntp
 EVENTGRP_DIR := ../../ezlopi-core/ezlopi-core-event-group
 CONSTANTS_DIR := ../../ezlopi-cloud/ezlopi-cloud-constants
+UARTSVC_DIR  := ../../ezlopi-services/ezlopi-service-uart
 BLEBUF_DIR   := ../../ezlopi-core/ezlopi-core-ble
 I2C_HAL_DIR  := ../../ezlopi-hal/ezlopi-hal-i2c
 HTTP_DIR     := ../../ezlopi-core/ezlopi-core-http
@@ -180,7 +181,7 @@ $(BUILD)/test_aledcfg: test_aledcfg.c \
 # the real resolver.
 #
 # Unusual among these targets in that its fixture is not in the test file: it
-# reads docs/addressable-led-onboarding.md at run time and extracts the two
+# reads docs/addressable-led-onboarding.md at run time and extracts the three
 # blocks marked `<!-- machine-checked: ... -->`. That is deliberate. A copy of
 # the example here would be the thing that drifts, and two copies agreeing with
 # each other while disagreeing with the firmware would pass.
@@ -194,12 +195,28 @@ $(BUILD)/test_aledcfg: test_aledcfg.c \
 # the chipset name, for the reason given on test_aledcfg above: if this test
 # spelled "pixel_count" or "ESP32" itself, a renamed constant would leave it
 # green while every real configuration failed.
+#
+# It also puts ezlopi-service-uart on the include path, for the header only --
+# no .c from that component is compiled here, and none could be: the service is
+# FreeRTOS and ESP-IDF end to end. What is wanted is EZPI_UART_CMD_SET_CONFIG,
+# so that the command number the doc tells a user to send is compared against
+# the firmware's own enum rather than against a retyped 3. The doc said 7
+# before this test existed, which is set-*provisioning*.
+#
+# That header's only include is "sdkconfig.h", which no host has;
+# stubs-aledonboard/ supplies an empty one, in its own directory rather than in
+# stubs/ for the reason set out in that file and in the note above
+# test_actions. The header is named as a prerequisite so that renumbering the
+# enum rebuilds this test instead of leaving a stale binary agreeing with the
+# doc.
 $(BUILD)/test_aledonboard: ALEDONBOARD_CFLAGS := -std=c99 -O1 -g \
                                                  -I$(ALEDCFG_DIR) \
                                                  -I$(ALED_DIR) \
                                                  -I$(DEVCFGVAL_DIR) \
                                                  -I$(CONSTANTS_DIR) \
+                                                 -I$(UARTSVC_DIR) \
                                                  -I$(CJEXT_DIR) -I$(STUBS_DIR) \
+                                                 -Istubs-aledonboard \
                                                  -DDOC_PATH='"../../docs/addressable-led-onboarding.md"' \
                                                  $(SANITIZERS)
 $(BUILD)/test_aledonboard: test_aledonboard.c \
@@ -208,6 +225,8 @@ $(BUILD)/test_aledonboard: test_aledonboard.c \
                            $(DEVCFGVAL_DIR)/ezlopi_util_devcfgval.c \
                            $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
                            $(CJEXT_DIR)/cjext.c \
+                           $(UARTSVC_DIR)/ezlopi_service_uart.h \
+                           stubs-aledonboard/sdkconfig.h \
                            ../../docs/addressable-led-onboarding.md | $(BUILD)
 	$(CC) $(ALEDONBOARD_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_aledonboard_main.o test_aledonboard.c
 	$(CC) $(ALEDONBOARD_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/aledonboard_aledcfg.o $(ALEDCFG_DIR)/ezlopi_util_aledcfg.c

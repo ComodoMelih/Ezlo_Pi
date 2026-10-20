@@ -16,13 +16,30 @@
  * file: a copy is the thing that drifts, and two copies that agree with each
  * other and not with the firmware would pass.
  *
- * WHY TWO BLOCKS
+ * WHY THREE BLOCKS
  *
- * The doc carries the configuration *and* the shape it claims to resolve to,
- * each behind its own marker. This test compares the second against the actual
- * resolution of the first, which means this file holds no expected numbers
- * either. Change 60 to 120 in one block and leave the other, and this goes
- * red -- which is the point.
+ * The doc carries the configuration, the shape it claims to resolve to, and
+ * the same configuration again with a `cmd` member in front of it for the
+ * serial route -- each behind its own marker. This test compares the second
+ * against the actual resolution of the first and the third against the first
+ * itself, which means this file holds no expected numbers either. Change 60 to
+ * 120 in one block and leave the others, and this goes red -- which is the
+ * point.
+ *
+ * The third block is checked for two things beyond being the same document,
+ * and both of them were wrong in this doc before the block existed: it named
+ * cmd 7, which is set-*provisioning*, and it did not say the configuration
+ * goes at the top level while the provisioning payload it pointed at nests
+ * under `data`. A user following it would have sent a device configuration to
+ * the certificate handler, or stored a document that yields a hub with no
+ * devices and acknowledges the write.
+ *
+ * WHY THE COMMAND NUMBER IS LINKED AND NOT TYPED OUT
+ *
+ * Same argument as the chipset string below: EZPI_UART_CMD_SET_CONFIG comes
+ * from the real ezlopi_service_uart.h, so inserting a command above it in that
+ * enum makes this test red rather than leaving the doc quietly naming a
+ * different command. There is deliberately no 3 in this file.
  *
  * WHY THE CHIPSET STRING IS LINKED AND NOT TYPED OUT
  *
@@ -35,35 +52,55 @@
  * WHAT A FAILURE HERE MEANS
  *
  * Any of: the doc's example would not be stored by this firmware; it does not
- * resolve to what the doc says; a marker or a fenced block is missing; the file
- * itself cannot be read. All four are reported distinctly, because "the doc is
- * wrong" and "this test cannot find the doc" need different fixes and a silent
- * skip would look like a pass in both cases.
+ * resolve to what the doc says; the serial route's block names a command other
+ * than set-config, nests the configuration under `data`, or has stopped being
+ * a copy of the worked example; a marker or a fenced block is missing; the file
+ * itself cannot be read. All of those are reported distinctly, because "the doc
+ * is wrong" and "this test cannot find the doc" need different fixes and a
+ * silent skip would look like a pass in both cases.
  *
  * HOW IT WAS CONFIRMED TO BE ABLE TO FAIL
  *
- * Eight mutated copies of the doc were made under /root and DOC_PATH repointed
- * at each, so the worktree file was never touched: pixel_count 60 -> 61 in the
- * config block; rgbw flipped in the claimed block; chipset lowercased to
- * "esp32"; id_item 9 -> 11; the config marker deleted; the marker and its
- * fenced block deleted; DOC_PATH aimed at a file that does not exist; and
- * color_order "grb" -> "rbg" in the claimed block only. The real doc passed and
- * all eight went red, each at the check that should catch it.
+ * Thirteen mutated copies of the doc were made under /root and DOC_PATH
+ * repointed at each, so the worktree file was never touched: pixel_count
+ * 60 -> 61 in the config block; rgbw flipped in the claimed block; chipset
+ * lowercased to "esp32"; id_item 9 -> 11; the config marker deleted; the
+ * marker and its fenced block deleted; DOC_PATH aimed at a file that does not
+ * exist; color_order "grb" -> "rbg" in the claimed block only; the serial
+ * block's cmd 3 -> 7; the serial block nested under `data`; the serial copy
+ * drifted to 120 pixels while the worked example stayed at 60; and the serial
+ * marker deleted. The real doc passed and all twelve went red, each at the
+ * check that should catch it.
  *
- * Three of those eight mutate one block and leave the other, which is the
- * shape a real drift takes. A ninth mutant exists to be *green*: both blocks
+ * The thirteenth does not mutate the doc at all: it compiles this file against
+ * a copy of ezlopi_service_uart.h with one command inserted above SET_CONFIG,
+ * so the enum says 4 while the real, unmutated doc says 3. That one is red
+ * only because the number is linked; a 3 typed into this file would have
+ * stayed green with the document naming the wrong command. It cannot be done
+ * with -D, because defining an enumerator as a macro makes the header a syntax
+ * error.
+ *
+ * Five of those mutate one block and leave the others, which is the shape a
+ * real drift takes. A further mutant exists to be *green*: all three blocks
  * changed to say 120 pixels instead of 60. That is a doc describing a
  * different strip, not a doc disagreeing with the firmware, and it passes --
- * which is what proves this file compares the two blocks rather than pinning
- * the literal 60. Without that one, all eight red mutants could be red for the
- * wrong reason.
+ * which is what proves this file compares the blocks rather than pinning the
+ * literal 60. Without that one, every red mutant could be red for the wrong
+ * reason.
  *
- * One of those eight was green on the first attempt, and the fault was in the
- * mutation, not here: the edit anchored on `"rgbw": true` at end of line and
- * both occurrences carry a trailing comma, so it produced a byte-identical
- * copy of the doc. A no-op mutant reads exactly like a test that failed to
- * notice. Anything re-running this should compare each mutant against the
- * original before trusting a green.
+ * One of the first eight was green on the first attempt, and the fault was in
+ * the mutation, not here: the edit anchored on `"rgbw": true` at end of line
+ * and every occurrence carries a trailing comma, so it produced a
+ * byte-identical copy of the doc. A no-op mutant reads exactly like a test
+ * that failed to notice. Anything re-running this should compare each mutant
+ * against the original before trusting a green, which the sweep now does for
+ * every one of them.
+ *
+ * Deleting the serial marker is worth singling out, because it is the mutation
+ * that reports 14 checks where the doc reports 17: four checks stop running
+ * and the extraction counts one failure in their place. A test that treated a
+ * missing marker as "nothing to check" would have reported a smaller green,
+ * and a smaller green is indistinguishable from a pass in a suite tally.
  *
  * A test that can only pass is not a test.
  */
@@ -72,10 +109,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ezlopi_service_uart.h declares EZPI_SERV_uart_tx_data() with a uint8_t
+** parameter and includes only "sdkconfig.h", so it cannot be the first header
+** in a translation unit. Including <stdint.h> ahead of it is what every real
+** build does by accident, through its other includes; doing it on purpose here
+** keeps this test from depending on cjext.h continuing to pull it in. The
+** header's missing <stdint.h> is a pre-existing defect, left alone because
+** this commit is about the document. */
+#include <stdint.h>
+
 #include "cjext.h"
 #include "ezlopi_util_aledcfg.h"
 #include "ezlopi_util_devcfgval.h"
 #include "ezlopi_cloud_keywords.h"
+#include "ezlopi_service_uart.h"
 
 /* Relative to tests/host, which is where the suite runs its binaries from. */
 #ifndef DOC_PATH
@@ -84,6 +131,7 @@
 
 #define MARKER_CONFIG "<!-- machine-checked: strip-config -->"
 #define MARKER_SHAPE "<!-- machine-checked: strip-config-resolves-to -->"
+#define MARKER_SERIAL "<!-- machine-checked: strip-config-over-serial -->"
 
 /* The region the config is stored in: 0x1000, as EZLOPI_FINFO_LEN_EZLOPI_CONFIG_JSON.
  * Passed so the example is checked against the real size bound too, not just
@@ -367,18 +415,87 @@ static void test_it_resolves_to_what_the_doc_claims(cJSON *entry, cJSON *claimed
      * doc's own claimed-shape block above, which is the part that can drift. */
 }
 
+/* The serial route's block is the worked example again, with a `cmd` member in
+ * front of it. Both halves of that sentence are checked here, because both
+ * were wrong in this document before this test existed: it named cmd 7, which
+ * is set-*provisioning*, and it did not say the configuration goes at the top
+ * level while the provisioning payload it pointed at nests under `data`.
+ *
+ * The command number is taken from EZPI_UART_CMD_SET_CONFIG rather than typed,
+ * for the same reason the chipset string is linked: a reordered enum must make
+ * this red, and a `3` written here would agree with the doc and with nothing
+ * else. Three is not an expected value in this file.
+ *
+ * The equality check is what keeps the second copy of the example honest. A
+ * doc that shows one configuration in the worked example and a different one
+ * over serial has drifted even if both would be stored, and the drift is
+ * invisible to a check that only validates each block on its own. */
+static void test_the_serial_example_is_the_same_document(cJSON *serial, cJSON *config)
+{
+    cJSON *const cj_cmd = cJSON_GetObjectItem(__FUNCTION__, serial, ezlopi_cmd_str);
+    cJSON *const cj_data = cJSON_GetObjectItem(__FUNCTION__, serial, ezlopi_data_str);
+    cJSON *stripped;
+
+    CHECK((NULL != cj_cmd) && cJSON_IsNumber(cj_cmd),
+          "the serial block carries a numeric cmd");
+
+    if ((NULL != cj_cmd) && cJSON_IsNumber(cj_cmd))
+    {
+        if (EZPI_UART_CMD_SET_CONFIG != cj_cmd->valueint)
+        {
+            printf("      doc says cmd %d, EZPI_UART_CMD_SET_CONFIG is %d"
+                   " (EZPI_UART_CMD_SET_PROV is %d)\n",
+                   cj_cmd->valueint, (int)EZPI_UART_CMD_SET_CONFIG,
+                   (int)EZPI_UART_CMD_SET_PROV);
+        }
+        CHECK(EZPI_UART_CMD_SET_CONFIG == cj_cmd->valueint,
+              "the serial block's cmd is EZPI_UART_CMD_SET_CONFIG, from the firmware's enum");
+    }
+
+    /* Not a style point. ezpi_service_uart_set_config() parses the whole
+     * received line and hands that root to the storer -- it reads no `data`
+     * member -- so a document nested the way the provisioning route nests its
+     * own is stored intact and yields a hub with no devices. The get-config
+     * handler deleting `cmd` from what it read back out of flash
+     * (ezlopi_service_uart.c:1463) is the firmware's own confirmation that the
+     * stored document is the received line, `cmd` included. */
+    CHECK(NULL == cj_data,
+          "the serial block has no data wrapper -- the config sits at the top level");
+
+    stripped = cJSON_Duplicate(__FUNCTION__, serial, true);
+    if (NULL == stripped)
+    {
+        checks++;
+        failures++;
+        printf("FAIL  out of memory duplicating the serial block\n");
+        return;
+    }
+    cJSON_DeleteItemFromObject(__FUNCTION__, stripped, ezlopi_cmd_str);
+
+    /* Case-sensitive: the key spellings the firmware uses are case-sensitive
+     * everywhere else, and a doc whose serial block said "Chipset" would be a
+     * doc that does not work. */
+    CHECK(cJSON_Compare(stripped, config, true),
+          "the serial block, less its cmd, is the same document as the worked example");
+
+    cJSON_Delete(__FUNCTION__, stripped);
+}
+
 int main(void)
 {
     char *doc = slurp_doc();
     char *config_block = NULL;
     char *shape_block = NULL;
+    char *serial_block = NULL;
     cJSON *config = NULL;
     cJSON *shape = NULL;
+    cJSON *serial = NULL;
 
     if (NULL != doc)
     {
         config_block = extract_block(doc, MARKER_CONFIG);
         shape_block = extract_block(doc, MARKER_SHAPE);
+        serial_block = extract_block(doc, MARKER_SERIAL);
     }
 
     if (NULL != config_block)
@@ -388,6 +505,10 @@ int main(void)
     if (NULL != shape_block)
     {
         shape = parse_block(shape_block, "strip-config-resolves-to");
+    }
+    if (NULL != serial_block)
+    {
+        serial = parse_block(serial_block, "strip-config-over-serial");
     }
 
     if (NULL != config)
@@ -402,6 +523,10 @@ int main(void)
         {
             test_it_resolves_to_what_the_doc_claims(entry, shape);
         }
+        if (NULL != serial)
+        {
+            test_the_serial_example_is_the_same_document(serial, config);
+        }
     }
 
     if (NULL != config)
@@ -412,8 +537,13 @@ int main(void)
     {
         cJSON_Delete(__FUNCTION__, shape);
     }
+    if (NULL != serial)
+    {
+        cJSON_Delete(__FUNCTION__, serial);
+    }
     free(config_block);
     free(shape_block);
+    free(serial_block);
     free(doc);
 
     /* Zero checks is a failure in its own right: it means the extraction never

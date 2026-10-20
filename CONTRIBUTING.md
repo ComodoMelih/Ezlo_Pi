@@ -297,6 +297,17 @@ A stub `sdkconfig.h` is still sometimes the right answer — see
 belongs to one test rather than to the shared stub directory, for the reason
 that file documents.
 
+There is now a second reason to want one, and it is the weaker of the two:
+`tests/host/stubs-aledonboard/sdkconfig.h` defines nothing at all. It exists
+because `ezlopi_service_uart.h` includes `"sdkconfig.h"` and
+`test_aledonboard.c` wants one enumerator out of that header — the command
+number the LED onboarding doc tells a user to send. Nothing in the enum is
+behind an `#ifdef`, so there is nothing to switch on; the only thing being
+defeated is a file that does not exist on a host. That is a legitimate use and
+also exactly the shape the 52-file measurement above warns about, so the test
+links a symbol it then asserts against rather than compiling a translation unit
+and trusting it to be non-empty.
+
 That table is generated, not counted by hand, and the first version of it was
 wrong in a way worth naming: it claimed 15 string tables by quietly folding in
 three files that are each their own oddity — `ezlopi_cloud_thermostat_str.c`
