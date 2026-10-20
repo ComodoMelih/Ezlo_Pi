@@ -13,6 +13,7 @@ SANITIZE_DIR := ../../ezlopi-util/ezlopi-util-sanitize
 IMPROV_DIR   := ../../ezlopi-util/ezlopi-util-improv
 HA_DIR       := ../../ezlopi-util/ezlopi-util-ha
 ALED_DIR     := ../../ezlopi-util/ezlopi-util-aled
+ALEDCFG_DIR  := ../../ezlopi-util/ezlopi-util-aledcfg
 CJEXT_DIR    := ../../ezlopi-components/cjext
 UART_HAL_DIR := ../../ezlopi-hal/ezlopi-hal-uart
 ZE08_DIR     := ../../ezlopi-sensors-devices/sensor-0069-UART-ze08-ch02-gas-sensor
@@ -80,7 +81,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
            test_httpresp test_suntime test_issun test_coords test_tz \
-           test_aled
+           test_aled test_aledcfg
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -135,6 +136,45 @@ $(BUILD)/test_ha: test_ha.c $(HA_DIR)/ezlopi_util_ha.c | $(BUILD)
 # the equivalent from a board at all.
 $(BUILD)/test_aled: test_aled.c $(ALED_DIR)/ezlopi_util_aled.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# ezlopi-util-aledcfg: which strip a stored device config is describing.
+#
+# Not a one-liner like test_aled above, because this one genuinely has
+# dependencies -- cjext for the document and ezlopi_cloud_keywords.c for the
+# key spellings -- and cjext gets the relaxed flags it gets everywhere here,
+# being vendored. Follows test_devcfgval, which is the same shape of problem.
+#
+# The key strings are linked rather than redefined locally (the choice
+# test_devcfgval made) specifically because the spelling is the thing that can
+# be wrong: if this test defined "pixel_count" itself and the constant in
+# ezlopi_cloud_keywords.c said "pixelcount", every check here would still pass
+# and no strip would ever read its length. Linking the real definition is what
+# makes that a build-time identity rather than a coincidence.
+#
+# The nm guard is the same one test_cjsongpio uses, and it is here for the
+# same reason: the subject is small enough that a mistake in this rule could
+# produce a binary that tests the test's own helpers and reports all green.
+$(BUILD)/test_aledcfg: ALEDCFG_CFLAGS := -std=c99 -O1 -g \
+                                         -I$(ALEDCFG_DIR) \
+                                         -I$(ALED_DIR) \
+                                         -I$(CONSTANTS_DIR) \
+                                         -I$(CJEXT_DIR) -I$(STUBS_DIR) \
+                                         $(SANITIZERS)
+$(BUILD)/test_aledcfg: test_aledcfg.c \
+                       $(ALEDCFG_DIR)/ezlopi_util_aledcfg.c \
+                       $(ALED_DIR)/ezlopi_util_aled.c \
+                       $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                       $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(ALEDCFG_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_aledcfg_main.o test_aledcfg.c
+	$(CC) $(ALEDCFG_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/aledcfg_subject.o $(ALEDCFG_DIR)/ezlopi_util_aledcfg.c
+	$(CC) $(ALEDCFG_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/aledcfg_aled.o $(ALED_DIR)/ezlopi_util_aled.c
+	$(CC) $(ALEDCFG_CFLAGS) -c -o $(BUILD)/aledcfg_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(ALEDCFG_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/aledcfg_cjext.o $(CJEXT_DIR)/cjext.c
+	@nm $(BUILD)/aledcfg_subject.o | grep -q ' T EZPI_aledcfg_from_json' \
+	  || { echo "ezlopi_util_aledcfg.c compiled to an object without the subject in it"; exit 1; }
+	$(CC) -o $@ $(BUILD)/test_aledcfg_main.o $(BUILD)/aledcfg_subject.o \
+	      $(BUILD)/aledcfg_aled.o $(BUILD)/aledcfg_keywords.o \
+	      $(BUILD)/aledcfg_cjext.o $(LDFLAGS) -lm
 
 # cjext.c is vendored third-party code, so it is compiled without -Werror and
 # with the two warnings it legitimately trips disabled. The test file itself is

@@ -430,6 +430,15 @@ extern "C"
     extern const char *ezlopi_slave_addr_str;
     extern const char *ezlopi_pull_up_str;
 
+    /* Addressable LED strip shape. All three are optional in a device config,
+    ** and a config with none of them means one GRB pixel with no white channel
+    ** -- which is exactly what device-0009 did when its length was hardcoded,
+    ** so an already-provisioned strip is unaffected. The defaults and bounds
+    ** live in ezlopi-util-aledcfg, not here. */
+    extern const char *ezlopi_pixel_count_str;
+    extern const char *ezlopi_rgbw_str;
+    extern const char *ezlopi_color_order_str;
+
     extern const char *ezlopi_red_str;
     extern const char *ezlopi_green_str;
     extern const char *ezlopi_blue_str;

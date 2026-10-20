@@ -444,6 +444,10 @@ const char *ezlopi_freq_hz_str = "freq_hz";
 const char *ezlopi_slave_addr_str = "slave_addr";
 const char *ezlopi_pull_up_str = "pull_up";
 
+const char *ezlopi_pixel_count_str = "pixel_count";
+const char *ezlopi_rgbw_str = "rgbw";
+const char *ezlopi_color_order_str = "color_order";
+
 const char *ezlopi_red_str = "red";
 const char *ezlopi_green_str = "green";
 const char *ezlopi_blue_str = "blue";

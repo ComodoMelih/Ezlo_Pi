@@ -5123,6 +5123,144 @@ flashed.**
   with `test_aled` contributing 68 of them and all 29 binaries reporting in the
   shape the aggregate greps for.
 
+### Addressable LED configuration — [feat]
+
+- **A strip onboards today and lights exactly one LED.** This is the measured
+  state of the tree, not a design gap:
+  `device-0009-other-RMT-SK6812` is registered through all four files of the
+  device contract, appears in the onboarding list as
+  `device-rgp_strip-RMT_SK6812`, reports
+  `category_dimmable_light` / `subcategory_dimmable_colored` /
+  `dev_type_dimmer_outlet`, and accepts and answers colour and dimmer commands.
+  It also contains, verbatim:
+
+      dimmer_args->sk6812_strip.length = 1;
+
+  and the only configuration keys it reads are `gpio1`, `duty_cycle`, `freq_hz`
+  and `dev_type`. There was no pixel-count key anywhere in the config schema.
+  `led_strip_fill()` is then called with that same `length`, so a 60-pixel
+  strip wired to a provisioned EzloPi lights its first LED and nothing else —
+  while the app shows a working, responding device.
+
+  Separately, `led_strip`'s `COLOR_SIZE(strip)` is `3 + (strip->is_rgbw != 0)`,
+  and **`is_rgbw` is never assigned anywhere in the firmware** — the args
+  struct is `memset` to 0 — so the white channel of an SK6812-RGBW is
+  unreachable as well.
+
+- **`ezlopi-util-aledcfg` is the parser for that, and only the parser.**
+  `EZPI_aledcfg_from_json()` resolves a pixel count, a white-channel flag and a
+  wire byte order from a device-config object;
+  `EZPI_aledcfg_order_from_str()` parses `"grb"`; `EZPI_aledcfg_wire_len()`
+  wraps `EZPI_aled_wire_len()` so the component's bound and the driver's
+  `calloc(length, COLOR_SIZE)` are provably the same arithmetic rather than two
+  copies of it. The three key names — `pixel_count`, `rgbw`, `color_order` —
+  are in `ezlopi-cloud-constants` with every other config key.
+
+  **device-0009 is not wired to it in this commit.** Nothing calls it yet. The
+  one-LED behaviour above is unchanged on hardware until the driver is changed,
+  which is a separate commit because it is the part no host test can check.
+
+- **The defect this component exists to prevent, stated exactly.**
+  `EZPI_core_cjson_get_value_uint32()` assigns `*item_val = 0` *before* it looks
+  the key up, and leaves the 0 there when the key is absent or is not a JSON
+  number. So the obvious way to write the caller —
+
+      uint32_t n = 1;                           // looks like a default
+      CJSON_GET_VALUE_UINT32(cj_device, key, n); // n is now 0
+
+  — discards the default silently. And 0 is not a harmless value:
+  `led_strip_init()` begins `CHECK_ARG(strip && strip->length > 0 && ...)`, so a
+  resolved count of 0 does not dim the strip, it fails initialisation and the
+  device never comes up. That asymmetry is the whole reason the resolver owns
+  the defaults instead of its callers, and why every path through it — including
+  a `NULL` device object — leaves a usable config behind.
+
+- **The defaults are the shipped behaviour, deliberately, and that is the
+  load-bearing property.** A config with none of the three keys resolves to one
+  GRB pixel with no white channel: exactly the hardcoded `length = 1`, the
+  `is_rgbw` left zero by the `memset`, and the order `led_strip` uses for
+  SK6812 anyway.
+
+  Every strip already provisioned in the field has a stored config containing
+  none of these keys, so a "better" default would be a silent behaviour change
+  pushed to working hardware by a firmware update. An absent key is also
+  reported as agreement rather than as a substitution, so the eventual caller
+  does not log about every strip provisioned before the keys existed.
+
+- **The 2048-pixel bound is derived from the wire protocol, not picked.** A
+  WS2812/SK6812 bit is 1.25 µs. An RGBW pixel is 32 bits, so 40 µs per pixel,
+  so 2048 pixels is 81.9 ms of unbroken transmission — about 12 frames per
+  second, before the ≥50 µs reset gap. RGB is 24 bits, 30 µs, 61.4 ms, 16 fps.
+  So the cap sits where the strip stops looking animated on a single RMT
+  channel; raising it would not buy a usable strip, it would buy a 32 KB
+  allocation that fails on a loaded heap. At the cap the buffer is 8 KB.
+
+  An out-of-range count falls back to **1, not to the cap**: a config saying
+  100000 is far likelier a typo or a unit confusion than a request for the
+  longest strip this can drive, and quietly lighting 2048 pixels would hide
+  that. 1 is conspicuous and recoverable.
+
+- **Three refusals that could each have been a silent coercion.** A quoted
+  `"60"` is refused rather than parsed, because that is what a form field sends
+  when nobody converted it. `2.5` is refused rather than truncated to 2 — a
+  count is the one field where rounding yields a strip that works at almost the
+  right length, which is the hardest kind of wrong to notice. And the value is
+  read from `valuedouble` rather than `valueint`, compared as a double *before*
+  any cast to `size_t`, because casting a negative or huge double to an
+  unsigned type is undefined and a bound applied after the cast would be
+  testing `SIZE_MAX` rather than `-1`.
+
+  A correction to the obvious reasoning there, which was measured rather than
+  assumed: the `1e9` case does **not** discriminate `valueint` from
+  `valuedouble`, because cJSON's `INT_MAX` clamp is itself out of range and both
+  readings refuse it. Swapping the two fields was caught by the fractional case
+  and by nothing else, and the test now says so instead of claiming credit for
+  a check that does not do the work.
+
+- **One malformed key does not discard the others.** Each field falls back
+  individually, so a config with a good `pixel_count` beside a nonsense `rgbw`
+  keeps the count. Checked in both key orders, so the outcome does not depend on
+  which is read first.
+
+- **`color_order` is swept over all 17,576 three-letter lowercase strings**, of
+  which exactly the six genuine permutations of r/g/b are accepted — with the
+  expectation computed in the test rather than copied from the subject's table.
+  Case-insensitive, via an explicit ASCII fold rather than `tolower()`, whose
+  behaviour is locale-dependent and undefined for a negative `char`.
+
+  The length is checked *before* the compare, and both near-misses are pinned:
+  `"rg"` would match a prefix compare, `"rgbx"` would match a bounded compare of
+  3. A refused string also leaves the caller's variable untouched rather than
+  zeroing it to GRB, so a caller that ignores the return value keeps its own
+  order instead of silently getting a different one. The name-to-enum pairing is
+  checked against names written in the test, because a table merely shuffled
+  against the enum round-trips perfectly and lights the strip in the wrong
+  colours.
+
+- **No schema change was needed, and that is by prior design rather than luck.**
+  `ezlopi-util-devcfgval` is deliberately permissive — it rejects only shapes
+  that cannot work on this build and accepts unknown members, precisely so a
+  key added by a newer app is not refused by an older hub. The config is stored
+  as raw JSON in the factory-info partition and re-parsed on each boot, so the
+  three new keys persist with no storage-layer change. There is no key
+  whitelist to register with.
+
+- **61 checks; 17 mutants, 17 killed, 0 survived.** One is killed by ASan alone
+  with no check failing: dropping the length check before the string compare
+  reads past a two-byte string and reports a global-buffer-overflow.
+
+  Two of the seventeen were **mis-anchored on the first pass** — the default
+  pixel count is a `#define` in the header rather than in the `.c` the sweep was
+  editing, and one anchor said `return` where the source says `ret =`. Both were
+  reported as no-ops by the sweep's own detector rather than as survivors, which
+  is the reason that detector exists, and both were re-run with correct anchors
+  and killed. A mutant that never applied is indistinguishable from one that
+  survived, so the distinction is recorded rather than smoothed over.
+
+- The full host suite is **6318** checks across **30** binaries, 0 failures —
+  **6257 + 61 = 6318**, with every binary reporting in the shape the aggregate
+  greps for.
+
 ### UUID utility — [bug]
 
 **None of this is reachable.** Nothing in the repository calls any function in
