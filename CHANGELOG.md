@@ -5005,19 +5005,29 @@ flashed.**
 ### Addressable LEDs — [feat]
 
 - **`ezlopi-util-aled` is the colour arithmetic for addressable strips, and
-  nothing else.** Four functions: `EZPI_aled_scale8` (scale a channel by a
-  brightness), `EZPI_aled_hsv_to_rgb` (a hue/saturation/value byte triple to
-  RGBW), `EZPI_aled_wire_len` (how many bytes a strip of *n* pixels needs), and
+  nothing else.** `EZPI_aled_scale8` (scale a channel by a brightness),
+  `EZPI_aled_hsv_to_rgb` (a hue/saturation/value byte triple to RGBW),
+  `EZPI_aled_wire_len` (how many bytes a strip of *n* pixels needs), and
   `EZPI_aled_pack` (pixels into the byte order a particular chip expects).
+  `EZPI_aled_fill` and `EZPI_aled_unpack_first` were added later, when the
+  driver needed them — see *Addressable LED configuration* below. Six
+  functions now; this entry said four when it was written and four is what the
+  component shipped with.
 
   Its `idf_component_register()` has an empty `REQUIRES`, and that is a
   requirement of the component rather than a happy accident: needing an IDF
   header is the signal that whatever is being written belongs in the driver
   instead. That is what keeps the whole of it host-testable.
 
-  **It drives no hardware and nothing calls it.** There is no RMT driver, no
-  device, and no control surface in this commit. It is the half that can be got
-  wrong silently, separated from the half that needs a board.
+  **It drove no hardware and nothing called it.** There was no RMT driver, no
+  device, and no control surface in this commit. It was the half that can be
+  got wrong silently, separated from the half that needs a board. That is no
+  longer the state of the tree: `device-0009` now calls `EZPI_aled_wire_len`,
+  `EZPI_aled_fill` and `EZPI_aled_unpack_first` directly, and reaches
+  `EZPI_aled_pack` through the fill. The past tense is the correction — the
+  component was deliberately dead when it was written, and the thing that made
+  it worth writing that way is that the half needing a board arrived against
+  arithmetic that had already been swept.
 
 - **Clean-room, deliberately and specifically.** Nothing was taken from WLED
   (Christian Schwinne / Aircoookie, **EUPL-1.2**, an Arduino/PlatformIO
@@ -5038,8 +5048,10 @@ flashed.**
   rather than reporting a short count — a half-packed frame is still a frame,
   and the strip will happily display it.
 
-- **The test is 68 checks, and ten of them exist because the other 58 were not
-  enough.** `tests/host/test_aled.c` sweeps all 65,536 `scale8` pairs and all
+- **The test was 68 checks, and ten of them exist because the other 58 were not
+  enough.** It is **201** now; the 133 added with `EZPI_aled_fill` and
+  `EZPI_aled_unpack_first` are described below.
+  `tests/host/test_aled.c` sweeps all 65,536 `scale8` pairs and all
   16,777,216 `(h, s, v)` triples, twice. Exhaustive rather than a table of
   colours, because the way this conversion gets written wrong is at a sector
   boundary, and arithmetic that is off by one or two inside an arc still sends
@@ -5195,12 +5207,17 @@ flashed.**
   are already target-guarded off c3 for timing reasons — so "an RMT-based
   device builds on c3" was not something to assume. It does.
 
-  `EZPI_aledcfg_wire_len` and the `EZPI_aled_wire_len()` it wraps are **absent
-  from all four** ELFs, and that is the expected result rather than a missing
-  link: nothing in the firmware calls the wrapper, so both are collected. They
-  are reached only from the host test. Recorded because an absent symbol that
-  is *fine* and an absent symbol that means the feature was dropped look
-  identical in an `nm` listing, and only one of them is this.
+  `EZPI_aledcfg_wire_len` and the `EZPI_aled_wire_len()` it wraps were **absent
+  from all four** ELFs at this commit, and that was the expected result rather
+  than a missing link: nothing in the firmware called the wrapper, so both were
+  collected, and both were reached only from the host test. Recorded because an
+  absent symbol that is *fine* and an absent symbol that means the feature was
+  dropped look identical in an `nm` listing, and only one of them was this.
+
+  Re-measured since: `EZPI_aled_wire_len` is now **present in all four**,
+  because `__fill_strip()` calls it to size the frame buffer. The wrapper
+  `EZPI_aledcfg_wire_len` is still absent in all four — still nothing calls it.
+  That split is why the two are named separately rather than as a pair.
 
   One note on how that was measured, because it nearly went unrecorded. The
   first run of the symbol check reported `resolver=n/a` for all three new
@@ -5213,18 +5230,108 @@ flashed.**
   each ELF and prints its symbol total, and only then believes a negative
   result.
 
-- **`color_order` is parsed but cannot be honoured, and the driver says so.**
-  This was found while wiring the driver, and it contradicts what the resolver's
-  six-permutation support implies: `led_strip_t` has **no colour-order field**.
-  The order lives in a static table indexed by strip *type*
-  (`led_params[LED_STRIP_SK6812].order = ORDER_GRB`), and `color_order_t` offers
-  only `ORDER_GRB` and `ORDER_RGB` — two of the six. Honouring the rest means
-  changing vendored MIT code, which is deliberately not in this commit.
+- **Two functions were added to `ezlopi-util-aled` first, and the permutation
+  still has exactly one implementation.** `EZPI_aled_fill` packs one colour
+  into every pixel of a frame buffer; `EZPI_aled_unpack_first` reads a colour
+  back out of one. The fill does not re-derive the byte order: it hands the
+  first pixel to `EZPI_aled_pack` — which already knew all six orders and was
+  already swept — and `memcpy`s that stride across the rest. So the order table
+  is read in one place, and filling the 2048-pixel cap needs no 8 KB temporary.
+  An undersized destination is refused by writing **nothing**, matching `pack`,
+  because a half-filled frame is still a frame and the strip will display it.
 
-  So a config asking for anything but `grb` now gets a `TRACE_W` rather than
-  silent acceptance. A strip lit in the wrong byte order still lights, which is
-  exactly what makes an unlogged mismatch so hard to attribute — the same
-  reasoning that put the order table under test in the first place.
+  The unpack is the inverse permutation written as **the same table read
+  backwards** rather than as a second table, since a second table is a thing
+  that can disagree with the first.
+
+  **133 checks added, 68 → 201**, sweeping all six orders against both pixel
+  widths with the expected bytes derived from the three-letter order *names*
+  rather than from the subject's own table. 12 mutants, 12 killed, 0 survived;
+  two of them killed by AddressSanitizer alone with no check failing — dropping
+  the `wire_len` guard on the white byte, and dropping the order bound, both
+  giving a stack-buffer-overflow read.
+
+  One of those twelve is the most useful measurement in this section. Reading
+  the order table **forwards** instead of backwards in the unpack is killed by
+  `brg` and `gbr` and **by nothing else** — 8 failing checks, all of them in
+  those two orders, isolated rather than inferred. `grb`, `rgb`, `rbg` and
+  `bgr` are involutions: their forward and inverse permutations are the same
+  mapping, so the bug is invisible in four of six. Only `brg` and `gbr` are
+  3-cycles. A test that swept the default `grb` — or any subset missing those
+  two — would have passed that mutant while five of the six orders reported the
+  wrong colour to the app.
+
+- **All six colour orders are honoured, and no vendored code was changed to do
+  it.** The obstacle was real: `led_strip_t` has **no colour-order field**, the
+  order lives in a static table indexed by strip *type*
+  (`led_params[LED_STRIP_SK6812].order = ORDER_GRB`), and `color_order_t` there
+  offers only `ORDER_GRB` and `ORDER_RGB` — two of the six. So for a while this
+  entry said the key was parsed, warned about and then ignored.
+
+  Adding an order field to the vendored MIT component and threading it through
+  `led_strip_set_pixel()` was the obvious route and is not the one taken.
+  `__fill_strip()` packs the frame buffer directly with `EZPI_aled_fill()`
+  instead and then flushes, which honours all six orders without touching
+  third-party code — and the packing it uses was already written and already
+  swept by `tests/host`. The vendored component keeps RMT ownership, which is
+  the part worth vendoring.
+
+  Two details that are load-bearing rather than tidy. Brightness is passed as
+  **255** to the fill: the vendored RMT adapter applies `strip->brightness`
+  while transmitting, so scaling the buffer as well would apply the dimmer
+  twice and bend its curve. And the white byte is still `rgb_luma(colour)`,
+  which is what `led_strip_set_pixel()` wrote, so an RGBW strip is driven
+  exactly as before — an `rgbcolor` from the cloud carries no white value, so
+  there is nothing else to derive it from. A refused fill does not flush, so
+  the strip holds its previous frame instead of showing a half-written one.
+
+- **The colour read-back was wrong for five orders and could dereference
+  NULL.** Reporting a strip's colour means reading the wire buffer, because
+  that buffer is the only place the colour is stored — and the getter indexed
+  it as `buf[0]` green, `buf[1]` red, `buf[2]` blue with three integer
+  literals. Correct for the one order the driver could write; a wrong colour
+  reported to the app for the other five. It goes through
+  `EZPI_aled_unpack_first()` with the configured order now.
+
+  Separately, it indexed `buf[0]` unconditionally. `led_strip_init()` returns
+  early with `buf` still NULL when the frame-buffer allocation fails, so a
+  cloud getter arriving after a failed init dereferenced NULL. It reports
+  zeroes instead.
+
+  And its `user_arg` cast is now `s_dimmer_args_t *`, which is what
+  `__prepare()` actually stores for all six items. The old cast to
+  `led_strip_t *` worked only because the strip is the **first member** of that
+  struct — reordering the struct would have silently turned the getter into a
+  read of the wrong field. That is the same first-member type confusion found
+  (and left alone, being a different device) in the ENS160 settings getters.
+
+  What *is* verified about the driver half is that it builds and that the calls
+  survive the link, on all four CI targets — `set-target` 0, build 0, zero
+  diagnostics in either touched file:
+
+  | Target | image, table above | image now | `EZPI_aled_fill` / `_unpack_first` |
+  |---|---|---|---|
+  | esp32 | `0x19d1c0` | `0x19d370` | absent → **present** |
+  | esp32s2 | `0x151590` | `0x151750` | absent → **present** |
+  | esp32s3 | `0x1a0d30` | `0x1a0ee0` | absent → **present** |
+  | esp32c3 | `0x1af080` | `0x1af230` | absent → **present** |
+
+  432 bytes of growth, 448 on s2 — measured against the build in the table
+  above, which is the last one recorded rather than the immediately preceding
+  commit. The commit between the two added `EZPI_aled_fill` and
+  `EZPI_aled_unpack_first` to a component nothing called yet and was not
+  re-measured for image size.
+
+  The **absent → present** flip is the evidence rather than the presence: both
+  symbols were absent from all four ELFs before the driver called them, because
+  `--gc-sections` collected them. A symbol that is present because it is
+  reached and one that is present because it was never collected look the same
+  in an `nm` listing; a symbol that *became* present can only have done so
+  because a call to it survived the link.
+
+  **The order itself is still unobserved.** No strip has been lit in any order,
+  `grb` included. Four green builds and a symbol table say nothing about
+  whether the strip lights.
 
 - **The defect this component exists to prevent, stated exactly.**
   `EZPI_core_cjson_get_value_uint32()` assigns `*item_val = 0` *before* it looks
@@ -5335,9 +5442,16 @@ flashed.**
   under-4096-byte bound on the whole document, and the three routes in. It is
   explicit about the three places a reasonable guess is wrong — a quoted count,
   a fractional count and an out-of-range count all resolve to **1** rather than
-  to an error — and about what the firmware will not honour: five of the six
-  colour orders, and a `pixel_count` change needing a reboot. It repeats that no
-  board has driven a multi-pixel strip, in the file a user reads first.
+  to an error — and about what the firmware will not do: a `pixel_count` change
+  takes effect on the next boot, not immediately. It repeats that no board has
+  driven a multi-pixel strip, in the file a user reads first.
+
+  That list was one item longer when the file was written: five of the six
+  colour orders were accepted and then ignored, and the doc said so. The
+  sentence is gone because the limitation is, and what replaced it is the thing
+  a user with a miscoloured strip actually needs — if green comes out where red
+  was asked for, the strip is `rgb` rather than `grb`, and the part number does
+  not settle it.
 
 - **That doc's example is machine-checked, so it cannot drift.**
   `tests/host/test_aledonboard.c` reads the markdown, extracts two marked
@@ -5348,19 +5462,39 @@ flashed.**
   not with the firmware would both pass. The expected chipset string is linked
   from `ezlopi_cloud_keywords.c` rather than typed, so a renamed constant cannot
   leave the test green while every real config is refused. The doc is listed as
-  a prerequisite of the binary, so editing it rebuilds the test. **14 checks**,
+  a prerequisite of the binary, so editing it rebuilds the test. **13 checks**,
   clean under ASan and UBSan.
+
+  It was 14. The removed one asserted that the example asks for `grb`
+  *specifically*, on the stated grounds that no other order could be honoured.
+  That reason stopped being true, so the check went with it rather than being
+  kept for the shape of it: a check whose stated justification is false is
+  worse than no check, because the next reader believes the justification. The
+  order is still compared against the doc's own claimed-shape block, which is
+  what the test is for.
 
   Confirmed able to fail before being believed, which for a test whose subject
   is a *file* is the whole question — the easy mistake is one that reports
   "0 checks, 0 failures" and exits 0 when it cannot find the document, which
-  reads as a pass. Eight mutated copies of the doc under `/root` with `DOC_PATH`
-  repointed at each: count changed in one block, `rgbw` flipped in the other,
-  chipset lowercased, `id_item` 9 → 11, marker deleted, marker and fenced block
-  deleted, file absent, order `grb` → `rbg`. The real doc passed; all eight went
-  red at the check that should catch them.
+  reads as a pass. Nine mutated copies of the doc under `/root` with `DOC_PATH`
+  repointed at each. Eight must be red: count changed in one block, `rgbw`
+  flipped in the other, chipset lowercased, `id_item` 9 → 11, marker deleted,
+  marker and fenced block deleted, file absent, and the claimed shape saying
+  `rbg` where the config says `grb`. The real doc passed; all eight went red at
+  the check that should catch them.
 
-  One of the eight was green on the first run and **the fault was in the
+  **The ninth must stay green, and it is the one that makes the other eight
+  mean anything.** It changes `pixel_count` from 60 to 120 in *both* blocks: a
+  doc describing a different strip, which is not a drift. It passes — which is
+  what demonstrates the test compares the two blocks against each other rather
+  than pinning the literal 60. Without it, all eight red mutants could have
+  been red for the wrong reason, and the test could have been a copy of the
+  numbers wearing a different hat. The eighth mutant was rewritten for the same
+  reason: it had been changing `color_order` in both blocks at once, which only
+  the deleted "must be `grb`" check was catching, so after that deletion it was
+  testing nothing. It now changes the claimed block alone.
+
+  One of the mutants was green on the first run and **the fault was in the
   mutation, not the test**: the edit anchored on `"rgbw": true` at end of line,
   both occurrences in the doc carry a trailing comma, so it wrote out a
   byte-identical copy. A no-op mutant is indistinguishable from a test that
@@ -5368,9 +5502,9 @@ flashed.**
   above and the empty-toolchain `nm` skip — so the falsification script now
   compares each mutant against the original before it will report a green.
 
-- The full host suite is **6332** checks across **31** binaries, 0 failures —
-  **6257 + 61 + 14 = 6332**, with every binary reporting in the shape the
-  aggregate greps for.
+- The full host suite is **6464** checks across **31** binaries, 0 failures —
+  **6390 + 61 + 13 = 6464**, where the 6390 includes `test_aled`'s 201, with
+  every binary reporting in the shape the aggregate greps for.
 
 ### UUID utility — [bug]
 
@@ -9598,21 +9732,15 @@ enumerators — so the live half of this component was never affected.
 
 Listed because a changelog that only mentions what was finished is misleading.
 
-- **The addressable strip is configurable now, but three things about it are
-  unfinished, and one of them contradicts what the config schema implies.**
-
-  **Five of the six colour orders cannot be honoured.**
-  `EZPI_aledcfg_order_from_str()` accepts all six permutations of r/g/b, and
-  `device-0009` can act on exactly one of them. `led_strip_t` has no
-  colour-order field at all: the order is held in a static table indexed by
-  strip *type* (`led_params[LED_STRIP_SK6812].order = ORDER_GRB`), and
-  `color_order_t` defines only `ORDER_GRB` and `ORDER_RGB`. So honouring the
-  rest means adding a per-strip field to vendored MIT code and threading it
-  through `led_strip_set_pixel()`, which is deliberately not done here. The
-  driver logs a `TRACE_W` when the resolved order is not `grb`, so the
-  limitation is visible at runtime rather than silent — but a config asking for
-  `rbg` is still accepted by the parser and then ignored, which is a schema
-  that promises more than the firmware delivers.
+- **The addressable strip is configurable now, but two things about it are
+  unfinished.** This entry listed three. The colour-order gap — the parser
+  accepting all six permutations while `device-0009` could act on exactly one —
+  is closed: the driver packs the frame buffer itself with `EZPI_aled_fill()`
+  rather than going through `led_strip_set_pixel()` and the strip-type table
+  behind it, so the schema no longer promises more than the firmware delivers.
+  See *Addressable LED configuration*. It is listed here as removed rather than
+  deleted silently, because this section is the one a reader checks to find out
+  whether a limitation they hit is known.
 
   **A changed `pixel_count` needs a reboot.** `__init()` is guarded by
   `if (0 == dimmer_args->sk6812_led_strip_initialized)`, and `led_strip_init()`
@@ -9630,6 +9758,23 @@ Listed because a changelog that only mentions what was finished is misleading.
   "it might not even build there" from the list. The 2048 cap in particular is
   derived from the wire protocol on paper and has not been observed to be
   drivable.
+
+  **No strip has been lit in any colour order, `grb` included.** That closed
+  gap above is closed *in source*. The permutation is swept on the host and the
+  calls are in all four ELFs; which physical LED changes colour is unobserved,
+  and so is whether the previously-unreachable fourth byte of an RGBW strip
+  does anything.
+
+  **A latent off-by-one in the vendored `led_strip` component is recorded and
+  not patched.** `led_strip_set_pixel()` validates `num <= strip->length` while
+  its own header documents the range as `0..length-1`, so `num == length` would
+  write `COLOR_SIZE` bytes past the frame buffer. Every caller was checked:
+  only `led_strip_set_pixels` and `led_strip_fill` reach it and both bound the
+  index correctly, so it is **unreachable today** — and `device-0009` no longer
+  calls it at all. Left alone because changing vendored MIT code to fix a
+  defect nothing can reach is the trade this work declined to make everywhere
+  else, and recorded because "unreachable today" is a property of the current
+  callers rather than of the function.
 
 - **Two target gaps are now stated by the build instead of being fixed, because
   both need hardware to close.** The target-guard work under *Build and
