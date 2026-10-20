@@ -47,8 +47,16 @@
  * config block; rgbw flipped in the claimed block; chipset lowercased to
  * "esp32"; id_item 9 -> 11; the config marker deleted; the marker and its
  * fenced block deleted; DOC_PATH aimed at a file that does not exist; and
- * color_order "grb" -> "rbg". The real doc passed and all eight went red, each
- * at the check that should catch it.
+ * color_order "grb" -> "rbg" in the claimed block only. The real doc passed and
+ * all eight went red, each at the check that should catch it.
+ *
+ * Three of those eight mutate one block and leave the other, which is the
+ * shape a real drift takes. A ninth mutant exists to be *green*: both blocks
+ * changed to say 120 pixels instead of 60. That is a doc describing a
+ * different strip, not a doc disagreeing with the firmware, and it passes --
+ * which is what proves this file compares the two blocks rather than pinning
+ * the literal 60. Without that one, all eight red mutants could be red for the
+ * wrong reason.
  *
  * One of those eight was green on the first attempt, and the fault was in the
  * mutation, not here: the edit anchored on `"rgbw": true` at end of line and
@@ -349,12 +357,14 @@ static void test_it_resolves_to_what_the_doc_claims(cJSON *entry, cJSON *claimed
               "resolved colour order equals the one the doc claims");
     }
 
-    /* The doc states that only grb is honoured and that anything else is driven
-     * as grb with a warning. An example that asked for an unhonourable order
-     * would be telling the user to expect a TRACE_W, so the doc's own example
-     * must be the honourable one. */
-    CHECK(ALED_ORDER_GRB == got.order,
-          "the documented example asks for the one order this driver can honour");
+    /* There was a check here asserting the example asked for grb specifically,
+     * on the grounds that the driver honoured no other order and so any other
+     * example would be telling the user to expect a TRACE_W. The driver now
+     * honours all six, so that reason is gone and the check went with it rather
+     * than being kept for the shape of it: a check whose stated justification
+     * is no longer true is worse than no check, because the next reader takes
+     * the justification at face value. The order is still compared against the
+     * doc's own claimed-shape block above, which is the part that can drift. */
 }
 
 int main(void)

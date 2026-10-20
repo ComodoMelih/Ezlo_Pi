@@ -151,12 +151,67 @@ ezlopi_error_t DEVICE_0009_other_rmt_sk6812(e_ezlopi_actions_t action, l_ezlopi_
  *                         Static Function Definitions
  *******************************************************************************/
 
+/* Fill the whole strip with one colour, honouring the configured byte order.
+**
+** Not led_strip_fill(): that path reaches led_strip_set_pixel(), which takes
+** the order from a static table indexed by strip *type*, so for an SK6812 it
+** can only ever write green-red-blue. led_strip_t has no per-strip order
+** field, so the choice is between changing vendored third-party code and
+** packing the frame buffer here. This packs it here.
+**
+** The buffer belongs to led_strip_init(), which sized it as
+** calloc(length, COLOR_SIZE(strip)) where COLOR_SIZE is 3 + (is_rgbw != 0).
+** EZPI_aled_wire_len() computes length * (is_rgbw ? 4 : 3) from the same two
+** fields, so the two expressions agree by deriving from the same state rather
+** than by coincidence -- but they are still two statements of one rule, and
+** the capacity passed below is what stops a disagreement from becoming a heap
+** overrun: EZPI_aled_fill() writes nothing at all if it does not fit. */
+static esp_err_t __fill_strip(s_dimmer_args_t *dimmer_args, rgb_t color)
+{
+    led_strip_t *strip = &dimmer_args->sk6812_strip;
+    const size_t cap = EZPI_aled_wire_len(strip->length, strip->is_rgbw);
+
+    const s_aled_rgbw_t px = {
+        .r = color.r,
+        .g = color.g,
+        .b = color.b,
+        /* What led_strip_set_pixel() put in the white byte, kept so that an
+        ** RGBW strip is driven exactly as before this change. The cloud sends
+        ** no white value with an rgbcolor, so there is nothing else to derive
+        ** it from. */
+        .w = rgb_luma(color),
+    };
+
+    if ((NULL == strip->buf) || (0u == cap))
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Brightness 255 here on purpose. The vendored RMT adapter applies
+    ** strip->brightness while it transmits, so scaling the buffer here as well
+    ** would apply the dimmer twice and bend its curve. Brightness stays the
+    ** adapter's job; this function's job is colour and order. */
+    if (cap != EZPI_aled_fill(px, strip->length, dimmer_args->aled_cfg.order,
+                              255u, strip->is_rgbw, strip->buf, cap))
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
+}
+
 static ezlopi_error_t __get_cjson_value(l_ezlopi_item_t *item, void *arg)
 {
     ezlopi_error_t ret = EZPI_FAILED;
     if (item && arg)
     {
-        led_strip_t *sk6812_strip = (led_strip_t *)item->user_arg;
+        /* Typed as what __prepare() actually stores in user_arg for all six
+        ** items. This was a cast to led_strip_t *, which worked only because
+        ** the strip is the first member of s_dimmer_args_t -- so reordering
+        ** that struct would have silently turned this into a read of the wrong
+        ** field. The order is needed here anyway, and it is not in the strip. */
+        s_dimmer_args_t *dimmer_args = (s_dimmer_args_t *)item->user_arg;
+        led_strip_t *sk6812_strip = (NULL != dimmer_args) ? &dimmer_args->sk6812_strip : NULL;
         cJSON *cj_properties = (cJSON *)arg;
         if ((NULL != cj_properties) && (NULL != sk6812_strip))
         {
@@ -165,9 +220,30 @@ static ezlopi_error_t __get_cjson_value(l_ezlopi_item_t *item, void *arg)
                 cJSON *color_json = cJSON_AddObjectToObject(__FUNCTION__, cj_properties, ezlopi_value_str);
                 if (color_json)
                 {
-                    int green = sk6812_strip->buf[0];
-                    int red = sk6812_strip->buf[1];
-                    int blue = sk6812_strip->buf[2];
+                    /* The wire buffer is the only place this colour is stored,
+                    ** so reporting it means reading it back in the order it
+                    ** was written. This was three integer literals indexing
+                    ** buf as green, red, blue -- right for the one order the
+                    ** driver could write, and a wrong colour reported to the
+                    ** app for the other five.
+                    **
+                    ** Zeroes if the read is refused, which happens when the
+                    ** buffer is NULL because led_strip_init() failed. The
+                    ** previous code indexed buf[0] unconditionally, so a
+                    ** getter arriving after a failed init dereferenced NULL. */
+                    s_aled_rgbw_t px = {0, 0, 0, 0};
+                    int red = 0, green = 0, blue = 0;
+
+                    if (EZPI_aled_unpack_first(sk6812_strip->buf,
+                                               EZPI_aled_wire_len(sk6812_strip->length, sk6812_strip->is_rgbw),
+                                               dimmer_args->aled_cfg.order,
+                                               sk6812_strip->is_rgbw,
+                                               &px))
+                    {
+                        red = px.r;
+                        green = px.g;
+                        blue = px.b;
+                    }
 
                     cJSON_AddNumberToObject(__FUNCTION__, color_json, ezlopi_red_str, red);
                     cJSON_AddNumberToObject(__FUNCTION__, color_json, ezlopi_green_str, green);
@@ -219,11 +295,20 @@ static ezlopi_error_t __set_cjson_value(l_ezlopi_item_t *item, void *arg)
                 CJSON_GET_VALUE_UINT8(cjson_params_color_values, ezlopi_green_str, color.green);
                 CJSON_GET_VALUE_UINT8(cjson_params_color_values, ezlopi_blue_str, color.blue);
 
-                led_strip_fill(&dimmer_args->sk6812_strip, 0, dimmer_args->sk6812_strip.length, color);
-                led_strip_flush(&dimmer_args->sk6812_strip);
+                if (ESP_OK == __fill_strip(dimmer_args, color))
+                {
+                    led_strip_flush(&dimmer_args->sk6812_strip);
 
-                EZPI_core_device_value_updated_from_device_broadcast(dimmer_args->dimmer_item);
-                ret = EZPI_SUCCESS;
+                    EZPI_core_device_value_updated_from_device_broadcast(dimmer_args->dimmer_item);
+                    ret = EZPI_SUCCESS;
+                }
+                else
+                {
+                    /* Not flushed. A refused fill leaves the previous frame in
+                    ** the buffer, so the strip holds the colour it already had
+                    ** rather than showing a half-written one. */
+                    TRACE_E("sk6812: could not fill the strip; colour unchanged");
+                }
             }
             else if (ezlopi_item_name_dimmer == item->cloud_properties.item_name)
             {
@@ -301,7 +386,7 @@ static ezlopi_error_t __init(l_ezlopi_item_t *item)
                             .blue = 255,
                         };
 
-                        err |= led_strip_fill(&dimmer_args->sk6812_strip, 0, dimmer_args->sk6812_strip.length, color);
+                        err |= __fill_strip(dimmer_args, color);
                         if (ESP_OK == (err = led_strip_set_brightness(&dimmer_args->sk6812_strip, 255)))
                         {
                             if (ESP_OK == (err = led_strip_flush(&dimmer_args->sk6812_strip)))
@@ -472,18 +557,13 @@ static ezlopi_error_t __prepare(void *arg)
                         (int)dimmer_args->aled_cfg.has_white);
                 }
 
-                /* This driver cannot honour a colour order, so say so instead of
-                ** accepting the key and quietly ignoring it. led_strip keeps the
-                ** order in a static table indexed by strip *type* -- SK6812 is
-                ** ORDER_GRB there -- and led_strip_t has no per-strip order
-                ** field at all, so honouring the other five would mean changing
-                ** vendored third-party code. A strip lit in the wrong colour
-                ** order still works, which is what makes an unlogged mismatch
-                ** so hard to attribute. */
-                if (ALED_ORDER_GRB != dimmer_args->aled_cfg.order)
-                {
-                    TRACE_W("sk6812: color_order is not honoured by this driver; using grb");
-                }
+                /* All six colour orders are honoured now, so there is nothing
+                ** to warn about here. The warning this replaces said the order
+                ** was accepted and then ignored, which was true while the
+                ** frame buffer was filled through led_strip_fill() -- that
+                ** path reads the order from a static table indexed by strip
+                ** type and could only write grb. __fill_strip() packs the
+                ** buffer directly instead; see the comment there. */
 
                 dimmer_args->rgb_color_item = EZPI_core_device_add_item_to_device(device, DEVICE_0009_other_rmt_sk6812);
                 dimmer_args->dimmer_item = EZPI_core_device_add_item_to_device(device, DEVICE_0009_other_rmt_sk6812);

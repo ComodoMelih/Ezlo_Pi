@@ -38,7 +38,7 @@ And these three describe the strip itself:
 |---|---|---|---|
 | `pixel_count` | number, integer, 1..2048 | `1` | How many LEDs are on the strip. |
 | `rgbw` | boolean | `false` | True for an SK6812-**RGBW**, which has a fourth white channel and so four bytes per pixel instead of three. |
-| `color_order` | string | `"grb"` | Byte order on the wire. **Only `"grb"` is honoured — see below.** |
+| `color_order` | string | `"grb"` | Byte order on the wire. Any of `grb`, `rgb`, `brg`, `rbg`, `gbr`, `bgr`, case-insensitive. |
 
 Notes on the three strip keys, because each is a place where a reasonable guess
 is wrong:
@@ -56,6 +56,11 @@ is wrong:
   lighting 2048 pixels would hide it. `1` is conspicuous and recoverable.
 - **One bad key does not discard the others.** A good `pixel_count` beside a
   nonsense `rgbw` keeps the count.
+- **If the strip lights the wrong colours, `color_order` is the key to change.**
+  All six permutations are honoured. A strip that shows green when you asked
+  for red is wired `rgb` rather than `grb` — the part number does not settle
+  this, since strips sold as WS2812B have shipped in more than one order. The
+  order is named by the order itself for that reason, rather than by chip.
 - **Omitting all three is fully supported and is the pre-existing behaviour**:
   one GRB pixel, no white channel. Every strip provisioned before these keys
   existed has exactly that configuration, and continues to behave the same.
@@ -123,14 +128,6 @@ any one strip.
 
 ## What this firmware will not do with it
 
-- **Five of the six colour orders are accepted by the parser and then
-  ignored.** `EZPI_aledcfg_order_from_str()` understands all six permutations
-  of r/g/b, and the driver can act on `grb` only. The vendored `led_strip`
-  component holds the order in a static table indexed by strip *type*, and
-  `led_strip_t` has no per-strip order field at all. A config asking for
-  anything else gets a `TRACE_W` on the console and is driven as `grb`. A strip
-  lit in the wrong byte order still lights, which is exactly what makes an
-  unlogged mismatch hard to attribute — so it is logged.
 - **Changing `pixel_count` takes effect on the next boot, not immediately.**
   The configuration is read in `__prepare()`, which runs at boot, and the strip
   is initialised once behind a latch. Re-shaping a running strip needs
