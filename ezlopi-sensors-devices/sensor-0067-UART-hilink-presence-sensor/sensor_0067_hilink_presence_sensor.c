@@ -175,34 +175,66 @@ static ezlopi_error_t __notify(l_ezlopi_item_t *item)
     {
         ld2410_outputs_t present_hilink_data;
         memcpy(&present_hilink_data, hilink_data, sizeof(ld2410_outputs_t));
-        ESP_ERROR_CHECK(ld2410_get_data(&present_hilink_data));
-        // If direction is stationay, no target is moving so, set moving_target_distance to prevent continuous update to the cloud in abasence of moving target.
-        if (STATIONARY == present_hilink_data.direction)
+
+        /* Not ESP_ERROR_CHECK, and the whole body below is now conditional on
+        ** the read having worked.
+        **
+        ** This is the EZLOPI_ACTION_NOTIFY_1000_MS handler, registered on a
+        ** 1-second timer. ESP_ERROR_CHECK aborts on any non-ESP_OK result, and
+        ** this project builds with CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y
+        ** and no NDEBUG, so the macro is the panicking variant. A presence sensor
+        ** that stopped answering over UART -- a loose Dupont wire, a brown-out on
+        ** the radar's 5V rail -- therefore rebooted the entire hub, every second,
+        ** for as long as the fault lasted. Every other device on the board went
+        ** down with it.
+        **
+        ** Skipping the body rather than merely dropping the macro is the point,
+        ** and dropping the macro alone would have been worse than the reboot.
+        ** present_hilink_data is a copy of the stored reading taken immediately
+        ** above, and ld2410_get_data() leaves the buffer untouched when it cannot
+        ** assemble a frame. So on a failed read the two are equal,
+        ** __notify_if_needed() finds nothing changed and publishes nothing --
+        ** which looks correct -- but sec_count keeps advancing toward the 90-tick
+        ** forced update, which copies the unchanged copy back over the stored
+        ** reading and broadcasts all three items. The hub would have gone on
+        ** republishing a reading from before the sensor died, with a fresh
+        ** timestamp, indefinitely. A sensor that is silently stale is harder to
+        ** notice than one that stops reporting.
+        **
+        ** EZPI_FAILED is returned, and the caller discards it: __device_loop()
+        ** in ezlopi_core_ezlopi.c:332 ignores the notify return value for every
+        ** driver in the tree. Recorded under Known gaps rather than changed here;
+        ** returning the right answer is this file's job either way. */
+        if (ESP_OK == ld2410_get_data(&present_hilink_data))
         {
-            present_hilink_data.moving_target_distance = 0;
-        }
-        // Check if the moving target is outside the minumum detectable range, if so, update to the cloud immediately.
-        if (HILINK_presence_sensor_target_in_detectable_range(present_hilink_data.moving_target_distance))
-        {
-            __notify_if_needed(hilink_data, &present_hilink_data);
-            sec_count = 0;
-        }
-        // If not, update every 30 seconds.
-        else
-        {
-            // Since there are 3 items in this device, all of them calls this function and increae the sec_count causing values to be updated at every 10 sec. To mitigate, sec_count should be compared
-            // to 90.
-            if (90 == sec_count)
+            // If direction is stationay, no target is moving so, set moving_target_distance to prevent continuous update to the cloud in abasence of moving target.
+            if (STATIONARY == present_hilink_data.direction)
             {
-                memcpy(hilink_data, &present_hilink_data, sizeof(ld2410_outputs_t));
-                EZPI_core_device_value_updated_from_device_broadcast(motion_direction_item);
-                EZPI_core_device_value_updated_from_device_broadcast(motion_item);
-                EZPI_core_device_value_updated_from_device_broadcast(distance_item);
+                present_hilink_data.moving_target_distance = 0;
+            }
+            // Check if the moving target is outside the minumum detectable range, if so, update to the cloud immediately.
+            if (HILINK_presence_sensor_target_in_detectable_range(present_hilink_data.moving_target_distance))
+            {
+                __notify_if_needed(hilink_data, &present_hilink_data);
                 sec_count = 0;
             }
-            sec_count++;
+            // If not, update every 30 seconds.
+            else
+            {
+                // Since there are 3 items in this device, all of them calls this function and increae the sec_count causing values to be updated at every 10 sec. To mitigate, sec_count should be compared
+                // to 90.
+                if (90 == sec_count)
+                {
+                    memcpy(hilink_data, &present_hilink_data, sizeof(ld2410_outputs_t));
+                    EZPI_core_device_value_updated_from_device_broadcast(motion_direction_item);
+                    EZPI_core_device_value_updated_from_device_broadcast(motion_item);
+                    EZPI_core_device_value_updated_from_device_broadcast(distance_item);
+                    sec_count = 0;
+                }
+                sec_count++;
+            }
+            ret = EZPI_SUCCESS;
         }
-        ret = EZPI_SUCCESS;
     }
     return ret;
 }
@@ -222,10 +254,17 @@ static ezlopi_error_t __add_array_to_object(cJSON *cj_params, const char *const 
 static ezlopi_error_t __add_value_to_cjson(l_ezlopi_item_t *item, cJSON *cj_params, bool is_hub_request)
 {
     ezlopi_error_t ret = EZPI_FAILED;
-    ld2410_outputs_t *hilink_data = (ld2410_outputs_t *)item->user_arg;
 
-    if (item && cj_params && hilink_data)
+    /* The payload is read *after* item is known to be non-NULL. It used to be
+    ** read on the line above the guard, so the guard's own first condition was
+    ** already too late: `item->user_arg` had been dereferenced before `item`
+    ** was tested. A cloud request naming an item the core has forgotten is a
+    ** null-pointer read, not a reported failure. */
+    if (item && cj_params && item->user_arg)
     {
+        ld2410_outputs_t *hilink_data = (ld2410_outputs_t *)item->user_arg;
+
+        ret = EZPI_SUCCESS;
         if (ezlopi_item_name_motion == item->cloud_properties.item_name)
         {
             bool motion = false;
@@ -240,7 +279,27 @@ static ezlopi_error_t __add_value_to_cjson(l_ezlopi_item_t *item, cJSON *cj_para
         {
             if (is_hub_request)
             {
-                ESP_ERROR_CHECK(__add_array_to_object(cj_params, hilink_presence_sensor_motion_direction_enum, 4));
+                /* Not ESP_ERROR_CHECK. __add_array_to_object() returns an
+                ** ezlopi_error_t, not an esp_err_t -- EZPI_FAILED is -1, which
+                ** the macro would have printed as an ESP error name before
+                ** panicking.
+                **
+                ** This particular call cannot currently fail: the function
+                ** returns EZPI_FAILED only on a NULL cj_params or array,
+                ** cj_params is already checked by both callers, and the array is
+                ** a file-scope `static const char *[]`. So the fix is not
+                ** observable from outside -- it is made anyway because it is the
+                ** same mistake as the two in the callers below, and the next
+                ** person to give __add_array_to_object a reachable failure path
+                ** should not be reintroducing a panic.
+                **
+                ** The value is still written when the enum could not be: the
+                ** enum is advisory metadata and the value is the answer the
+                ** cloud asked for. The incomplete response is reported. */
+                if (EZPI_SUCCESS != __add_array_to_object(cj_params, hilink_presence_sensor_motion_direction_enum, 4))
+                {
+                    ret = EZPI_FAILED;
+                }
             }
             cJSON_AddStringToObject(__FUNCTION__, cj_params, ezlopi_valueFormatted_str, hilink_presence_sensor_motion_direction_enum[hilink_data->direction + 1]);
             cJSON_AddStringToObject(__FUNCTION__, cj_params, ezlopi_value_str, hilink_presence_sensor_motion_direction_enum[hilink_data->direction + 1]);
@@ -250,7 +309,6 @@ static ezlopi_error_t __add_value_to_cjson(l_ezlopi_item_t *item, cJSON *cj_para
             cJSON_AddNumberToObject(__FUNCTION__, cj_params, ezlopi_valueFormatted_str, hilink_data->moving_target_distance);
             cJSON_AddNumberToObject(__FUNCTION__, cj_params, ezlopi_value_str, hilink_data->moving_target_distance);
         }
-        ret = EZPI_SUCCESS;
     }
 
     return ret;
@@ -263,8 +321,15 @@ static ezlopi_error_t __get_hub_item_value(l_ezlopi_item_t *item, void *args)
     cJSON *cj_params = (cJSON *)args;
     if (cj_params)
     {
-        ESP_ERROR_CHECK(__add_value_to_cjson(item, cj_params, true));
-        ret = EZPI_SUCCESS;
+        /* Not ESP_ERROR_CHECK, and the answer is returned rather than
+        ** discarded. __add_value_to_cjson() returns an ezlopi_error_t: its
+        ** failure value is EZPI_FAILED, -1, which is not an esp_err_t at all.
+        ** The macro aborted on it -- so a cloud "hub.item.value.get" naming an
+        ** item whose user_arg was NULL panicked the hub, from a request
+        ** arriving over the network. The previous `ret = EZPI_SUCCESS` also
+        ** reported success unconditionally, which only ever mattered on the
+        ** path the panic made unreachable. */
+        ret = __add_value_to_cjson(item, cj_params, true);
     }
 
     return ret;
@@ -278,8 +343,11 @@ static ezlopi_error_t __get_cjson_value(l_ezlopi_item_t *item, void *args)
 
     if (cj_params)
     {
-        ESP_ERROR_CHECK(__add_value_to_cjson(item, cj_params, false));
-        ret = EZPI_SUCCESS;
+        /* Same correction as __get_hub_item_value() above, same reason. This is
+        ** the EZLOPI_ACTION_GET_EZLOPI_VALUE path, which the scene engine and
+        ** the local API both drive, so the panic was reachable without any
+        ** cloud connection at all. */
+        ret = __add_value_to_cjson(item, cj_params, false);
     }
 
     return ret;
@@ -302,9 +370,35 @@ static ezlopi_error_t __init(l_ezlopi_item_t *item)
                 };
                 if (ESP_OK == ld2410_setup(uart_settings))
                 {
-                    ESP_ERROR_CHECK(HILINK_presence_sensor_apply_settings());
-                    ESP_ERROR_CHECK(ld2410_get_data(hilink_data));
-                    ret = EZPI_SUCCESS;
+                    /* Neither of these is ESP_ERROR_CHECK any more, and neither
+                    ** result is discarded.
+                    **
+                    ** HILINK_presence_sensor_apply_settings() returns a plain
+                    ** int, 1 on failure -- not an esp_err_t. ld2410_get_data()
+                    ** does return an esp_err_t. The macro aborted on both, so
+                    ** either a stored presence mode that could not be pushed to
+                    ** the radar or a radar that answered the setup handshake and
+                    ** then produced no frame panicked the hub during boot, while
+                    ** devices were still being brought up.
+                    **
+                    ** Short-circuit order is deliberate: if the settings could
+                    ** not be applied there is no point reading a radar that is
+                    ** not configured the way the user asked, and the reported
+                    ** failure says so. The ld2410_setup() call above was already
+                    ** tested properly with `if (ESP_OK == ...)`; these two now
+                    ** match it.
+                    **
+                    ** ret stays EZPI_ERR_INIT_DEVICE_FAILED on either failure.
+                    ** The device is nevertheless kept: the core's gate at
+                    ** ezlopi_core_ezlopi.c:239 drops a device only on a `< 0`
+                    ** return and EZPI_ERR_INIT_DEVICE_FAILED is +0x200. That is a
+                    ** separate defect, recorded under Known gaps; reporting the
+                    ** truth here is a precondition for ever fixing it. */
+                    if ((0 == HILINK_presence_sensor_apply_settings()) &&
+                        (ESP_OK == ld2410_get_data(hilink_data)))
+                    {
+                        ret = EZPI_SUCCESS;
+                    }
                 }
             }
         }

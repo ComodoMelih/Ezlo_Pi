@@ -82,7 +82,8 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
            test_httpresp test_suntime test_issun test_coords test_tz \
-           test_aled test_aledcfg test_aledonboard test_ens160set test_hilinkset
+           test_aled test_aledcfg test_aledonboard test_ens160set test_hilinkset \
+           test_hilink0067
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -1358,6 +1359,74 @@ $(BUILD)/test_hilinkset: test_hilinkset.c \
 	$(CC) -o $@ $(BUILD)/test_hilinkset_main.o $(BUILD)/hilinkset_subject.o \
 	      $(BUILD)/hilinkset_cjsonmacros.o $(BUILD)/hilinkset_keywords.o \
 	      $(BUILD)/hilinkset_valuetypes.o $(BUILD)/hilinkset_cjext.o \
+	      $(LDFLAGS) -lm
+
+# The Hilink presence sensor's *driver*, as distinct from its settings file
+# above. The subject here is the single dispatcher the core registers, and the
+# six ESP_ERROR_CHECK sites inside it -- one of them in the 1000 ms notify
+# handler, which is why a radar that stops answering over UART takes the hub
+# down on a timer rather than reporting a bad read.
+#
+# Seven ezlopi-cloud-constants translation units are *linked*, not stubbed, and
+# that is load-bearing rather than convenience. __add_value_to_cjson picks which
+# key to write by comparing item->cloud_properties.item_name against the keyword
+# globals *by pointer*. A hand-written stub holding a strdup'd equal string
+# would take no branch at all, every value assertion below would pass against an
+# empty object, and the suite would look green while testing nothing.
+#
+# ezlopi_core_cjson_macros.c is linked for the same reason it is in the
+# test_hilinkset rule: __prepare's GPIO and uint32 extraction is the real one.
+#
+# The ld2410 driver is *not* linked. ld2410.h is on the include path for
+# ld2410_outputs_t and the two entry points, and the test defines
+# ld2410_get_data and ld2410_setup itself -- a read that fails deliberately
+# leaves the caller's buffer untouched, which is what makes the stale-data half
+# of the notify defect visible. Linking the real driver would want a UART.
+#
+# -Wno-error=cpp: the subject carries a `#warning "NABIN ..."` at line 84, the
+# same note as the settings file. Downgraded rather than suppressed, so it still
+# prints.
+VALFMT_DIR     := ../../ezlopi-core/ezlopi-core-valueformatter
+CLOUDITEMS_DIR := ../../ezlopi-cloud/ezlopi-cloud-items
+HILINK0067_INC := $(HILINK_INC) -I$(VALFMT_DIR) -I$(CLOUDITEMS_DIR)
+$(BUILD)/test_hilink0067: HILINK0067_CFLAGS := -std=c99 -O1 -g $(HILINK0067_INC) \
+                                               $(SANITIZERS)
+$(BUILD)/test_hilink0067: test_hilink0067.c \
+                          stubs-allocfail/EZLOPI_USER_CONFIG.h \
+                          $(HILINK_DIR)/sensor_0067_hilink_presence_sensor.c \
+                          $(HILINK_DIR)/sensor_0067_hilink_presence_sensor.h \
+                          $(COREEZ_DIR)/ezlopi_core_cjson_macros.c \
+                          $(CONSTANTS_DIR)/ezlopi_cloud_category_str.c \
+                          $(CONSTANTS_DIR)/ezlopi_cloud_subcategory_str.c \
+                          $(CONSTANTS_DIR)/ezlopi_cloud_device_types_str.c \
+                          $(CONSTANTS_DIR)/ezlopi_cloud_item_name_str.c \
+                          $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                          $(CONSTANTS_DIR)/ezlopi_cloud_scales_str.c \
+                          $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c \
+                          $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(HILINK0067_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_hilink0067_main.o test_hilink0067.c
+	$(CC) -Istubs-allocfail $(HILINK0067_CFLAGS) -Wall -Wextra -Werror -Wno-error=cpp -Wno-unused-parameter -c -o $(BUILD)/hilink0067_subject.o $(HILINK_DIR)/sensor_0067_hilink_presence_sensor.c
+	@nm $(BUILD)/hilink0067_subject.o | grep -q ' T SENSOR_0067_hilink_presence_sensor_v3' \
+	  || { echo "sensor_0067_hilink_presence_sensor.c compiled to an object without SENSOR_0067_hilink_presence_sensor_v3 in it -- the checks below would be testing nothing"; exit 1; }
+	@nm -u $(BUILD)/hilink0067_subject.o | grep -q 'ld2410_get_data' \
+	  || { echo "the subject object does not reference ld2410_get_data -- the notify path is the whole subject of this file, and the checks below would not be reaching it"; exit 1; }
+	@nm -u $(BUILD)/hilink0067_subject.o | grep -q 'ezlopi_item_name_motion' \
+	  || { echo "the subject object does not reference ezlopi_item_name_motion -- __add_value_to_cjson selects its branch by pointer against that global, so the value checks below would be asserting about an empty object"; exit 1; }
+	$(CC) $(HILINK0067_CFLAGS) -c -o $(BUILD)/hilink0067_cjsonmacros.o $(COREEZ_DIR)/ezlopi_core_cjson_macros.c
+	$(CC) $(HILINK0067_CFLAGS) -c -o $(BUILD)/hilink0067_category.o $(CONSTANTS_DIR)/ezlopi_cloud_category_str.c
+	$(CC) $(HILINK0067_CFLAGS) -c -o $(BUILD)/hilink0067_subcategory.o $(CONSTANTS_DIR)/ezlopi_cloud_subcategory_str.c
+	$(CC) $(HILINK0067_CFLAGS) -c -o $(BUILD)/hilink0067_devtypes.o $(CONSTANTS_DIR)/ezlopi_cloud_device_types_str.c
+	$(CC) $(HILINK0067_CFLAGS) -c -o $(BUILD)/hilink0067_itemnames.o $(CONSTANTS_DIR)/ezlopi_cloud_item_name_str.c
+	$(CC) $(HILINK0067_CFLAGS) -c -o $(BUILD)/hilink0067_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(HILINK0067_CFLAGS) -c -o $(BUILD)/hilink0067_scales.o $(CONSTANTS_DIR)/ezlopi_cloud_scales_str.c
+	$(CC) $(HILINK0067_CFLAGS) -c -o $(BUILD)/hilink0067_valuetypes.o $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c
+	$(CC) $(HILINK0067_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/hilink0067_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_hilink0067_main.o $(BUILD)/hilink0067_subject.o \
+	      $(BUILD)/hilink0067_cjsonmacros.o $(BUILD)/hilink0067_category.o \
+	      $(BUILD)/hilink0067_subcategory.o $(BUILD)/hilink0067_devtypes.o \
+	      $(BUILD)/hilink0067_itemnames.o $(BUILD)/hilink0067_keywords.o \
+	      $(BUILD)/hilink0067_scales.o $(BUILD)/hilink0067_valuetypes.o \
+	      $(BUILD)/hilink0067_cjext.o \
 	      $(LDFLAGS) -lm
 
 $(BUILD):

@@ -1609,6 +1609,121 @@ None of these have been exercised on physical hardware; see Known gaps.
   the whole-build warning count is unchanged at 144, and the image is the same
   size as before.
 
+- **A hilink presence sensor that stopped answering rebooted the hub once a
+  second, and would have gone on republishing its last reading if the panic
+  were merely deleted.** `sensor_0067_hilink_presence_sensor.c` wrapped six
+  calls in `ESP_ERROR_CHECK`. This project builds with
+  `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y` and no `NDEBUG`, so that
+  macro is the panicking variant: a non-zero result is a reboot, not a log line.
+
+  The worst of the six is in `__notify()`, the `EZLOPI_ACTION_NOTIFY_1000_MS`
+  handler, which `__device_loop()` in
+  [ezlopi_core_ezlopi.c](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c)
+  drives on a 1-second timer:
+  `ESP_ERROR_CHECK(ld2410_get_data(&present_hilink_data))` at the pre-fix line
+  178. Line numbers in this entry are the *pre-fix* ones and are deliberately
+  not linked — the lines they name no longer exist, so a link would resolve to
+  whatever now occupies that offset. A loose Dupont wire or a brown-out on the radar's 5 V
+  rail therefore took the whole board down, every second, for as long as the
+  fault lasted — every other configured device with it. That needs no
+  authentication and no cooperation from anything but the sensor.
+
+  **Deleting the macro alone would have been worse than the reboot, and that is
+  why the read now also skips the body.** `present_hilink_data` is a copy of the
+  stored reading taken immediately above the call, and `ld2410_get_data()`
+  leaves the caller's buffer untouched when it cannot assemble a frame. So on a
+  failed read the two structs are equal, the change-detection helper finds
+  nothing to broadcast — which *looks* correct — but `sec_count` keeps advancing
+  toward the 90-tick forced update, which copies the stale copy back over the
+  stored reading and broadcasts all three items. The hub would have gone on
+  publishing a reading from before the sensor died, with a fresh timestamp,
+  indefinitely. A sensor that is silently stale is harder to notice than one
+  that stops reporting, which is why the fix is `if (ESP_OK == ...)` around the
+  whole body rather than a dropped macro.
+
+  The other five, and what each one did:
+
+  | Pre-fix line | Wrapped call | Returns | Reached by |
+  |---|---|---|---|
+  | 178 | `ld2410_get_data()` | `esp_err_t` | the 1-second notify timer |
+  | 243 | `__add_array_to_object()` | `ezlopi_error_t` | nothing — see below |
+  | 266 | `__add_value_to_cjson()` | `ezlopi_error_t` | a cloud `hub.item.value.get` |
+  | 281 | `__add_value_to_cjson()` | `ezlopi_error_t` | the scene engine and the local API |
+  | 305 | `HILINK_presence_sensor_apply_settings()` | plain `int`, 1 on failure | boot, after the UART handshake |
+  | 306 | `ld2410_get_data()` | `esp_err_t` | boot, after the UART handshake |
+
+  Only two of the six were even passing an `esp_err_t`. Three returned
+  `ezlopi_error_t`, whose failure value `EZPI_FAILED` is `-1`, and one returned
+  a plain `int` that is `1` on failure — so `ESP_ERROR_CHECK` was printing those
+  as though they were ESP error names on its way to panicking. The two getter
+  sites also discarded the result and then wrote `ret = EZPI_SUCCESS`
+  unconditionally, which only ever mattered on the path the panic made
+  unreachable; both now return the real answer.
+
+  **One of the six is unreachable and is not claimed otherwise.** Line 243's
+  `__add_array_to_object()` returns `EZPI_FAILED` only on a NULL `cj_params` or
+  a NULL array; `cj_params` is already tested by both callers, and the array is
+  a file-scope `static const char *[]`. It is fixed because it is the same
+  mistake as the other two in its family, not because the fix is observable.
+
+  **A seventh defect, found while reading rather than from the macro search.**
+  `__add_value_to_cjson()` opened by casting `item->user_arg` into a local and
+  *then* wrote `if (item && cj_params && hilink_data)`. The guard's own first
+  condition was already too late — `item` had been dereferenced on the line
+  above the test written to protect it. Latent today: no caller in the tree
+  passes a NULL item. Fixed anyway, because a guard that consumes what it is
+  about to validate is wrong on its own terms, and because this is the same
+  shape as the self-contradictory guard in this sensor's settings file.
+  Reproduced before fixing: the pre-fix file, driven with a NULL item, is an
+  AddressSanitizer `SEGV on unknown address 0x000000000078`.
+
+  **Covered by a new host test, and every fix proved by re-breaking it.**
+  [`tests/host/test_hilink0067.c`](tests/host/test_hilink0067.c) compiles the
+  real driver and drives its single exported dispatcher: 14 cases, 41 checks.
+  The seven `ezlopi-cloud-constants` translation units are *linked rather than
+  stubbed*, which is load-bearing — `__add_value_to_cjson()` selects its branch
+  by comparing `item_name` **by pointer** against the keyword globals, so a
+  stub holding a `strdup`'d equal string would take no branch at all and every
+  value assertion would have passed against an empty object.
+
+  Reachability was established before any fix was written. Against the unfixed
+  file the binary dies with `SIGABRT` at the first site; to see the rest, a
+  throwaway build replaced the abort with a recorder, and the 14 cases reach
+  lines 305, 306, 178, 266 and 281 — five of the six, the sixth being the
+  unreachable 243 — and then segfault on the seventh defect. Each fix was then
+  reverted one at a time in a scratch copy: six of the seven variants die
+  (`exit=134`, or ASan `SEGV` for the guard) and the seventh — the one that
+  drops the macro but leaves the body running, i.e. what the obvious fix would
+  have produced — fails four checks including *"nothing was published from a
+  reading that never arrived"*. The unmodified file passes 41 of 41.
+
+  Verified on the pinned v4.4.6 toolchain for **all four targets**, because
+  `int32_t` is `int` on xtensa and `long int` on riscv32 and this file traffics
+  in error-code types:
+
+  ```
+  esp32     build=0  subject-compiled=1  subject-diagnostics=1  image=0x19cf10
+  esp32s2   build=0  subject-compiled=1  subject-diagnostics=1  image=0x1512b0
+  esp32s3   build=0  subject-compiled=1  subject-diagnostics=1  image=0x1a0a50
+  esp32c3   build=0  subject-compiled=1  subject-diagnostics=1  image=0x1aedb0
+  ```
+
+  The one diagnostic is the same on all four and is pre-existing: the
+  `#warning "NABIN ; Need to remove this global var"` the file already carried.
+  The host test downgrades that with `-Wno-error=cpp` rather than suppressing it
+  with `-Wno-cpp`, so it still prints. Every image is *smaller* than at
+  `e4ff1ec` — esp32 `0x19d070` → `0x19cf10`, 352 bytes — which is the six
+  removed macro expansions and their `__FILE__` strings, and is the only
+  independent confirmation that all six really were compiled in. Only `esp32`
+  has ever been run on a device; no hilink presence sensor is attached to this
+  board, so the radar in the tests is a stub that counts calls and returns what
+  it is told to, and the abort is a model of a panic rather than a panic.
+
+  **What this does not fix.** A reported init failure is still ignored one layer
+  up — the core's gate is `< 0` and this file returns `+0x200` — and
+  `__device_loop()` still discards the notify return for every driver in the
+  tree. Both are recorded under [Known gaps](#known-gaps).
+
 ### I²C sensor bus — [bug]
 
 - **The second I²C sensor in a configuration never initialised.**
@@ -10398,35 +10513,54 @@ enumerators — so the live half of this component was never affected.
 
 Listed because a changelog that only mentions what was finished is misleading.
 
-- **Ten more `ESP_ERROR_CHECK`-on-plain-`int` sites are still reboot switches.**
+- **Nine more `ESP_ERROR_CHECK`-on-plain-`int` sites are still reboot switches.**
   The census behind *Device settings* found 102 `ESP_ERROR_CHECK` call sites
   tree-wide with a direct function call, 39 of them on a callee whose only
   return type anywhere in the tree is plain `int`. Ten were fixed in
-  `sensor_0068_ENS160_gas_sensor_settings.c` and nineteen in
-  `hilink_presence_sensor_setting.c` — that file now has none. The rest: **9**
-  in `pms_dev_items_prepare.c`, **1** in
-  `sensor_0067_hilink_presence_sensor.c`. With
+  `sensor_0068_ENS160_gas_sensor_settings.c`, nineteen in
+  `hilink_presence_sensor_setting.c` and one in
+  `sensor_0067_hilink_presence_sensor.c` — all three files now have none. The
+  remaining **9** are all in `pms_dev_items_prepare.c`. With
   `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y` and no `NDEBUG` — this
   project's configuration — each is a panic and reboot on a return value whose
   documented meaning is "failed". They are not fixed here because there is no
-  host test for either file.
+  host test for that file.
 
   This entry previously read *"Twenty-nine more"* and counted the nineteen
-  hilink sites among them; nineteen are now fixed, so the figure is ten.
+  hilink settings sites among them, then *"Ten more"* while one
+  `sensor_0067_hilink_presence_sensor.c` site was still open. Both are now
+  fixed, so the figure is nine.
 
-- **`sensor_0067_hilink_presence_sensor.c` has six `ESP_ERROR_CHECK` sites, and
-  the census was never going to find five of them.** The census criterion above
-  is "callee whose only return type anywhere in the tree is plain `int`", which
-  in this file matches exactly one site —
-  `ESP_ERROR_CHECK(HILINK_presence_sensor_apply_settings())`. That is why this
-  file is recorded as **1** above, and that figure is right for what it
-  measures. Counting every `ESP_ERROR_CHECK` in the file instead gives **6**:
-  one on `int`, three on `ezlopi_error_t` (an enum whose values are not
-  `esp_err_t` codes at all), and two on `ld2410_get_data`, which does return
-  `esp_err_t` and so is correctly *typed* while still being the wrong
-  *policy* — both of those sit on the 1-second item-update path, so a radar
-  that stops answering over UART does not degrade, it reboot-loops the hub.
-  Unfixed, and listed separately because a return-type census cannot see it.
+- **The census was never going to find five of the six `ESP_ERROR_CHECK` sites
+  in `sensor_0067_hilink_presence_sensor.c`, and that blind spot is still
+  open.** Those six are fixed — see *UART sensor dispatch* — but the reason only
+  one of them appeared in the count above is worth keeping, because the same
+  criterion is still what is being used on `pms_dev_items_prepare.c`. The
+  criterion is "callee whose only return type anywhere in the tree is plain
+  `int`", which in that file matched exactly one site,
+  `HILINK_presence_sensor_apply_settings()`. Counting every `ESP_ERROR_CHECK`
+  in the file instead gave **6**: one on `int`, three on `ezlopi_error_t`
+  (whose failure value is `-1` and is not an `esp_err_t` code at all), and two
+  on `ld2410_get_data`, which *does* return `esp_err_t` and so was correctly
+  typed while still being the wrong policy — one of those sat on the 1-second
+  item-update path. A return-type census cannot see the last three classes, so
+  the figure of nine above is a lower bound on the remaining work, not a total.
+
+- **`check_check_after_use.py` does not scan the driver tree, and would not have
+  caught the hilink guard-after-use even if it did.** Two independent gaps,
+  measured rather than assumed. Its `DIRS` list names seven directories and
+  `ezlopi-sensors-devices` is not among them, so 88 driver sources — the files
+  most of this branch's defects were found in — are outside its scope entirely;
+  adding the directory takes it from 163 files scanned to 251 with **zero** new
+  findings, so the omission is free to fix and is tracked as its own change.
+  But the seventh hilink defect would still have escaped: the scanner's
+  precision anchor requires the pointer be assigned from a *call* inside the
+  function, and `ld2410_outputs_t *hilink_data = (ld2410_outputs_t *)item->user_arg;`
+  is a cast of a parameter's field, while `item` itself is a parameter. Checked
+  by running the scanner's own `ASSIGN_CALL` pattern against that exact line: no
+  match. Widening the anchor to cover parameters is not attempted here, because
+  the 40-false-positives-in-41 history recorded at the top of that file is what
+  the anchor exists to prevent.
 
 - **A second hilink presence sensor on one hub is broken by design.**
   `hilink_presence_sensor_setting.c` keeps all three setting nodes in
@@ -10490,6 +10624,51 @@ Listed because a changelog that only mentions what was finished is misleading.
   `-Wdiscarded-qualifiers` sites in `ezlopi_service_uart.c`, which do fire on
   all four targets and are also still open — the two were briefly conflated by
   a grep loose enough to match both tags, and are counted separately here.
+
+- **Nine markdown links in the root documents are not examined by
+  `check_doc_citations.py` at all, and its "links examined" line cannot show
+  that.** Its `LINK` regex allows `#L<digits>` as the only line fragment and
+  `[A-Za-z0-9_][A-Za-z0-9_./-]*` as the path, so a link whose href does not fit
+  that shape fails the match outright — it is skipped rather than reported, and
+  not even the MISSING rule reaches it. Counted with a permissive scan over the
+  same six documents: 487 local links, 478 matched, **9** unexamined, in three
+  classes.
+
+  - Three hrefs beginning with a dot — all of them
+    `.github/workflows/ci.yml`, in `CHANGELOG.md`, `CONTRIBUTING.md` and
+    `README.md`. The leading `.` is not in the first-character class. That CI
+    workflow could be renamed or deleted and the gate would stay green in three
+    documents at once, which is the one failure mode it was written to prevent.
+  - Five cross-document anchors, `README.md#6-troubleshooting` and similar. The
+    `#` is read as the start of a line fragment and `6-troubleshooting` is not
+    digits.
+  - One line *range*, `ezlopi_core_devices.h#L110-L129`.
+
+  Found while writing the *UART sensor dispatch* entry above, after noticing
+  that a `path.c:332` href — the colon form, not `#L332` — had passed the gate
+  silently for the same reason. Those were rewritten before committing; the
+  three classes above are pre-existing and are left for a change of their own,
+  since widening the regex means re-running the ANCHOR rule over citations that
+  have never been subject to it.
+
+- **The device loop discards every driver's 1-second notify return, for every
+  driver in the tree.** `__device_loop()` calls
+  `item_node->func(EZLOPI_ACTION_NOTIFY_1000_MS, item_node, NULL, item_node->user_arg)`
+  at
+  [`ezlopi_core_ezlopi.c#L332`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L332)
+  and does not assign the result to anything. So a driver that correctly reports
+  "I could not read my sensor this second" — which
+  `sensor_0067_hilink_presence_sensor.c` now does, rather than panicking — is
+  indistinguishable to the core from one that succeeded. Nothing is logged, no
+  counter advances, and a sensor that has gone silent produces no evidence
+  anywhere above the driver.
+
+  Not fixed here for the same reason as the settings-callback entry below: the
+  call site is shared by every device in the tree, and giving it behaviour means
+  deciding what the hub should *do* about a failing item — log once, log every
+  tick, mark the item unavailable to the cloud — on hardware that cannot be
+  tested here. Returning the honest value from the driver is the precondition
+  for any of those, which is why it was done first.
 
 - **The cloud discards every settings callback's return value.** All four
   `curr_setting->func(...)` call sites in `ezlopi-cloud-settings`, and the one
