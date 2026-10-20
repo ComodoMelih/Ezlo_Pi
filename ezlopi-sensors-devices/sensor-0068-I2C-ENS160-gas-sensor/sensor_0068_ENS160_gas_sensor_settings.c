@@ -116,23 +116,56 @@ int ENS160_gas_sensor_settings_init(l_ezlopi_device_t *devices, void *user_arg)
     return ret;
 }
 
+/* The payload is not the settings node. Initialization allocates it and hangs
+** it off the node (`->user_arg = ambient_temperature;` below), which is how the
+** get- and set-callbacks further down have always read it.
+**
+** These two getters used to cast the node itself. That is in bounds and
+** aligned -- `void *user_arg` is the node's first member and the float is the
+** payload's -- so it read the payload pointer as a float instead of trapping.
+** On an ESP32 every internal-DRAM address decodes to a float in [1.9375, 2.0),
+** so both getters returned about 1.96 where the defaults are 25 degrees C and
+** 50 %RH, and DFROBOT_ens160_set_temp_and_hum() wrote that into the sensor's
+** compensation registers at every boot. tests/host/test_ens160set.c links
+** these functions and asserts the stored value, and sweeps both the DRAM and
+** the PSRAM address ranges to show where that number came from.
+**
+** 0.0f is kept as the no-setting value rather than raised to the 25/50
+** defaults, deliberately: the only way to get here with a null payload is an
+** allocation failure during settings init, and returning the default would
+** make that indistinguishable from a working default -- to a reader, and to
+** the test above. The TRACE_E is so it is not silent. */
 float ENS160_get_ambient_temp_setting()
 {
     float ret = 0.0f;
-    s_sensor_ens160_gas_sensor_setting_ambient_temperature_t *ambient_temperature = (s_sensor_ens160_gas_sensor_setting_ambient_temperature_t *)ens160_gas_sensor_ambient_temperature_sensor_setting;
-    if (ambient_temperature)
+    if (ens160_gas_sensor_ambient_temperature_sensor_setting)
     {
-        ret = ambient_temperature->ambient_temperature;
+        s_sensor_ens160_gas_sensor_setting_ambient_temperature_t *ambient_temperature = (s_sensor_ens160_gas_sensor_setting_ambient_temperature_t *)ens160_gas_sensor_ambient_temperature_sensor_setting->user_arg;
+        if (ambient_temperature)
+        {
+            ret = ambient_temperature->ambient_temperature;
+        }
+        else
+        {
+            TRACE_E("ENS160 ambient-temperature setting has no payload; reporting 0");
+        }
     }
     return ret;
 }
 float ENS160_get_relative_humidity_setting()
 {
     float ret = 0.0f;
-    s_sensor_ens160_gas_sensor_setting_relative_humidity_t *relative_humidity = (s_sensor_ens160_gas_sensor_setting_relative_humidity_t *)ens160_gas_sensor_relative_humidity_sensor_setting;
-    if (relative_humidity)
+    if (ens160_gas_sensor_relative_humidity_sensor_setting)
     {
-        ret = relative_humidity->relative_humidity;
+        s_sensor_ens160_gas_sensor_setting_relative_humidity_t *relative_humidity = (s_sensor_ens160_gas_sensor_setting_relative_humidity_t *)ens160_gas_sensor_relative_humidity_sensor_setting->user_arg;
+        if (relative_humidity)
+        {
+            ret = relative_humidity->relative_humidity;
+        }
+        else
+        {
+            TRACE_E("ENS160 relative-humidity setting has no payload; reporting 0");
+        }
     }
     return ret;
 }

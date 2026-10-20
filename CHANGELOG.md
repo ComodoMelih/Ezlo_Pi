@@ -1677,6 +1677,138 @@ None of these have been exercised on physical hardware; see Known gaps.
   `EZPI_hal_i2c_master_deinit()` is declared in the header and called from
   nowhere in the tree.
 
+### Device settings — [bug]
+
+- **The ENS160 compensated its air-quality readings against a heap address.**
+  [`ENS160_get_ambient_temp_setting`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L138)
+  and
+  [`ENS160_get_relative_humidity_setting`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L155)
+  cast the *settings node* to the driver's payload type and read the first
+  member:
+
+  ```c
+  s_sensor_..._ambient_temperature_t *t =
+      (s_sensor_..._ambient_temperature_t *)ens160_..._sensor_setting;
+  ret = t->ambient_temperature;          /* not the stored temperature */
+  ```
+
+  The payload is not the node. Settings initialization allocates it separately
+  and hangs it off the node — `->user_arg = ambient_temperature;` — which is
+  how the cloud get- and set-callbacks in the same file have always read it.
+  The fix is `->user_arg` in both getters.
+
+  It was silent rather than a crash because of two layout coincidences, and
+  both are now asserted rather than assumed:
+  [`user_arg`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.h#L137)
+  is the *first* member of `l_ezlopi_device_settings_v3_t`, and the float is
+  the first member of each payload. So the wrong read was in bounds, correctly
+  aligned, and returned the payload pointer's low four bytes reinterpreted as a
+  float. Nothing trapped and no warning fired — the cast is explicit, so the
+  compiler had nothing to object to.
+
+  The number it produced is the reason this survived. Every address an ESP32
+  heap can hand out decodes to an IEEE-754 float in `[1.0, 2.0)`: internal DRAM
+  `0x3FF80000-0x3FFFFFFF` lands in `[1.9375, 2.0)` and the mapped PSRAM window
+  `0x3F800000-0x3FBFFFFF` in `[1.0, 1.5)`. So the getters returned roughly 1.96
+  where the file's own defaults are 25 °C and 50 %RH — a plausible small
+  number, not a NaN or an infinity that something downstream might have
+  rejected.
+
+  Where it went:
+  [`__init`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor.c#L219)
+  calls both getters and feeds them to
+  [`DFROBOT_ens160_set_temp_and_hum`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/ens160.c#L114),
+  which writes `TEMP_IN` and `RH_IN` — `(t + 273.15) * 64` and `rh * 512`. At
+  1.9375 that is 17605 and 992, so the sensor was told the room was about 2 °C
+  and about 2 %RH. That happened on every boot, and again in
+  [`__notify`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor.c#L175)
+  whenever a setting changed. The ENS160 compensates its AQI, TVOC and eCO₂
+  outputs with those registers, so every reading this driver has ever published
+  was compensated against a pointer. The line above the call in `__init` is the
+  author's commented-out `set_temp_and_hum(..., 25.0, 50.0)` with the note
+  *"These should be able to be changed froms settings"* — the literals were
+  replaced by getters that returned about 2.
+
+  `0.0f` is deliberately kept as the no-payload return rather than raised to
+  25/50. The only way to reach it is an allocation failure during settings
+  init, and returning the default there would make a broken setting
+  indistinguishable from a working one — to a reader and to the test. A
+  `TRACE_E` was added so it is not silent.
+
+  Evidenced by [`tests/host/test_ens160set.c`](tests/host/test_ens160set.c) —
+  18 checks, and the first device-settings file in the host suite. It calls the
+  real `ENS160_gas_sensor_settings_init()` and the real getters rather than
+  re-typing the expression and checking its own arithmetic, which would have
+  passed on the broken file. Six functions are stubbed, the list learned from
+  `nm -u` rather than guessed; the NVS read stub reports *no stored value* so
+  initialization takes its own default branch and the 25 and 50 asserted are
+  the file's own defaults, not something the stub planted. One stub is a
+  deliberate copy rather than a refusal —
+  [`EZPI_core_device_add_settings_to_device_v3`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.c#L119)
+  appends the node it allocates to `device->settings`, and that linking matters
+  to a second defect in the same file (below), so the 20 lines are reproduced
+  and flagged as a copy to keep the list state the test sees equal to the
+  firmware's.
+
+  Seen red first: 18 checks, 2 failures against the unfixed file, both of them
+  the value read-backs. The other 16 passed there, which is correct — they are
+  about the layout and the address arithmetic that made the defect silent, and
+  those were true before the fix and after it. Re-confirmed after the address
+  sweep was widened to cover both heap regions by re-breaking the two getters
+  and restoring: 18/2 broken, 18/0 fixed, the same two lines red both times.
+
+  The defect does not reproduce on the host and the test does not pretend it
+  does: an x86-64 heap pointer's low four bytes are arbitrary, and under
+  AddressSanitizer the misread came out as a denormal printing as `0.000000`.
+  That is why the ~1.96 claim is swept over the ESP32 address ranges — 1025
+  PSRAM and 129 DRAM addresses, endpoints visited explicitly — rather than
+  observed from a live allocation.
+
+  | Target | `set-target` | build | diagnostics in the file | both getters in ELF | symbols read | image |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | esp32 | 0 | 0 | 0 | yes | 13910 | 0x19d420 |
+  | esp32s2 | 0 | 0 | 0 | yes | 10509 | 0x151800 |
+  | esp32s3 | 0 | 0 | 0 | yes | 15200 | 0x1a0f90 |
+  | esp32c3 | 0 | 0 | 0 | yes | 14047 | 0x1af320 |
+
+  The symbol column is there because a clean build says nothing about two
+  functions the linker might have discarded, and the symbol *total* is there
+  because of a mistake worth recording: the first run of this check reported
+  `n/a` on all four targets, its `nm` glob one directory level too shallow for
+  the real `tools/<name>/<ver>/<name>/bin/` layout. That is the same lookup
+  failure already recorded under *Addressable LED configuration* in this
+  release — reintroduced by copying the older probe script rather than the
+  corrected one. `n/a` is a skip dressed as a measurement, so the check now
+  resolves the toolchain per target by name and prints how many symbols it
+  actually read before any count of its own is believed.
+
+  Two things were edited after that table was produced, and both were
+  re-checked rather than assumed harmless. A comment line was added to the
+  subject, so `esp32` was rebuilt in the same tree: `0x19d420`, identical —
+  which is what a comment ought to do, and now what it is known to have done.
+  And the two citations to the getters above had to move from `#L137`/`#L154`
+  to `#L138`/`#L155` for exactly that reason. The citation gate described below
+  caught them, inside the same commit that wrote them, which is the smallest
+  possible demonstration of why it exists.
+
+- **A CI check for this cast was first declined on a count that was wrong.**
+  The reasoning recorded while fixing the above was that the tree holds
+  "exactly one `*settings*.c` file", so a pattern check would guard a
+  population of one. Re-deriving it before writing this entry: there are three
+  such files, and more to the point there are **three** device-settings
+  implementations — the ENS160 one, `hilink_presence_sensor_setting.c` and the
+  block in `device_0001_digitalOut_generic.c` — carrying **30** payload-read
+  sites between them. Twenty-eight read through `->user_arg`; the two ENS160
+  getters were the only ones that did not. The other two files were then read
+  rather than assumed: every site in both is correct.
+
+  So the check is justified by the population after all, and is not in this
+  commit only because it is a separate concern. The rule it would need is
+  exactly the shape of the defect: a cast to an `s_*_t *` payload type whose
+  operand is a settings-node pointer and which does not end in `->user_arg`.
+  Recorded here with the corrected numbers rather than left standing on the
+  wrong one, because the wrong count was the whole argument for not doing it.
+
 ### BLE provisioning — [bug]
 
 The BLE provisioning flow worked only if everything succeeded on the first
@@ -5604,12 +5736,13 @@ flashed.**
   the four added for the serial block refuse to run at all if their edit
   matched nothing.
 
-- The full host suite is **6468** checks across **31** binaries, 0 failures —
-  **6390 + 61 + 17 = 6468**, where the 6390 includes `test_aled`'s 201, with
-  every binary reporting in the shape the aggregate greps for. The aggregate
-  was re-run rather than adjusted by the four checks added; it agreed, which is
-  the only reason this line says 6468 and not an arithmetic result. The figure
-  before this work was 6464.
+- The full host suite is **6486** checks across **32** binaries, 0 failures,
+  with every binary reporting in the shape the aggregate greps for. The
+  aggregate is re-run rather than adjusted whenever it changes; this figure is
+  what the run printed, not an arithmetic result. The two steps behind it:
+  **6390 + 61 + 17 = 6468** across 31 binaries, where the 6390 includes
+  `test_aled`'s 201, and then **+18** for `test_ens160set` as the 32nd binary.
+  The figure before this work was 6464.
 
 ### UUID utility — [bug]
 
@@ -9755,9 +9888,10 @@ enumerators — so the live half of this component was never affected.
 - **The citations in these documents are now checked**, by
   [`check_doc_citations.py`](tests/ci/check_doc_citations.py) — the twentieth
   check and the seventeenth the `hygiene` job invokes. This file is the main
-  thing this fork produces, and these documents carry 446 markdown links,
-  310 of them with a `#L<n>` fragment. (This said 310 *links* when the entry
-  was written; it is re-measured whenever a paragraph below quotes it.) Line
+  thing this fork produces, and these documents carry 454 markdown links,
+  317 of them with a `#L<n>` fragment. (This said 310 *links* when the entry
+  was written; it is re-measured whenever a paragraph below quotes it, and
+  whenever an entry added above adds citations of its own.) Line
   numbers move whenever anything
   above them is edited, and nothing in the toolchain notices: a link to a
   renamed file, or to a line past the end of one, renders as ordinary text and
@@ -9777,8 +9911,8 @@ enumerators — so the live half of this component was never affected.
   says `#L456`, or the link text is one backticked code token that is not on
   the cited line. What it still cannot do is judge a citation whose text is
   prose: "appended", "the per-chunk dump" and the like have nothing to check
-  against. **77** of the **310** citations with a line fragment are in that
-  class — the fourth rule bears on the **131** that are a single backticked
+  against. **78** of the **317** citations with a line fragment are in that
+  class — the fourth rule bears on the **137** that are a single backticked
   token and the third on the **102** whose text ends `:N`. This said "150 of
   the 200" when the rule was added; the proportion improved because citing by
   token became the habit here, not because the rule was loosened.

@@ -82,7 +82,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
            test_httpresp test_suntime test_issun test_coords test_tz \
-           test_aled test_aledcfg test_aledonboard
+           test_aled test_aledcfg test_aledonboard test_ens160set
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -1249,6 +1249,50 @@ $(BUILD)/test_cjsongpio: test_cjsongpio.c \
 	$(CC) $(CJSONGPIO_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/cjsongpio_cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_cjsongpio_main.o $(BUILD)/cjsongpio_subject.o \
 	      $(BUILD)/cjsongpio_cjext.o $(LDFLAGS) $(CJSONGPIO_SAN) -lm
+
+# The ENS160 settings getters. First host test with a driver's own settings
+# file as the subject, and it is here because that file compiles unmodified
+# with -Wall -Wextra and needs exactly six functions stubbed -- measured by
+# compiling it and reading nm -u, not guessed.
+#
+# ENS160_INC is HTTPURL_INC plus two directories: the sensor's own, and
+# ezlopi-cloud-settings for ezlopi_cloud_settings.h. Shared rather than copied,
+# for the same reason ISSUN_INC shares it -- the subject needs
+# ezlopi_core_devices.h, cjext.h and the keyword tables, which is most of what
+# that list is for.
+#
+# Three constants files are linked, not stubbed: the subject names
+# ezlopi_label_str and friends from keywords, scales_celsius and scales_percent
+# from scales, value_type_temperature and value_type_humidity from value_type.
+# Stubbing those would let a renamed keyword pass here and fail on target.
+#
+# The nm guard checks the getter is really in the object. The whole point of
+# this test is that it calls the real one; if CONFIG or an #ifdef ever took it
+# out, every check below would pass against nothing.
+ENS160_DIR := ../../ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor
+CLOUDSET_DIR := ../../ezlopi-cloud/ezlopi-cloud-settings
+ENS160_INC := $(HTTPURL_INC) -I$(ENS160_DIR) -I$(CLOUDSET_DIR)
+$(BUILD)/test_ens160set: ENS160_CFLAGS := -std=c99 -O1 -g $(ENS160_INC) \
+                                          $(SANITIZERS)
+$(BUILD)/test_ens160set: test_ens160set.c \
+                         $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.c \
+                         $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.h \
+                         $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                         $(CONSTANTS_DIR)/ezlopi_cloud_scales_str.c \
+                         $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c \
+                         $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(ENS160_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_ens160set_main.o test_ens160set.c
+	$(CC) $(ENS160_CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -c -o $(BUILD)/ens160set_subject.o $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.c
+	@nm $(BUILD)/ens160set_subject.o | grep -q ' T ENS160_get_ambient_temp_setting' \
+	  || { echo "sensor_0068_ENS160_gas_sensor_settings.c compiled to an object without ENS160_get_ambient_temp_setting in it -- the checks below would be testing nothing"; exit 1; }
+	$(CC) $(ENS160_CFLAGS) -c -o $(BUILD)/ens160set_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(ENS160_CFLAGS) -c -o $(BUILD)/ens160set_scales.o $(CONSTANTS_DIR)/ezlopi_cloud_scales_str.c
+	$(CC) $(ENS160_CFLAGS) -c -o $(BUILD)/ens160set_valuetypes.o $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c
+	$(CC) $(ENS160_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/ens160set_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_ens160set_main.o $(BUILD)/ens160set_subject.o \
+	      $(BUILD)/ens160set_keywords.o $(BUILD)/ens160set_scales.o \
+	      $(BUILD)/ens160set_valuetypes.o $(BUILD)/ens160set_cjext.o \
+	      $(LDFLAGS) -lm
 
 $(BUILD):
 	mkdir -p $(BUILD)
