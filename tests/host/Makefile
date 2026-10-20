@@ -81,7 +81,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
            test_httpresp test_suntime test_issun test_coords test_tz \
-           test_aled test_aledcfg
+           test_aled test_aledcfg test_aledonboard
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -175,6 +175,50 @@ $(BUILD)/test_aledcfg: test_aledcfg.c \
 	$(CC) -o $@ $(BUILD)/test_aledcfg_main.o $(BUILD)/aledcfg_subject.o \
 	      $(BUILD)/aledcfg_aled.o $(BUILD)/aledcfg_keywords.o \
 	      $(BUILD)/aledcfg_cjext.o $(LDFLAGS) -lm
+
+# The onboarding document's worked example, run through the real validator and
+# the real resolver.
+#
+# Unusual among these targets in that its fixture is not in the test file: it
+# reads docs/addressable-led-onboarding.md at run time and extracts the two
+# blocks marked `<!-- machine-checked: ... -->`. That is deliberate. A copy of
+# the example here would be the thing that drifts, and two copies agreeing with
+# each other while disagreeing with the firmware would pass.
+#
+# DOC_PATH is relative because the suite runs binaries from this directory
+# (see the `test` rule). It is a -D rather than a literal so that running the
+# binary from somewhere else can still point it at the file instead of failing
+# mysteriously.
+#
+# Links both subjects, plus ezlopi_cloud_keywords.c for the key spellings and
+# the chipset name, for the reason given on test_aledcfg above: if this test
+# spelled "pixel_count" or "ESP32" itself, a renamed constant would leave it
+# green while every real configuration failed.
+$(BUILD)/test_aledonboard: ALEDONBOARD_CFLAGS := -std=c99 -O1 -g \
+                                                 -I$(ALEDCFG_DIR) \
+                                                 -I$(ALED_DIR) \
+                                                 -I$(DEVCFGVAL_DIR) \
+                                                 -I$(CONSTANTS_DIR) \
+                                                 -I$(CJEXT_DIR) -I$(STUBS_DIR) \
+                                                 -DDOC_PATH='"../../docs/addressable-led-onboarding.md"' \
+                                                 $(SANITIZERS)
+$(BUILD)/test_aledonboard: test_aledonboard.c \
+                           $(ALEDCFG_DIR)/ezlopi_util_aledcfg.c \
+                           $(ALED_DIR)/ezlopi_util_aled.c \
+                           $(DEVCFGVAL_DIR)/ezlopi_util_devcfgval.c \
+                           $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                           $(CJEXT_DIR)/cjext.c \
+                           ../../docs/addressable-led-onboarding.md | $(BUILD)
+	$(CC) $(ALEDONBOARD_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_aledonboard_main.o test_aledonboard.c
+	$(CC) $(ALEDONBOARD_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/aledonboard_aledcfg.o $(ALEDCFG_DIR)/ezlopi_util_aledcfg.c
+	$(CC) $(ALEDONBOARD_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/aledonboard_aled.o $(ALED_DIR)/ezlopi_util_aled.c
+	$(CC) $(ALEDONBOARD_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/aledonboard_devcfgval.o $(DEVCFGVAL_DIR)/ezlopi_util_devcfgval.c
+	$(CC) $(ALEDONBOARD_CFLAGS) -c -o $(BUILD)/aledonboard_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(ALEDONBOARD_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/aledonboard_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_aledonboard_main.o $(BUILD)/aledonboard_aledcfg.o \
+	      $(BUILD)/aledonboard_aled.o $(BUILD)/aledonboard_devcfgval.o \
+	      $(BUILD)/aledonboard_keywords.o $(BUILD)/aledonboard_cjext.o \
+	      $(LDFLAGS) -lm
 
 # cjext.c is vendored third-party code, so it is compiled without -Werror and
 # with the two warnings it legitimately trips disabled. The test file itself is
