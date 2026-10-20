@@ -5151,14 +5151,56 @@ flashed.**
   `EZPI_aledcfg_from_json()` resolves a pixel count, a white-channel flag and a
   wire byte order from a device-config object;
   `EZPI_aledcfg_order_from_str()` parses `"grb"`; `EZPI_aledcfg_wire_len()`
-  wraps `EZPI_aled_wire_len()` so the component's bound and the driver's
-  `calloc(length, COLOR_SIZE)` are provably the same arithmetic rather than two
-  copies of it. The three key names — `pixel_count`, `rgbw`, `color_order` —
-  are in `ezlopi-cloud-constants` with every other config key.
+  wraps `EZPI_aled_wire_len()` so the byte count a resolved shape implies is
+  written once, carries the overflow check, and is host-tested. The three key
+  names — `pixel_count`, `rgbw`, `color_order` — are in
+  `ezlopi-cloud-constants` with every other config key.
 
-  **device-0009 is not wired to it in this commit.** Nothing calls it yet. The
-  one-LED behaviour above is unchanged on hardware until the driver is changed,
-  which is a separate commit because it is the part no host test can check.
+  A correction to what an earlier draft of this entry claimed: that wrapper is
+  **not** what sizes the strip's buffer, and describing it as "provably the
+  same arithmetic" as the driver's allocation was wrong. `led_strip_init()`
+  does its own `calloc(length, COLOR_SIZE(strip))` inside vendored third-party
+  code, and nothing forces the two expressions to agree — they are two
+  statements of one rule that happen to match, which is worth saying plainly
+  rather than overstating into a guarantee.
+
+- **device-0009 now reads that config, and the one-LED defect is closed in
+  source.** `__prepare()` resolves the shape once — it is the only place the
+  stored document is in scope, since `__init()` sees the item and not the
+  config — and stores it in `s_dimmer_args_t`. `__init()` then sets both
+  `sk6812_strip.length` and `sk6812_strip.is_rgbw` from it, before
+  `led_strip_init()`, which is required rather than tidy: that function sizes
+  its frame buffer as `calloc(length, COLOR_SIZE(strip))` and reads both fields
+  to do it. `is_rgbw` had never been assigned anywhere in the firmware, so this
+  is the first time the white channel of an SK6812-RGBW is reachable at all.
+
+  **Not verified on hardware.** No board has driven a multi-pixel strip, and
+  this is the half of the fix no host test can reach — it needs an RMT
+  peripheral and the IDF. What *is* verified is an esp32 build with zero
+  diagnostics in either touched file, and `nm` on the linked ELF showing
+  `EZPI_aledcfg_from_json` and `EZPI_aledcfg_order_from_str` present, so the
+  driver's call survives `--gc-sections` rather than being compiled and
+  dropped. Image: `0x19d1c0` bytes, 17% of the app partition free.
+
+  `EZPI_aled_wire_len` is **absent** from that ELF, and that is the expected
+  result rather than a missing link: nothing in the firmware calls
+  `EZPI_aledcfg_wire_len()`, so it and the function it wraps are both collected.
+  They are reached only from the host test. Recorded because an absent symbol
+  that is *fine* and an absent symbol that means the feature was dropped look
+  identical in an `nm` listing, and only one of them is this.
+
+- **`color_order` is parsed but cannot be honoured, and the driver says so.**
+  This was found while wiring the driver, and it contradicts what the resolver's
+  six-permutation support implies: `led_strip_t` has **no colour-order field**.
+  The order lives in a static table indexed by strip *type*
+  (`led_params[LED_STRIP_SK6812].order = ORDER_GRB`), and `color_order_t` offers
+  only `ORDER_GRB` and `ORDER_RGB` — two of the six. Honouring the rest means
+  changing vendored MIT code, which is deliberately not in this commit.
+
+  So a config asking for anything but `grb` now gets a `TRACE_W` rather than
+  silent acceptance. A strip lit in the wrong byte order still lights, which is
+  exactly what makes an unlogged mismatch so hard to attribute — the same
+  reasoning that put the order table under test in the first place.
 
 - **The defect this component exists to prevent, stated exactly.**
   `EZPI_core_cjson_get_value_uint32()` assigns `*item_val = 0` *before* it looks
@@ -9486,6 +9528,36 @@ enumerators — so the live half of this component was never affected.
 ## Known gaps
 
 Listed because a changelog that only mentions what was finished is misleading.
+
+- **The addressable strip is configurable now, but three things about it are
+  unfinished, and one of them contradicts what the config schema implies.**
+
+  **Five of the six colour orders cannot be honoured.**
+  `EZPI_aledcfg_order_from_str()` accepts all six permutations of r/g/b, and
+  `device-0009` can act on exactly one of them. `led_strip_t` has no
+  colour-order field at all: the order is held in a static table indexed by
+  strip *type* (`led_params[LED_STRIP_SK6812].order = ORDER_GRB`), and
+  `color_order_t` defines only `ORDER_GRB` and `ORDER_RGB`. So honouring the
+  rest means adding a per-strip field to vendored MIT code and threading it
+  through `led_strip_set_pixel()`, which is deliberately not done here. The
+  driver logs a `TRACE_W` when the resolved order is not `grb`, so the
+  limitation is visible at runtime rather than silent — but a config asking for
+  `rbg` is still accepted by the parser and then ignored, which is a schema
+  that promises more than the firmware delivers.
+
+  **A changed `pixel_count` needs a reboot.** `__init()` is guarded by
+  `if (0 == dimmer_args->sk6812_led_strip_initialized)`, and `led_strip_init()`
+  allocates the frame buffer from `length`, so re-shaping a running strip would
+  mean `led_strip_free()` plus a re-init rather than an assignment. The config
+  is only read in `__prepare()`, which runs at boot. Editing a provisioned
+  device's pixel count therefore takes effect on the next restart, and nothing
+  in the firmware says so to the user.
+
+  **No board has driven a multi-pixel strip.** The parser is host-tested and
+  the driver compiles for esp32, but the actuation — RMT timing at length,
+  `is_rgbw` producing a fourth byte per pixel, the `>=50 µs` reset gap at 2048
+  pixels — has never run on hardware. The 2048 cap in particular is derived
+  from the wire protocol on paper and has not been observed to be drivable.
 
 - **Two target gaps are now stated by the build instead of being fixed, because
   both need hardware to close.** The target-guard work under *Build and

@@ -42,6 +42,7 @@ set(EZLOPI_SENSOR_DEVICE_COMPONENTS
 # Define ezlopi-utils components
 set(EZLOPI_UTIL_COMPONENTS
         ezlopi-util-trace
+        ezlopi-util-aledcfg
 )
 
 # Register the components

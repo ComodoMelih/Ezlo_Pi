@@ -57,6 +57,8 @@
 #include "led_strip.h"
 #include "color_codes.h"
 
+#include "ezlopi_util_aledcfg.h"
+
 #include "device_0009_other_RMT_SK6812.h"
 #include "EZLOPI_USER_CONFIG.h"
 
@@ -74,6 +76,11 @@
 typedef struct s_dimmer_args
 {
     led_strip_t sk6812_strip;
+    /* Resolved once in __prepare(), which is the only place the stored config
+    ** document is in scope, and read in __init(), which only ever sees the
+    ** item. Kept as the resolved shape rather than as the cJSON object so the
+    ** parsing happens exactly once and cannot differ between the two. */
+    s_aledcfg_t aled_cfg;
     l_ezlopi_item_t *switch_item;
     l_ezlopi_item_t *dimmer_item;
     l_ezlopi_item_t *dimmer_up_item;
@@ -264,7 +271,21 @@ static ezlopi_error_t __init(l_ezlopi_item_t *item)
                 if (0 == dimmer_args->sk6812_led_strip_initialized)
                 {
                     dimmer_args->sk6812_strip.type = LED_STRIP_SK6812;
-                    dimmer_args->sk6812_strip.length = 1;
+                    /* Was `length = 1`, a literal, and `is_rgbw` was never
+                    ** assigned anywhere -- the struct is memset to 0, so
+                    ** COLOR_SIZE() was permanently 3 and a 60-pixel strip lit
+                    ** its first LED and nothing else.
+                    **
+                    ** Both must be set before led_strip_init(), because that
+                    ** sizes the frame buffer as
+                    ** calloc(length, COLOR_SIZE(strip)) and reads both fields
+                    ** to do it. The resolver guarantees length >= 1, which
+                    ** matters: led_strip_init() starts with
+                    ** CHECK_ARG(strip && strip->length > 0 && ...), so a 0 here
+                    ** would not dim the strip, it would fail initialisation and
+                    ** the device would never come up. */
+                    dimmer_args->sk6812_strip.length = dimmer_args->aled_cfg.pixel_count;
+                    dimmer_args->sk6812_strip.is_rgbw = dimmer_args->aled_cfg.has_white;
                     dimmer_args->sk6812_strip.gpio = item->interface.pwm.gpio_num;
                     dimmer_args->sk6812_strip.buf = NULL;
                     dimmer_args->sk6812_strip.brightness = 255;
@@ -437,6 +458,32 @@ static ezlopi_error_t __prepare(void *arg)
             if (dimmer_args)
             {
                 memset(dimmer_args, 0, sizeof(s_dimmer_args_t));
+
+                /* The resolver fills aled_cfg on every path, including the ones
+                ** where it returns false, so there is no failure to handle here
+                ** -- only something to report. false means the stored document
+                ** said something that had to be substituted, which is worth a
+                ** log precisely because the strip will then light up and look
+                ** fine at the wrong length. */
+                if (false == EZPI_aledcfg_from_json(prep_arg->cjson_device, &dimmer_args->aled_cfg))
+                {
+                    TRACE_W("sk6812: config not taken verbatim; using %u pixel(s), rgbw=%d",
+                        (unsigned)dimmer_args->aled_cfg.pixel_count,
+                        (int)dimmer_args->aled_cfg.has_white);
+                }
+
+                /* This driver cannot honour a colour order, so say so instead of
+                ** accepting the key and quietly ignoring it. led_strip keeps the
+                ** order in a static table indexed by strip *type* -- SK6812 is
+                ** ORDER_GRB there -- and led_strip_t has no per-strip order
+                ** field at all, so honouring the other five would mean changing
+                ** vendored third-party code. A strip lit in the wrong colour
+                ** order still works, which is what makes an unlogged mismatch
+                ** so hard to attribute. */
+                if (ALED_ORDER_GRB != dimmer_args->aled_cfg.order)
+                {
+                    TRACE_W("sk6812: color_order is not honoured by this driver; using grb");
+                }
 
                 dimmer_args->rgb_color_item = EZPI_core_device_add_item_to_device(device, DEVICE_0009_other_rmt_sk6812);
                 dimmer_args->dimmer_item = EZPI_core_device_add_item_to_device(device, DEVICE_0009_other_rmt_sk6812);
