@@ -3,8 +3,11 @@
 
 WHY THIS EXISTS
 
-The CHANGELOG is this fork's main deliverable and it carries 230-odd links
-into the source, most of them with a `#L<n>` line fragment. Line numbers move
+The CHANGELOG is this fork's main deliverable and it carries 418 links into the
+source, 307 of them with a `#L<n>` line fragment. (It said 230-odd when this
+was written; the count is re-measured whenever something here quotes it,
+because a stale number in the prose of a staleness check is a poor
+advertisement.) Line numbers move
 whenever anything above them is edited, and nothing in the toolchain notices:
 a link to a renamed file, or to a line past the end of a file, renders as
 ordinary text and reads as evidence. Several entries here turn on a specific
@@ -63,10 +66,14 @@ prefix is dropped, because a Kconfig option is cited by the name the generated
 that was a first cut flagging three citations where the prose was right and the
 rule was wrong.
 
-What ANCHOR deliberately does not do is guess at prose link text. 150 of the
-200 citations with a line fragment are skipped for that reason, so the mechanical
-advice still stands for them: when a commit edits a file, list every citation
-that points into it and re-read them.
+What ANCHOR deliberately does not do is guess at prose link text. Of the 310
+citations carrying a line fragment across the root documents, ANCHOR bears on
+the 131 that are one backticked token and MISMATCH on the 102 whose text ends
+`:N`, leaving 77 with nothing mechanical on them beyond the path existing and
+being long enough. This said "150 of the 200" when ANCHOR was added; the ratio
+improved because citing by token became the house style, not because anything
+was relaxed. For those 77 the mechanical advice still stands: when a commit
+edits a file, list every citation that points into it and re-read them.
 
 WHAT IT FOUND
 
@@ -82,6 +89,29 @@ check exits 0 with no ANCHOR findings; with the six rotted numbers put back it
 exits 1 and names all six. MISSING, SHORT and MISMATCH report nothing on those
 same six -- every one of them resolved to a real line in a real file, which is
 why they shipped unnoticed twice.
+
+Then a third time, and larger: 24 citations into
+ezlopi_core_scenes_when_methods_helper_functions.c, from entries written before
+the later scenes work edited it. Two separate shifts (-44 and -9), so two
+commits, neither of which re-read what rested on it. Three of the 24 had moved
+*file* rather than line -- s_sunstate_data_t was relocated into the header --
+and that class is reachable by ANCHOR alone: the .c still exists, so MISSING
+passes, and it is 2338 lines, so SHORT passes. Four more citations into the
+same file were outside every rule, and two of those four are the instructive
+ones: their text ends `:547` and `:597` and their fragments said `#L547` and
+`#L597`, so MISMATCH compared them and was satisfied. MISMATCH asks whether a
+citation agrees with itself, not whether it is right, and two numbers that rot
+together rot invisibly.
+
+WHERE IT DOES NOT LOOK AT ALL
+
+main() lists *.md in one directory, so docs/ is not scanned -- but pointing it
+there would cover little, because LINK requires a repo-root-relative path
+(`[A-Za-z0-9_]` first) and every citation in a subdirectory document is written
+`../ezlopi-core/...`. Measured: the three files in docs/ carry 23 local links
+between them and this regex can see exactly 1. Covering them means resolving
+each link against its own document's directory, which is a real change and not
+a wider glob.
 
 Links to directories are counted and skipped: `tests/host/` is linked that way
 deliberately and has no line to resolve.

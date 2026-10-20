@@ -873,12 +873,12 @@ None of these have been exercised on physical hardware; see Known gaps.
 
 - **A `strlen()` on address `0x1`, because the guard in front of it tested the
   wrong one of two type fields — and a `!= NULL` test cannot catch it.**
-  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
+  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L662)
   read `field_value.u_value.value_string` behind a test on
   `curr_field->value_type` plus a null check, then handed the result to
-  [`ISSUNSTATE_check_mdrn`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L762),
+  [`ISSUNSTATE_check_mdrn`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L718),
   which calls
-  [`strlen`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L767)
+  [`strlen`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L723)
   on it. Both halves of that guard look right and neither is.
 
   `l_fields_v2_t` carries two type-ish members, and they are not the same
@@ -926,7 +926,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   non-string is a state two other readers already treat as legitimate; this one
   was the deviation. It is also the second site of this shape fixed on this
   branch — the sibling
-  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L630)
+  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L586)
   was corrected under *Scene HTTP requests* — which is why the remainder is
   recorded as a class under *Known gaps* rather than as one more line item.
 
@@ -1075,7 +1075,7 @@ None of these have been exercised on physical hardware; see Known gaps.
 
 - **"20 minutes before sunrise" fired forty minutes after it, and "30 seconds
   after" fired six hours later.** The offset half of an isSunState trigger —
-  [`__issunstate_add_offs`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L2019)
+  [`__issunstate_add_offs`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L2010)
   — had seven defects in it. Its companion entry under *Scene HTTP requests*
   fixed the half that fetches the suntime; this is the half that moves it, and
   until now it moved it to the wrong place for every offset anybody would
@@ -1123,7 +1123,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   **Nothing was range-checked, and `strtoul` accepts a leading minus.** An
   out-of-range result is not a loud failure here. The moment is compared to the
   wall clock *for equality* by
-  [`ISSUNSTATE_check_mdrn`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L762),
+  [`ISSUNSTATE_check_mdrn`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L718),
   so a trigger at 81:39:39 is not an error — it is a scene that sits in the
   list, reports nothing, and never fires:
 
@@ -1165,7 +1165,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   survived in shipped firmware.
 
   **Two more were in the caller, not the parser.**
-  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L630)
+  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L586)
   used "is `defined_moment` all-zero?" as its do-this-once test, and that
   sentinel cannot do either job it was given. It cannot mean *already done*,
   because 00:00:00 is a time a real offset produces, so a scene whose moment
@@ -1217,9 +1217,9 @@ None of these have been exercised on physical hardware; see Known gaps.
   together only on success.
 
   The caller keeps two new fields instead of the sentinel,
-  [`moment_tm_day`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L108)
+  [`moment_tm_day`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.h#L143)
   and
-  [`moment_valid`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L109),
+  [`moment_valid`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.h#L144),
   so the moment is computed once per day and once per failure. Storing the
   *day* rather than a plain done-flag is what makes it correct in either field
   order — the dispatch loop walks the scene's own field list, so the offset
@@ -1227,9 +1227,9 @@ None of these have been exercised on physical hardware; see Known gaps.
   `curr_tm_day`, which only advances once a suntime has actually been read,
   means the moment is never computed from yesterday's suntime. And both places
   that compare the moment to the clock —
-  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
+  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L662)
   and
-  [`ISSUNSTATE_check_flag_result`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L807)
+  [`ISSUNSTATE_check_flag_result`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L763)
   — now require `moment_valid` first, because the struct's own zeroes read as
   00:00:00, a time the clock reaches every night.
 
@@ -6816,7 +6816,7 @@ enumerators — so the live half of this component was never affected.
   `web_server`, and the
   [`web_port = port`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_then_methods_helper_func.c#L273)
   on the next line still runs with the real port. The third caller,
-  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902),
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1893),
   was never at risk: its `web_server` is a `char` array initialised from a
   literal.
 
@@ -6948,10 +6948,10 @@ enumerators — so the live half of this component was never affected.
   [DELETE](ezlopi-core/ezlopi-core-http/ezlopi_core_http.c#L764) arms of
   `__ezlopi_http_generate_request()`. And the field is NULL on a path with no
   malloc on it at all.
-  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902)
+  [`__issunsate_update_sunstate_tm()`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1893)
   — the third caller, the one the previous entry establishes was never at risk
   for `web_server` — builds its config with a
-  [designated initializer](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1947)
+  [designated initializer](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1938)
   that named **10** of the struct's **20** members. `target_page` was one of the
   10 it omitted, so C zero-initialized it. (Read that line today and it names
   **11**, because `.target_page` is what this entry adds — the count was
@@ -7292,7 +7292,7 @@ enumerators — so the live half of this component was never affected.
 
 - **An isSunState scene fired at 05:48 or 17:48 local time, anywhere on
   earth.** The function that was supposed to fetch today's sunrise or sunset,
-  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902),
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1893),
   was 51 lines long and had five independent defects in them. What makes it
   worth writing up as one entry rather than five is that each defect made the
   next one undetectable.
@@ -7710,12 +7710,12 @@ enumerators — so the live half of this component was never affected.
 
   **Nothing throttled it because the state that would have throttled it was
   being deleted.**
-  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902)
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1893)
   clears `curr_tm_day` on entry and sets it only once a time has actually been
   parsed, so a failure leaves it clear — which is correct, and is the signal the
   caller reads to tell a failure from a success. But the caller's response to
   that signal, in
-  [`ISSUNSTATE_get_suntime`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L514),
+  [`ISSUNSTATE_get_suntime`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L470),
   was to delete the whole `user_arg` block. The next evaluation therefore
   allocated a fresh zeroed one and started over from nothing. Any attempt to
   remember "I just failed, wait a bit" had nowhere to live: the block holding it
@@ -7734,7 +7734,7 @@ enumerators — so the live half of this component was never affected.
   header beside them
   ([HOW OFTEN A FAILED LOOKUP IS RETRIED](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.h#L178)).
   The hub-side state is one new field,
-  [`backoff`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L119),
+  [`backoff`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.h#L155),
   of type
   [`s_suntime_backoff_t`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_suntime.h#L276).
 
@@ -7771,7 +7771,7 @@ enumerators — so the live half of this component was never affected.
   test.** `ISSUNSTATE_get_offs_tmval`, `ISSUNSTATE_eval_range` and
   `ISSUNSTATE_check_flag_result` all gate on `0 != user_data->sunstate_mode`, so
   clearing that single field
-  ([`sunstate_mode`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L616))
+  ([`sunstate_mode`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L572))
   makes every one of them skip the scene exactly as a NULL `user_arg` did. It is
   safe to clear because it is not configuration — it is re-read from
   `curr_sunstate_mode` on every re-entry. `moment_valid` is cleared with it;
@@ -7780,7 +7780,7 @@ enumerators — so the live half of this component was never affected.
   suntime that has since been discarded is an invariant waiting to be broken by
   whoever adds the next reader. The per-second `TRACE_S` is also now behind the
   gate rather than in front of it
-  ([when_methods_helper_functions.c:547](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L547)):
+  ([when_methods_helper_functions.c:503](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L503)):
   it was flooding the log at the same rate the connections were flooding the
   wire, and the withheld path is deliberately silent, because the attempt that
   started the backoff already said what was wrong and when the next one would
@@ -7788,7 +7788,7 @@ enumerators — so the live half of this component was never affected.
 
   **One case changes more than the rate, and it is reported because it is the
   worst one**
-  ([when_methods_helper_functions.c:597](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L597)).
+  ([when_methods_helper_functions.c:553](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L553)).
   Of the three failure conditions, two leave `curr_tm_day` at 0 and so stay on
   the ladder. The third — `tmoffs_type` UNDEFINED, meaning the offset field
   holds something that is not `intime`, `before` or `after` — is reached with
@@ -8085,7 +8085,7 @@ enumerators — so the live half of this component was never affected.
 - **The isSunState fix in the previous section was not affected by any of
   this**, which was established by reading the call site rather than assumed
   from the shared subject matter:
-  [`ezlopi_core_scenes_when_methods_helper_functions.c#L1911`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1911)
+  [`ezlopi_core_scenes_when_methods_helper_functions.c#L1902`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902)
   calls `EZPI_core_nvs_read_latidtude_longitude()` directly and never touches
   the cache. The blast radius of the stale-cache defect was `hub.info.get`
   alone.
@@ -9755,8 +9755,10 @@ enumerators — so the live half of this component was never affected.
 - **The citations in these documents are now checked**, by
   [`check_doc_citations.py`](tests/ci/check_doc_citations.py) — the twentieth
   check and the seventeenth the `hygiene` job invokes. This file is the main
-  thing this fork produces, and these documents carry 310 markdown links,
-  most of them with a `#L<n>` fragment. Line numbers move whenever anything
+  thing this fork produces, and these documents carry 446 markdown links,
+  310 of them with a `#L<n>` fragment. (This said 310 *links* when the entry
+  was written; it is re-measured whenever a paragraph below quotes it.) Line
+  numbers move whenever anything
   above them is edited, and nothing in the toolchain notices: a link to a
   renamed file, or to a line past the end of one, renders as ordinary text and
   reads as evidence. Entries here turn on specific lines — "returns `NULL` on
@@ -9775,7 +9777,11 @@ enumerators — so the live half of this component was never affected.
   says `#L456`, or the link text is one backticked code token that is not on
   the cited line. What it still cannot do is judge a citation whose text is
   prose: "appended", "the per-chunk dump" and the like have nothing to check
-  against, and 150 of the 200 citations with a line fragment are in that class.
+  against. **77** of the **310** citations with a line fragment are in that
+  class — the fourth rule bears on the **131** that are a single backticked
+  token and the third on the **102** whose text ends `:N`. This said "150 of
+  the 200" when the rule was added; the proportion improved because citing by
+  token became the habit here, not because the rule was loosened.
   The docstring says so, so that a green run is not read as more than it is.
   Links to directories are skipped, because `tests/host/` is linked that way
   deliberately.
@@ -9829,6 +9835,63 @@ enumerators — so the live half of this component was never affected.
   hardcoding them: a self-test for citation rot that could itself rot would be
   testing something weaker than the rule, and a needle that stops matching
   raises rather than quietly turning the fixture into a no-op.
+
+  **It then went red a third time, on 24 citations, and they are repaired.**
+  All 24 pointed into
+  [`ezlopi_core_scenes_when_methods_helper_functions.c`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c),
+  from entries written before the later scenes work edited that file. Two
+  distinct shifts — **−44** and **−9** — so two separate commits moved them,
+  and neither re-read what rested on the lines it was moving. The check's own
+  docstring already recorded this happening twice; this is the third and the
+  largest, which is the argument for the rule existing rather than against it.
+
+  **Three of the 24 had moved file, not line**, and that is the interesting
+  class. `s_sunstate_data_t` was relocated from the `.c` into the header so a
+  host test could construct it, taking
+  [`moment_tm_day`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.h#L143),
+  [`moment_valid`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.h#L144)
+  and
+  [`backoff`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.h#L155)
+  with it. Nothing but the fourth rule can see that: the `.c` still exists, so
+  MISSING passes, and it is 2338 lines long, so SHORT passes on a citation of
+  line 108. The `.c` carries a comment at
+  [`line 72`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L72)
+  saying where the type went, which is how the new lines were found.
+
+  **Four more citations into the same file were invisible to the check and were
+  re-read by hand.** 28 lines carried a citation into it when the gate went
+  red, and 24 of the 28 were flagged. Two of
+  the four are worth naming, because they show what the third rule is and is
+  not: their link text ended `:547` and `:597` and their own fragments said
+  `#L547` and `#L597`, so MISMATCH compared the pair, found them consistent,
+  and passed. MISMATCH asks whether a citation agrees with itself, not whether
+  it is true, and two numbers that rot together rot invisibly. They are now
+  `:503` — the
+  [`EZPI_core_suntime_should_attempt`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L503)
+  gate the per-second `TRACE_S` moved behind — and `:553`, the comment the
+  paragraph above quotes. The other two were a prose link text and a path used
+  as a label, which no rule touches.
+
+  **Each of the 17 distinct targets behind those 28 citations was re-derived
+  from the token it names, not from a shift applied to the old number.** That
+  is not pedantry here: the shifts
+  were −44, −9, and two file moves, in one file, so any citation renumbered by
+  assuming a uniform offset would have been wrong in a way the check cannot
+  distinguish from right — the token would simply be somewhere else.
+
+  After the repair the gate exits **0**: 14 fixtures behaving as declared — the
+  4 that must fire firing, the 10 that must not staying clean — and **446**
+  links examined across six documents with no finding. Both halves are read,
+  because `main()` returns 1 for either and a quiet run proves neither.
+
+  **One limitation was measured and left alone.** `main()` lists `*.md` in a
+  single directory, so `docs/` is unscanned — and widening that glob would
+  cover almost nothing, because `LINK` requires a repo-root-relative path and
+  every citation in a subdirectory document is written `../ezlopi-core/…`,
+  which begins with a dot. The three files in `docs/` carry **23** local links
+  and the regex can see exactly **1**. Covering them means resolving each link
+  against its own document's directory. That is a real change, not a wider
+  glob, and it is recorded rather than attempted here.
 - Added this file and [SECURITY.md](SECURITY.md).
 
 ---
@@ -10021,11 +10084,11 @@ Listed because a changelog that only mentions what was finished is misleading.
   shift and now the retry policy were all extracted so that they could be
   tested, and they have **277** assertions between them. The two functions that
   call them still have none.
-  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1902)
+  [`__issunsate_update_sunstate_tm`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L1893)
   needs a radio: a test for it means a seam at `EZPI_core_http_mbedtls_req` — a
   function pointer or a weak symbol — which is a larger change to the HTTP
   component than this defect warranted.
-  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L630)
+  [`ISSUNSTATE_get_offs_tmval`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L586)
   needs a populated scene, a field list and a `struct tm`, so the once-per-day
   recomputation and the `e_type` gate are likewise argued rather than
   demonstrated.
@@ -10034,7 +10097,7 @@ Listed because a changelog that only mentions what was finished is misleading.
   one.** Its *policy* — the 60 s to 32 min ladder, the day rollover, the
   saturation, the inclusive deadline — is three pure functions with 71
   assertions and a 28-mutant sweep behind them. Its *wiring* — that
-  [`ISSUNSTATE_get_suntime`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L514)
+  [`ISSUNSTATE_get_suntime`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L470)
   asks before the lookup, records the outcome after it, and keeps the `user_arg`
   block instead of deleting it — is in the untestable half, and is supported by
   reading, by an argument about which fields each reader gates on, and by a
@@ -10043,7 +10106,7 @@ Listed because a changelog that only mentions what was finished is misleading.
   stated here rather than left to be inferred, because the entry below reports a
   lot of green and only half of it is the kind that can go red.
 
-  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
+  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L662)
   **was** a third function in this half, and this paragraph used to end: *"Mutating
   the layout fails a check; deleting the guard fails nothing."* **That is no
   longer true, and the correction is the useful part.** The premise was always
@@ -10117,8 +10180,8 @@ Listed because a changelog that only mentions what was finished is misleading.
 
   **The same union-without-its-tag read is still present two lines away, and
   was deliberately not fixed in that change.**
-  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
-  gates on [`value_string`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L743)
+  [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L662)
+  gates on [`value_string`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L699)
   being non-NULL for its `EZLOPI_VALUE_TYPE_TOKEN` field, with
   no `e_type` check, and the `cJSON_Object` arm of field population stores
   `VALUE_TYPE_CJSON` for any value_type it does not name — `TOKEN` is not among
