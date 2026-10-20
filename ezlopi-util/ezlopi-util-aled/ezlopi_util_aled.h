@@ -214,6 +214,81 @@ extern "C"
                           uint8_t *out,
                           size_t out_cap);
 
+    /**
+     * @brief Fill a whole strip with one colour, in wire order.
+     *
+     * @param   color       the colour, in caller order (r,g,b,w)
+     * @param   n_pixels    how many pixels to write
+     * @param   order       the chip's byte order
+     * @param   brightness  applied to every channel via EZPI_aled_scale8
+     * @param   has_white   true to emit the white byte after the three colours
+     * @param   out         destination
+     * @param   out_cap     how many bytes `out` can hold
+     * @return  bytes written, or 0 if nothing was written
+     *
+     * Same contract as EZPI_aled_pack: all or nothing, and 0 for a NULL
+     * destination, an order outside the six, no pixels, or a destination too
+     * small.
+     *
+     * This exists rather than leaving callers to call EZPI_aled_pack with an
+     * n-pixel array because a solid fill is what every caller in this firmware
+     * actually does, and the array it would need is the problem: at the
+     * 2048-pixel cap it is an 8 KB temporary, allocated to hold 2048 copies of
+     * four bytes, on a heap where the strip's own frame buffer is the thing
+     * most likely to fail to allocate.
+     *
+     * The order permutation is not reimplemented here. One pixel goes through
+     * EZPI_aled_pack and the remaining pixels are byte copies of the result,
+     * so the knowledge of which channel goes first exists in exactly one
+     * function in this component. A second loop that permuted channels itself
+     * would be a second place for the order to be wrong, and the two would
+     * disagree only for the orders nobody tested.
+     */
+    size_t EZPI_aled_fill(s_aled_rgbw_t color,
+                          size_t n_pixels,
+                          e_aled_order_t order,
+                          uint8_t brightness,
+                          bool has_white,
+                          uint8_t *out,
+                          size_t out_cap);
+
+    /**
+     * @brief Read the first pixel back out of a wire buffer.
+     *
+     * @param   wire        the packed bytes
+     * @param   wire_len    how many bytes `wire` holds
+     * @param   order       the chip's byte order
+     * @param   has_white   true if the buffer carries a white byte per pixel
+     * @param   out         the colour, in caller order (r,g,b,w)
+     * @return  true if `out` was written
+     *
+     * The inverse of the permutation EZPI_aled_pack applies, and it exists for
+     * one caller: reporting a strip's current colour to the cloud. The colour
+     * is not stored anywhere else -- the wire buffer *is* the state -- so
+     * answering "what colour is this strip" means reading it back, and reading
+     * it back means knowing the byte order. Before this existed the only
+     * read-back in the firmware indexed the buffer as green-red-blue with
+     * three integer literals, which is correct for the one order it was
+     * written for and silently reports the wrong colour for the other five.
+     *
+     * **Brightness is not undone, and cannot be.** EZPI_aled_scale8 is lossy,
+     * so this returns the channel values as they sit on the wire, already
+     * scaled. For the caller that matters this is the right answer rather than
+     * a limitation: a hub reports colour and brightness as separate items, and
+     * the brightness is read from its own field. Stated here because
+     * `unpack(fill(c)) == c` is a property that holds at brightness 255 and
+     * only there, and a reader who assumed otherwise would be building a
+     * round-trip on sand.
+     *
+     * `w` is set to 0 rather than left alone when `has_white` is false, so a
+     * caller cannot read a white channel that was never on the wire.
+     */
+    bool EZPI_aled_unpack_first(const uint8_t *wire,
+                                size_t wire_len,
+                                e_aled_order_t order,
+                                bool has_white,
+                                s_aled_rgbw_t *out);
+
 #ifdef __cplusplus
 }
 #endif

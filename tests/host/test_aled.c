@@ -543,6 +543,270 @@ static void test_wire_len_refuses_to_wrap(void)
           "the largest non-wrapping RGBW count is still accepted");
 }
 
+/* ------------------------------------------------------------------------- *
+ * 8. A solid fill, and reading the first pixel back.
+ *
+ * These two are the pair that lets a strip be driven in any of the six orders
+ * instead of only the one the vendored component's type table names. So the
+ * thing worth checking hardest is not that they agree with each other -- they
+ * would agree just as well if the order table were shuffled, and a round-trip
+ * test is exactly what cannot see that. The expectations below are derived from
+ * the three-letter *names* of the orders, written out here, so a table whose
+ * rows were permuted against the enum fails them.
+ *
+ * The existing section 4 does this for three orders using hand-written
+ * expectations. This does it for all six, computed from the names, at every
+ * pixel of a multi-pixel strip and in both channel widths.
+ * ------------------------------------------------------------------------- */
+static const struct
+{
+    const char *name;
+    e_aled_order_t order;
+} k_named_orders[] = {
+    {"grb", ALED_ORDER_GRB},
+    {"rgb", ALED_ORDER_RGB},
+    {"brg", ALED_ORDER_BRG},
+    {"rbg", ALED_ORDER_RBG},
+    {"gbr", ALED_ORDER_GBR},
+    {"bgr", ALED_ORDER_BGR},
+};
+
+/* The channel value a name's letter stands for, for one chosen pixel. */
+static uint8_t channel_named(char letter, s_aled_rgbw_t px)
+{
+    switch (letter)
+    {
+    case 'r':
+        return px.r;
+    case 'g':
+        return px.g;
+    case 'b':
+        return px.b;
+    default:
+        return 0xFF; /* not a channel letter; guarantees a mismatch */
+    }
+}
+
+static void test_fill_writes_every_pixel_in_the_named_order(void)
+{
+    /* Four distinguishable values, none of them equal, so a dropped or
+     * duplicated channel cannot hide behind a coincidence. */
+    const s_aled_rgbw_t px = {10, 20, 30, 40};
+    const int n_orders = (int)(sizeof(k_named_orders) / sizeof(k_named_orders[0]));
+    char what[220];
+
+    CHECK(6 == n_orders, "all six orders are named here, not a subset");
+
+    for (int i = 0; i < n_orders; i++)
+    {
+        const char *name = k_named_orders[i].name;
+        const e_aled_order_t order = k_named_orders[i].order;
+
+        for (int white = 0; white <= 1; white++)
+        {
+            const bool has_white = (1 == white);
+            const size_t stride = has_white ? 4u : 3u;
+            const size_t n_pixels = 7u; /* not a power of two, not 1 */
+            uint8_t buf[7u * 4u];
+            size_t wrong_bytes = 0u;
+            size_t n;
+
+            memset(buf, 0xAA, sizeof(buf));
+            n = EZPI_aled_fill(px, n_pixels, order, 255, has_white,
+                               buf, n_pixels * stride);
+
+            snprintf(what, sizeof(what),
+                     "fill(%s, rgbw=%d) writes %u bytes for seven pixels",
+                     name, white, (unsigned)(n_pixels * stride));
+            CHECK((n_pixels * stride) == n, what);
+
+            /* Every pixel, not just the first: the copy loop is the part that
+             * could stop one pixel short or overlap by a byte, and a strip
+             * whose last pixel is a stale 0xAA is a strip with one wrong LED
+             * at the far end -- the least likely thing to be noticed. */
+            for (size_t p = 0u; p < n_pixels; p++)
+            {
+                for (size_t j = 0u; j < 3u; j++)
+                {
+                    if (buf[(p * stride) + j] != channel_named(name[j], px))
+                    {
+                        wrong_bytes++;
+                    }
+                }
+                if (has_white && (buf[(p * stride) + 3u] != px.w))
+                {
+                    wrong_bytes++;
+                }
+            }
+
+            snprintf(what, sizeof(what),
+                     "fill(%s, rgbw=%d) puts the right channel in every byte of "
+                     "all seven pixels; %u byte(s) wrong",
+                     name, white, (unsigned)wrong_bytes);
+            CHECK(0u == wrong_bytes, what);
+
+            /* One pixel is the pre-existing shipped configuration and the
+             * default the resolver hands back, so it gets its own check rather
+             * than riding on the seven-pixel loop. */
+            memset(buf, 0xAA, sizeof(buf));
+            CHECK(stride == EZPI_aled_fill(px, 1u, order, 255, has_white, buf, stride),
+                  "a one-pixel strip is filled too -- the pre-existing default");
+        }
+    }
+}
+
+static void test_fill_refuses_instead_of_overrunning(void)
+{
+    const s_aled_rgbw_t px = {1, 2, 3, 4};
+    uint8_t out[16];
+
+    memset(out, 0xAA, sizeof(out));
+    CHECK(0 == EZPI_aled_fill(px, 2, ALED_ORDER_GRB, 255, false, out, 5),
+          "a destination one byte too small is refused, not partly filled");
+    CHECK((0xAA == out[0]) && (0xAA == out[1]) && (0xAA == out[2]),
+          "...and nothing at all was written");
+
+    CHECK(6 == EZPI_aled_fill(px, 2, ALED_ORDER_GRB, 255, false, out, 6),
+          "a destination of exactly the needed size is accepted");
+
+    memset(out, 0xAA, sizeof(out));
+    CHECK(0 == EZPI_aled_fill(px, 2, ALED_ORDER_GRB, 255, true, out, 6),
+          "six bytes is too few for two RGBW pixels");
+    CHECK(8 == EZPI_aled_fill(px, 2, ALED_ORDER_GRB, 255, true, out, 8),
+          "...and eight is what they need");
+
+    memset(out, 0xAA, sizeof(out));
+    CHECK(0 == EZPI_aled_fill(px, 1, ALED_ORDER_MAX, 255, false, out, sizeof(out)),
+          "the sentinel order is refused by fill as well as by pack");
+    CHECK(0 == EZPI_aled_fill(px, 1, (e_aled_order_t)99, 255, false, out, sizeof(out)),
+          "an order of 99 is refused rather than indexing the table off its end");
+    CHECK(0 == EZPI_aled_fill(px, 1, (e_aled_order_t)-1, 255, false, out, sizeof(out)),
+          "a negative order arriving through an int-shaped field is refused");
+    CHECK(0xAA == out[0], "none of the three invalid orders wrote anything");
+
+    CHECK(0 == EZPI_aled_fill(px, 1, ALED_ORDER_GRB, 255, false, NULL, 16),
+          "a NULL destination is refused");
+    CHECK(0 == EZPI_aled_fill(px, 0, ALED_ORDER_GRB, 255, false, out, sizeof(out)),
+          "a strip of no pixels writes nothing");
+    CHECK(0 == EZPI_aled_fill(px, SIZE_MAX, ALED_ORDER_GRB, 255, false, out, sizeof(out)),
+          "a pixel count that would wrap the byte count is refused, not wrapped");
+
+    /* Brightness reaches fill, which is not obvious: it is applied inside the
+     * one-pixel pack and then copied, so a fill that scaled nothing would still
+     * produce a uniform strip of the wrong brightness. */
+    memset(out, 0xAA, sizeof(out));
+    CHECK(8 == EZPI_aled_fill((s_aled_rgbw_t){200, 100, 50, 25}, 2,
+                              ALED_ORDER_RGB, 128, true, out, 8),
+          "fill with a brightness writes a full frame");
+    CHECK((EZPI_aled_scale8(200, 128) == out[0]) &&
+              (EZPI_aled_scale8(100, 128) == out[1]) &&
+              (EZPI_aled_scale8(50, 128) == out[2]) &&
+              (EZPI_aled_scale8(25, 128) == out[3]),
+          "...with brightness applied to all four channels of the first pixel");
+    CHECK((out[4] == out[0]) && (out[5] == out[1]) &&
+              (out[6] == out[2]) && (out[7] == out[3]),
+          "...and the second pixel is the same dimmed colour, not the full one");
+}
+
+static void test_unpack_inverts_the_named_order(void)
+{
+    const s_aled_rgbw_t px = {10, 20, 30, 40};
+    const int n_orders = (int)(sizeof(k_named_orders) / sizeof(k_named_orders[0]));
+    char what[220];
+
+    for (int i = 0; i < n_orders; i++)
+    {
+        const char *name = k_named_orders[i].name;
+        const e_aled_order_t order = k_named_orders[i].order;
+
+        for (int white = 0; white <= 1; white++)
+        {
+            const bool has_white = (1 == white);
+            const size_t stride = has_white ? 4u : 3u;
+            uint8_t buf[4];
+            s_aled_rgbw_t got = {0, 0, 0, 0};
+
+            /* The wire bytes are written here from the order's *name*, not by
+             * calling fill. So this is not a round-trip: it is unpack checked
+             * against an independently constructed buffer, which is what makes
+             * it able to catch a table that is wrong in both directions at
+             * once. */
+            for (size_t j = 0u; j < 3u; j++)
+            {
+                buf[j] = channel_named(name[j], px);
+            }
+            buf[3] = px.w;
+
+            CHECK(EZPI_aled_unpack_first(buf, stride, order, has_white, &got),
+                  "unpack accepts a buffer of exactly one pixel");
+
+            snprintf(what, sizeof(what),
+                     "unpack(%s, rgbw=%d) recovers r,g,b from the wire bytes "
+                     "(got %d,%d,%d)",
+                     name, white, got.r, got.g, got.b);
+            CHECK((10 == got.r) && (20 == got.g) && (30 == got.b), what);
+
+            snprintf(what, sizeof(what),
+                     "unpack(%s, rgbw=%d) reports white as %d",
+                     name, white, got.w);
+            CHECK((has_white ? 40 : 0) == got.w, what);
+
+            /* And the round trip, which adds the claim that fill and unpack
+             * agree -- weaker than the above, but it is the property the
+             * driver depends on. */
+            {
+                uint8_t wire[4];
+                s_aled_rgbw_t back = {0, 0, 0, 0};
+                CHECK(stride == EZPI_aled_fill(px, 1, order, 255, has_white, wire, stride),
+                      "fill writes one pixel for the round trip");
+                CHECK(EZPI_aled_unpack_first(wire, stride, order, has_white, &back),
+                      "...which unpack reads back");
+                CHECK((px.r == back.r) && (px.g == back.g) && (px.b == back.b) &&
+                          ((has_white ? px.w : 0) == back.w),
+                      "...to the colour that went in, at brightness 255");
+            }
+        }
+    }
+
+    /* Brightness is not undone, and the header says so. Pinned, because a
+     * caller reading this back to report a colour to the cloud will see the
+     * dimmed value and the alternative reading -- that it reverses the scaling
+     * -- is impossible rather than merely unimplemented. */
+    {
+        uint8_t wire[3];
+        s_aled_rgbw_t back = {0, 0, 0, 0};
+        EZPI_aled_fill(px, 1, ALED_ORDER_RGB, 128, false, wire, sizeof(wire));
+        CHECK(EZPI_aled_unpack_first(wire, sizeof(wire), ALED_ORDER_RGB, false, &back),
+              "a dimmed frame unpacks");
+        CHECK(EZPI_aled_scale8(10, 128) == back.r,
+              "...to the dimmed channel value, not the original -- scale8 is "
+              "lossy and this does not pretend to invert it");
+    }
+
+    /* Refusals. */
+    {
+        uint8_t wire[4] = {1, 2, 3, 4};
+        s_aled_rgbw_t back;
+
+        CHECK(false == EZPI_aled_unpack_first(NULL, 4, ALED_ORDER_GRB, false, &back),
+              "a NULL wire buffer is refused");
+        CHECK(false == EZPI_aled_unpack_first(wire, 4, ALED_ORDER_GRB, false, NULL),
+              "a NULL destination is refused");
+        CHECK(false == EZPI_aled_unpack_first(wire, 2, ALED_ORDER_GRB, false, &back),
+              "two bytes is too few for an RGB pixel -- refused, not read past");
+        CHECK(false == EZPI_aled_unpack_first(wire, 3, ALED_ORDER_GRB, true, &back),
+              "three bytes is too few for an RGBW pixel, which is the read past "
+              "the end that an is_rgbw mismatch would cause");
+        CHECK(true == EZPI_aled_unpack_first(wire, 3, ALED_ORDER_GRB, false, &back),
+              "...while exactly three is enough for RGB, so the bound is not "
+              "one too strict");
+        CHECK(false == EZPI_aled_unpack_first(wire, 4, (e_aled_order_t)99, false, &back),
+              "an order of 99 is refused");
+        CHECK(false == EZPI_aled_unpack_first(wire, 4, ALED_ORDER_MAX, false, &back),
+              "the sentinel order is refused");
+    }
+}
+
 int main(void)
 {
     test_scale8_over_its_whole_domain();
@@ -554,6 +818,9 @@ int main(void)
     test_pack_refuses_instead_of_overrunning();
     test_brightness_is_applied_at_pack_time();
     test_wire_len_refuses_to_wrap();
+    test_fill_writes_every_pixel_in_the_named_order();
+    test_fill_refuses_instead_of_overrunning();
+    test_unpack_inverts_the_named_order();
 
     /* Bare, with no "test_aled: " prefix: "N check(s), M failure(s)" is the
      * shape the suite's aggregate tally reads, and a prefixed line matches

@@ -12,6 +12,8 @@
  *          means for it.
  */
 
+#include <string.h>
+
 #include "ezlopi_util_aled.h"
 
 /* Which of r,g,b goes out first, second and third, indexed by e_aled_order_t.
@@ -223,4 +225,94 @@ size_t EZPI_aled_pack(const s_aled_rgbw_t *pixels,
     }
 
     return written;
+}
+
+size_t EZPI_aled_fill(s_aled_rgbw_t color,
+                      size_t n_pixels,
+                      e_aled_order_t order,
+                      uint8_t brightness,
+                      bool has_white,
+                      uint8_t *out,
+                      size_t out_cap)
+{
+    const size_t stride = has_white ? 4u : 3u;
+    size_t needed = 0u;
+    size_t at = 0u;
+
+    if (NULL == out)
+    {
+        return 0u;
+    }
+
+    needed = EZPI_aled_wire_len(n_pixels, has_white);
+    if ((0u == needed) || (needed > out_cap))
+    {
+        return 0u;
+    }
+
+    /* The first pixel goes through the real packer, which is what validates
+    ** `order` and applies both the permutation and the brightness. Capacity is
+    ** given as `stride` and not as `out_cap`, so a packer that ever wrote more
+    ** than one pixel's worth here would be refused by its own bound rather
+    ** than scribble over the rest of the frame. */
+    if (stride != EZPI_aled_pack(&color, 1u, order, brightness, has_white, out, stride))
+    {
+        return 0u;
+    }
+
+    /* Every later pixel is a byte-for-byte copy of the first. `needed` is an
+    ** exact multiple of `stride` by construction -- EZPI_aled_wire_len
+    ** multiplies by it -- so the last copy lands exactly on the end and this
+    ** cannot write a partial pixel. */
+    for (at = stride; at < needed; at += stride)
+    {
+        memcpy(out + at, out, stride);
+    }
+
+    return needed;
+}
+
+bool EZPI_aled_unpack_first(const uint8_t *wire,
+                            size_t wire_len,
+                            e_aled_order_t order,
+                            bool has_white,
+                            s_aled_rgbw_t *out)
+{
+    const size_t stride = has_white ? 4u : 3u;
+    uint8_t channel[3] = {0, 0, 0};
+
+    if ((NULL == wire) || (NULL == out))
+    {
+        return false;
+    }
+
+    /* Same bound, same reason as in EZPI_aled_pack: an order that came from a
+    ** configuration JSON is an int wearing an enum's type, and an unchecked
+    ** one indexes k_order_idx off its end. */
+    if ((unsigned)order >= (unsigned)ALED_ORDER_MAX)
+    {
+        return false;
+    }
+
+    if (wire_len < stride)
+    {
+        return false;
+    }
+
+    /* The inverse permutation, written as the same table read backwards rather
+    ** than as a second table. k_order_idx[order][j] says which channel the
+    ** byte at wire position j holds, so assigning *into* that channel index
+    ** inverts it. A separate inverse table would be six more rows to get
+    ** wrong, and wrong in a way that pack/unpack round-trip tests cannot see
+    ** if both are wrong consistently. */
+    channel[k_order_idx[order][0]] = wire[0];
+    channel[k_order_idx[order][1]] = wire[1];
+    channel[k_order_idx[order][2]] = wire[2];
+
+    out->r = channel[0];
+    out->g = channel[1];
+    out->b = channel[2];
+    out->w = has_white ? wire[3] : 0u;
+
+    return true;
 }
