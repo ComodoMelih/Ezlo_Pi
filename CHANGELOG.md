@@ -1680,9 +1680,9 @@ None of these have been exercised on physical hardware; see Known gaps.
 ### Device settings — [bug]
 
 - **The ENS160 compensated its air-quality readings against a heap address.**
-  [`ENS160_get_ambient_temp_setting`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L138)
+  [`ENS160_get_ambient_temp_setting`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L165)
   and
-  [`ENS160_get_relative_humidity_setting`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L155)
+  [`ENS160_get_relative_humidity_setting`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L182)
   cast the *settings node* to the driver's payload type and read the first
   member:
 
@@ -1736,7 +1736,9 @@ None of these have been exercised on physical hardware; see Known gaps.
   `TRACE_E` was added so it is not silent.
 
   Evidenced by [`tests/host/test_ens160set.c`](tests/host/test_ens160set.c) —
-  18 checks, and the first device-settings file in the host suite. It calls the
+  the first device-settings file in the host suite, 18 checks for this defect
+  and 29 in total once the allocation-failure defects below were added to it.
+  It calls the
   real `ENS160_gas_sensor_settings_init()` and the real getters rather than
   re-typing the expression and checking its own arithmetic, which would have
   passed on the broken file. Six functions are stubbed, the list learned from
@@ -1789,7 +1791,166 @@ None of these have been exercised on physical hardware; see Known gaps.
   And the two citations to the getters above had to move from `#L137`/`#L154`
   to `#L138`/`#L155` for exactly that reason. The citation gate described below
   caught them, inside the same commit that wrote them, which is the smallest
-  possible demonstration of why it exists.
+  possible demonstration of why it exists. They moved a second time, to
+  `#L165`/`#L182`, when the allocation-failure fix below added comments ahead of
+  them — same gate, same commit, so the pair has now been re-derived twice
+  rather than carried.
+
+- **A settings allocation that did not fit rebooted the hub, and would have
+  corrupted the settings list if it had not.** Two defects on the same path in
+  the same file, fixed together because fixing either one alone makes things
+  worse.
+
+  The reboot first, because it is the one that shipped.
+  [`ENS160_gas_sensor_settings_init`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L128)
+  wrapped both of its initializers in `ESP_ERROR_CHECK`, and so did all four
+  cloud-facing dispatchers —
+  [`__settings_get`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L469),
+  `__settings_set`, `__settings_update`, `__settings_reset`. Ten sites. Every
+  callee is a plain `int` returning 1 on failure, not an `esp_err_t`, and
+  `ESP_ERROR_CHECK` aborts on *any* non-zero value. Which abort depends on the
+  build: this project sets `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y`
+  and defines no `NDEBUG`, so the macro expands to the
+  `_esp_error_check_failed()` variant — a panic and a reboot, in the shipped
+  configuration, not a stripped-out assert. A function whose contract is
+  *"return 1 on failure"* was therefore a reboot switch at each of those ten
+  sites.
+
+  The nineteen-site version of this had already been measured across the tree
+  before the scope was chosen: **102** `ESP_ERROR_CHECK` call sites with a
+  direct function call, **39** of them on a callee that returns only plain
+  `int`. Ten in this file, 19 in `hilink_presence_sensor_setting.c`, 9 in
+  `pms_dev_items_prepare.c`, 1 in `sensor_0067_hilink_presence_sensor.c`. Only
+  this file's ten are fixed here, because only this file has a host test; the
+  other 29 are recorded under Known gaps. They are not one change — the hilink
+  file carries its own copy of this pair plus three further defects on the same
+  path, and merging them into this commit would mean changing 29 sites with
+  evidence for 10.
+
+  Four of those ten are reached from the cloud, through
+  `l_ezlopi_device_settings_v3_t::func`, whenever the hub serves
+  `hub.device.settings`, a setting value set, a setting reset, or a settings
+  broadcast. Each per-setting helper returns 1 when the setting has no payload
+  — which is precisely the state a failed allocation leaves behind — so the
+  first cloud read of a setting that failed to initialize rebooted the hub, and
+  would have gone on rebooting it on every retry.
+
+  All four dispatchers also opened with `int ret = ret = 0;` — a
+  self-assignment, and `ret` was never written again, so each returned 0
+  whatever happened. `__settings_callback` then discarded those four returns in
+  turn, which is what made the dead `ret` invisible. Both are fixed: the
+  dispatchers OR in what ran and log it, and the callback assigns. It is worth
+  being plain that this does not reach the cloud: every settings `func()` call
+  site in `ezlopi-cloud-settings` discards the return, so the cloud receives a
+  settings object with no value in it rather than an error. That is a defect in
+  the shared cloud layer, is not fixed in this file, and is recorded under Known
+  gaps. The change that matters here is that the hub stays up.
+
+  The second defect is why the first could not simply be deleted. On a failed
+  payload allocation both initializers called
+  `ezlopi_free(__FUNCTION__, ens160_..._sensor_setting)` — a node that is not
+  theirs to free.
+  [`EZPI_core_device_add_settings_to_device_v3`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.c#L119)
+  has already appended it to `device->settings` by that point, so freeing it
+  leaves that list holding a dangling pointer.
+
+  How soon that is read is sharper than expected, and was measured rather than
+  reasoned about: re-breaking the first setting's free and running under
+  AddressSanitizer reports the use-after-free inside
+  `add_settings_to_device_v3`'s own tail walk, on the **second** call — the next
+  line of the same init function, looking for the tail to append to. The node is
+  dangling before initialization has finished; it does not wait for the cloud.
+  So removing the `ESP_ERROR_CHECK` on its own would have converted a reboot
+  into a live use-after-free, which is worse, and that is the reason these two
+  are one commit.
+
+  Both nodes are now left linked with `user_arg` still `NULL`, and the failure
+  is logged and returned. That is safe because every callback in the file
+  already tests `user_arg` before using it, and both getters report `0.0f` for
+  it — which is why `0.0f` was kept as the no-payload return in the fix above
+  rather than raised to the 25/50 defaults. A setting that failed to initialize
+  reads as unavailable instead of as a working default.
+
+  Evidenced by 11 more checks in
+  [`tests/host/test_ens160set.c`](tests/host/test_ens160set.c), which needed one
+  thing it did not have: an allocation that can be made to fail.
+  [`tests/host/stubs-ens160/EZLOPI_USER_CONFIG.h`](tests/host/stubs-ens160/EZLOPI_USER_CONFIG.h)
+  routes `ezlopi_malloc` and `ezlopi_free` through two functions the test
+  defines, and is on the include path of **the subject only** — `cjext.c`
+  allocates through the same macro, and sharing the header would have put
+  cJSON's allocations into the same failure budget and made *which* allocation
+  failed depend on how cJSON is implemented. An `nm -u` guard in the Makefile
+  asserts the subject object really references the wrapper, since if the
+  include order ever slipped the checks would be exercising a `malloc` that
+  cannot fail. Both wrappers call libc underneath, so ASan sees the same blocks
+  and the same frees it would have seen through the plain macros.
+
+  Seen red first, three separate times, because the three things fixed fail in
+  three different ways and only one of them is a failed check:
+
+  | Re-break | What it reports | rc |
+  | --- | --- | --- |
+  | `ESP_ERROR_CHECK` back on the first initializer | `ESP_ERROR_CHECK(1) failed`, no tally printed at all | 134 |
+  | the first node's `ezlopi_free` back | ASan heap-use-after-free in `add_settings_to_device_v3` | 1 |
+  | the second node's `ezlopi_free` back | 27 checks, 1 failure — *"the second node was not freed either"* | 1 |
+
+  The first row is the firmware's reboot reproduced exactly, since
+  `tests/host/stubs/esp_err.h` keeps the abort deliberately rather than
+  stubbing it out. The second is why the test's free log is not the whole story
+  and the comment on that test says so. The third is why the free log exists at
+  all: nothing walks the list after the second node is appended, so ASan sees
+  nothing there and the log is the only witness. Each was produced against the
+  fixed file and the file restored byte-identically between them, verified with
+  `cmp`.
+
+  One flaw in the test was found by running it rather than by reading it. The
+  first run against the unfixed subject printed the abort and nothing else:
+  `stdout` was fully buffered into a pipe, so every line already written was
+  lost with the buffer — including, on the third re-break above, a `FAIL` line
+  that had been printed correctly. `setvbuf(stdout, NULL, _IOLBF, 0)` now runs
+  first in `main`, and the two getter calls in the last case are guarded on
+  their own node so a freed node is reported as a failed check instead of
+  aborting past it.
+
+  | Target | `set-target` | build | diagnostics in the file | both getters + init in ELF | symbols read | image | vs. pre-fix |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | esp32 | 0 | 0 | 0 | yes | 13905 | `0x19d280` | −5 syms, −416 bytes |
+  | esp32s2 | 0 | 0 | 0 | yes | 10504 | `0x151640` | −5 syms, −448 bytes |
+  | esp32s3 | 0 | 0 | 0 | yes | 15195 | `0x1a0de0` | −5 syms, −432 bytes |
+  | esp32c3 | 0 | 0 | 0 | yes | 14042 | `0x1af160` | −5 syms, −448 bytes |
+
+  The image got *smaller* on all four, which is the opposite of what adding ten
+  log calls suggests, so the symbol column was followed rather than left as a
+  curiosity. The count fell by exactly five on each of the four targets; the
+  *names* were established on esp32 only, by diffing the full `nm` output
+  before and after, and the other three are recorded here as a matching count
+  and nothing more. That diff shows ten names present only in the pre-fix
+  build — five `__func__$N` and five `__FUNCTION__$N` — against five
+  `__FUNCTION__$N` present only in the fixed one.
+
+  The five `__func__$N` are the fix. `ESP_ERROR_CHECK` passes `__ASSERT_FUNC` to
+  `_esp_error_check_failed` (ESP-IDF `esp_err.h:118`), newlib's `assert.h`
+  resolves that to `__func__` under C99, and the macro was the only thing in the
+  file reaching it. The ten call sites sat in exactly **five** functions, two
+  apiece — `ENS160_gas_sensor_settings_init` and the four cloud dispatchers —
+  and each function emits one shared `__func__` string, so removing the macro
+  removed five strings, not ten. The `__FUNCTION__$N` count is five before and
+  after; only the counter suffix moves, which is a compiler-local numbering that
+  shifts when earlier strings disappear and carries no information.
+
+  Those five strings do not themselves account for 416 bytes, and the symbol
+  table cannot say what does: each site also passed `__FILE__` and a `#x`
+  stringification of its whole argument expression — here function names 60-odd
+  characters long — and those are anonymous string literals, which `nm` does not
+  list. The ten suppressed calls into `_esp_error_check_failed` are code rather
+  than data. So the five named symbols are the part of the shrink that was
+  identified by measurement, and the rest is attributed, not proven.
+
+  That diff was produced by rebuilding `esp32` in the same warm tree against the
+  subject restored to `HEAD`, then restoring the fix and rebuilding again: the
+  second rebuild returned to 13905 symbols and `0x19d280`, and the symbol list
+  matched the first run exactly. So the restore is proven through the compiler
+  and not only through `cmp`.
 
 - **A CI check for this cast was first declined on a count that was wrong.**
   The reasoning recorded while fixing the above was that the tree holds
@@ -5736,13 +5897,14 @@ flashed.**
   the four added for the serial block refuse to run at all if their edit
   matched nothing.
 
-- The full host suite is **6486** checks across **32** binaries, 0 failures,
+- The full host suite is **6497** checks across **32** binaries, 0 failures,
   with every binary reporting in the shape the aggregate greps for. The
   aggregate is re-run rather than adjusted whenever it changes; this figure is
-  what the run printed, not an arithmetic result. The two steps behind it:
+  what the run printed, not an arithmetic result. The steps behind it:
   **6390 + 61 + 17 = 6468** across 31 binaries, where the 6390 includes
-  `test_aled`'s 201, and then **+18** for `test_ens160set` as the 32nd binary.
-  The figure before this work was 6464.
+  `test_aled`'s 201, then **+18** for `test_ens160set` as the 32nd binary, and
+  then **+11** when the settings allocation-failure checks were added to that
+  same binary. The figure before this work was 6464.
 
 ### UUID utility — [bug]
 
@@ -9888,8 +10050,8 @@ enumerators — so the live half of this component was never affected.
 - **The citations in these documents are now checked**, by
   [`check_doc_citations.py`](tests/ci/check_doc_citations.py) — the twentieth
   check and the seventeenth the `hygiene` job invokes. This file is the main
-  thing this fork produces, and these documents carry 454 markdown links,
-  317 of them with a `#L<n>` fragment. (This said 310 *links* when the entry
+  thing this fork produces, and these documents carry 459 markdown links,
+  320 of them with a `#L<n>` fragment. (This said 310 *links* when the entry
   was written; it is re-measured whenever a paragraph below quotes it, and
   whenever an entry added above adds citations of its own.) Line
   numbers move whenever anything
@@ -9911,8 +10073,8 @@ enumerators — so the live half of this component was never affected.
   says `#L456`, or the link text is one backticked code token that is not on
   the cited line. What it still cannot do is judge a citation whose text is
   prose: "appended", "the per-chunk dump" and the like have nothing to check
-  against. **78** of the **317** citations with a line fragment are in that
-  class — the fourth rule bears on the **137** that are a single backticked
+  against. **78** of the **320** citations with a line fragment are in that
+  class — the fourth rule bears on the **140** that are a single backticked
   token and the third on the **102** whose text ends `:N`. This said "150 of
   the 200" when the rule was added; the proportion improved because citing by
   token became the habit here, not because the rule was loosened.
@@ -10033,6 +10195,45 @@ enumerators — so the live half of this component was never affected.
 ## Known gaps
 
 Listed because a changelog that only mentions what was finished is misleading.
+
+- **Twenty-nine more `ESP_ERROR_CHECK`-on-plain-`int` sites are still reboot
+  switches.** The census behind *Device settings* found 102 `ESP_ERROR_CHECK`
+  call sites tree-wide with a direct function call, 39 of them on a callee whose
+  only return type anywhere in the tree is plain `int`. Ten were fixed, in
+  `sensor_0068_ENS160_gas_sensor_settings.c`. The rest: **19** in
+  `hilink_presence_sensor_setting.c`, **9** in `pms_dev_items_prepare.c`, **1**
+  in `sensor_0067_hilink_presence_sensor.c`. With
+  `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y` and no `NDEBUG` — this
+  project's configuration — each is a panic and reboot on a return value whose
+  documented meaning is "failed". They are not fixed here because there is no
+  host test for those files and the hilink one carries four other defects on the
+  same path, listed next.
+
+- **`hilink_presence_sensor_setting.c` has the same pair of defects plus three
+  more, all unfixed.** Read while measuring the above, not guessed at: it frees
+  an already-linked settings node on the payload-allocation failure path at two
+  places, the same defect fixed in the ENS160 file; it frees an already-`NULL`
+  node at two further places; it sets `ret = 0` — success — on an allocation
+  failure; and its NVS-write test is **inverted**, logging *"Failed to write to
+  NVS"* and returning an error when the write succeeded. The ENS160 file gets
+  that last one right, which is how the inversion was noticed. This needs its
+  own commit and its own host test; nothing here has been verified against it.
+
+- **The cloud discards every settings callback's return value.** All four
+  `curr_setting->func(...)` call sites in `ezlopi-cloud-settings`, and the one
+  in `ezlopi_core_device_value_updated.c`, ignore the `int` the callback
+  returns. So a device driver that correctly reports a settings operation as
+  failed gets the same treatment as one that succeeded: the cloud sends back a
+  settings object with no value in it rather than an error. Propagation was
+  added inside the ENS160 file so its own `ret` values are no longer dead, but
+  it stops at that boundary. Fixing it means changing shared code on behalf of
+  every device that implements settings, which is a larger change than this
+  release makes.
+
+- **`ENS160_gas_sensor_settings_init`'s return is discarded by its only
+  caller.** `sensor_0068_ENS160_gas_sensor.c:364` calls it and ignores the
+  result. The value of making it return a failure instead of rebooting is that
+  the hub stays up; nobody acts on the code yet.
 
 - **The addressable strip is configurable now, but two things about it are
   unfinished.** This entry listed three. The colour-order gap — the parser

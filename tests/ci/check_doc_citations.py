@@ -3,8 +3,8 @@
 
 WHY THIS EXISTS
 
-The CHANGELOG is this fork's main deliverable and it carries 426 links into the
-source, 314 of them with a `#L<n>` line fragment. (It said 230-odd when this
+The CHANGELOG is this fork's main deliverable and it carries 431 links into the
+source, 317 of them with a `#L<n>` line fragment. (It said 230-odd when this
 was written; the count is re-measured whenever something here quotes it,
 because a stale number in the prose of a staleness check is a poor
 advertisement.) Line numbers move
@@ -66,9 +66,9 @@ prefix is dropped, because a Kconfig option is cited by the name the generated
 that was a first cut flagging three citations where the prose was right and the
 rule was wrong.
 
-What ANCHOR deliberately does not do is guess at prose link text. Of the 317
+What ANCHOR deliberately does not do is guess at prose link text. Of the 320
 citations carrying a line fragment across the root documents, ANCHOR bears on
-the 137 that are one backticked token and MISMATCH on the 102 whose text ends
+the 140 that are one backticked token and MISMATCH on the 102 whose text ends
 `:N`, leaving 78 with nothing mechanical on them beyond the path existing and
 being long enough. This said "150 of the 200" when ANCHOR was added; the ratio
 improved because citing by token became the house style, not because anything

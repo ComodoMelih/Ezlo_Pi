@@ -74,10 +74,16 @@
  * dropping `->user_arg` from the two getter casts again -- which is the defect
  * verbatim -- rebuilding, and restoring: 18/2 broken, 18/0 fixed, the same two
  * lines red both times.
+ *
+ * The file is at 29 checks now. The 11 added for the allocation-failure
+ * defects have their own account of being seen red, in the comment on the last
+ * test -- three separate re-breaks, because those three defects fail in three
+ * different ways and only one of them is a failed check.
  */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -98,6 +104,75 @@ static int failures;
             printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, what); \
         }                                                         \
     } while (0)
+
+/*******************************************************************************
+ * The controllable allocator. stubs-ens160/EZLOPI_USER_CONFIG.h points
+ * ezlopi_malloc and ezlopi_free at these two, which is what makes the
+ * allocation-failure paths of settings initialization reachable at all.
+ *
+ * Both call libc underneath so AddressSanitizer keeps its view of every block.
+ *
+ * The free log is how "the subject freed a node the core had already linked"
+ * gets reported as an ordinary failed check rather than an ASan abort, since
+ * discovering it by reading the node would be the use-after-free itself. It
+ * earns its place on the second of the two settings: nothing walks the list
+ * after the second node is appended, so ASan sees nothing there and the log is
+ * the only witness. On the first node ASan gets there first -- see the note on
+ * the last test below.
+ ******************************************************************************/
+
+static int alloc_budget = -1; /* -1: unlimited. Otherwise, fail once it hits 0. */
+static int allocs_served;
+static int allocs_refused;
+
+#define FREE_LOG_MAX 64
+static void *free_log[FREE_LOG_MAX];
+static int free_log_len;
+static int free_log_overflowed;
+
+void *EZPI_test_alloc(unsigned long size)
+{
+    if (0 == alloc_budget)
+    {
+        allocs_refused++;
+        return NULL;
+    }
+    if (alloc_budget > 0)
+    {
+        alloc_budget--;
+    }
+    allocs_served++;
+    return malloc((size_t)size);
+}
+
+void EZPI_test_release(void *ptr)
+{
+    if (free_log_len < FREE_LOG_MAX)
+    {
+        free_log[free_log_len++] = ptr;
+    }
+    else
+    {
+        /* Recorded rather than ignored: a full log would make was_freed()
+        ** answer "no" for a pointer it simply never saw, which is the one
+        ** answer this test must not get wrong silently. */
+        free_log_overflowed = 1;
+    }
+    free(ptr);
+}
+
+static int was_freed(const void *ptr)
+{
+    int i;
+    for (i = 0; i < free_log_len; i++)
+    {
+        if (free_log[i] == ptr)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 /*******************************************************************************
  * Stubs. Six functions, listed by what each one has to be for this test to
@@ -179,6 +254,33 @@ void EZPI_core_cjson_get_value_float(cJSON *cj_root, const char *item_name_str, 
 /*******************************************************************************
  * The tests
  ******************************************************************************/
+
+/* Hands the list back to libc at the end of each case.
+**
+** Not politeness: LeakSanitizer is on, and it only stays quiet about the nodes
+** and payloads because the subject's two file-scope pointers keep them
+** reachable. The second case below re-runs initialization and overwrites those
+** pointers, which would strand the first case's allocations and turn a passing
+** test red for a reason that has nothing to do with the subject.
+**
+** libc free, not EZPI_test_release: the free log is evidence about what the
+** *subject* freed, and the teardown must not write to it. The was_freed() guard
+** is for the broken-subject case -- if the subject has already freed a node,
+** reading its ->next is the use-after-free this test is looking for, and
+** freeing it again would abort before any check could be printed. */
+static void release_settings_list(l_ezlopi_device_t *device)
+{
+    l_ezlopi_device_settings_v3_t *curr = device->settings;
+
+    while (curr && !was_freed(curr))
+    {
+        l_ezlopi_device_settings_v3_t *next = curr->next;
+        free(curr->user_arg);
+        free(curr);
+        curr = next;
+    }
+    device->settings = NULL;
+}
 
 /* The two offsets the defect rests on. If either were non-zero the wrong cast
 ** would have read some other member, or read out of bounds and been caught by
@@ -330,13 +432,153 @@ static void test_the_getters_return_the_stored_value(void)
         CHECK(25.0f != wrong,
               "and that is not the stored value");
     }
+
+    release_settings_list(&device);
+}
+
+/* The second defect in the same file: what initialization does when the payload
+** allocation fails.
+**
+** The core has already allocated the settings node and appended it to
+** device->settings by then -- that is what
+** EZPI_core_device_add_settings_to_device_v3 does, and the copy of it above
+** reproduces the append for this reason. The failure path used to ezlopi_free()
+** that node and leave it linked, so device->settings held a dangling pointer
+** and so did the file-scope getter pointer.
+**
+** How soon that dangling pointer is read is sooner than this test was written
+** to expect, and it is the sharper statement of the defect: re-breaking the
+** first setting's free and running under ASan puts the use-after-free inside
+** add_settings_to_device_v3's own tail walk, on the *second* call -- the next
+** line of the same init function, looking for the list tail to append to. It
+** does not wait for the cloud; the node is dangling before initialization has
+** finished.
+**
+** On an unfixed tree none of that was reachable, which is the other half of
+** this. ENS160_gas_sensor_settings_init used to wrap both initializers in
+** ESP_ERROR_CHECK, and with CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y
+** and no NDEBUG -- this project's configuration -- that macro is the
+** _esp_error_check_failed() variant: a panic and a reboot. The order is free,
+** return 1, abort, so the hub rebooted at the point where the second call would
+** have read the freed node. The use-after-free was real and unreachable at the
+** same time.
+**
+** Which is why the two are fixed together and asserted together here: that the
+** failure is *returned* rather than aborted on, and that the node is left
+** linked and intact when it is. Fixing only the second leaves the reboot;
+** fixing only the first turns a reboot into a live use-after-free.
+**
+** The three ways this case can fail were each produced on their own against the
+** fixed file:
+**
+**   ESP_ERROR_CHECK put back on the first initializer -> abort inside
+**     ENS160_gas_sensor_settings_init, no tally printed, rc=134. That is the
+**     firmware's reboot reproduced, because stubs/esp_err.h keeps the abort
+**     deliberately rather than stubbing it out.
+**   the first node's free put back -> ASan heap-use-after-free in
+**     add_settings_to_device_v3, rc=1. ASan gets there before any check does,
+**     so for the first node it is the report and the free log is never
+**     consulted.
+**   the second node's free put back -> a printed tally, 27 checks and 1
+**     failure, the red one being "the second node was not freed either".
+**     Nothing walks the list after the second append, so ASan sees nothing and
+**     the free log is the only witness. This is the row that earns the log.
+**
+** This case runs last, and only after the success case has torn its list down,
+** because initialization overwrites the subject's two file-scope pointers. */
+static void test_a_failed_payload_allocation_leaves_the_node_linked(void)
+{
+    l_ezlopi_device_t device;
+    l_ezlopi_device_settings_v3_t *first = NULL;
+    l_ezlopi_device_settings_v3_t *second = NULL;
+    int rc;
+
+    memset(&device, 0, sizeof(device));
+
+    /* 0 refuses every allocation the subject asks for from here on. The node
+    ** allocations are not affected -- those go through the copy of the core
+    ** function above, which calls libc malloc directly, so what fails is
+    ** precisely the payload malloc on the line after the node was linked. */
+    alloc_budget = 0;
+    rc = ENS160_gas_sensor_settings_init(&device, NULL);
+    alloc_budget = -1;
+
+    CHECK(2 == allocs_refused,
+          "both payload allocations were refused, so both failure paths ran");
+    CHECK(0 != rc,
+          "settings init reports the failure to its caller instead of "
+          "aborting or returning success");
+
+    first = device.settings;
+    CHECK(NULL != first, "the first settings node is still on the device");
+
+    /* Asserted before the node is read, not after: if it was freed, reading
+    ** ->user_arg or ->next is the use-after-free, and under ASan that is an
+    ** abort with no indication of which check was running. */
+    CHECK((NULL != first) && !was_freed(first),
+          "the first node was not freed while the device still points at it");
+
+    if (first && !was_freed(first))
+    {
+        CHECK(NULL == first->user_arg,
+              "and it carries no payload, which is what the getters test for");
+        second = first->next;
+        CHECK(NULL != second,
+              "the second setting was attempted too, not skipped after the "
+              "first failed");
+        CHECK((NULL != second) && !was_freed(second),
+              "the second node was not freed either");
+        if (second && !was_freed(second))
+        {
+            CHECK(NULL == second->user_arg, "and it carries no payload");
+        }
+    }
+
+    /* 0.0f, not 25: the file keeps the no-payload return distinct from the
+    ** default on purpose, so a setting that failed to initialize cannot be
+    ** mistaken for one that worked.
+    **
+    ** Each call is guarded on its own node, for the same reason the checks
+    ** above are ordered the way they are. The getters read the subject's two
+    ** file-scope pointers, which point at these nodes; if a node was freed the
+    ** call is a use-after-free, and the guard is what keeps the failed check
+    ** above as the report instead of an abort. Skipping them when a node was
+    ** freed loses two checks out of the tally, which is the correct trade: the
+    ** run has already failed by then. */
+    if (first && !was_freed(first))
+    {
+        CHECK(0.0f == ENS160_get_ambient_temp_setting(),
+              "the ambient-temperature getter reports 0 rather than reading a "
+              "freed node");
+    }
+    if (second && !was_freed(second))
+    {
+        CHECK(0.0f == ENS160_get_relative_humidity_setting(),
+              "the relative-humidity getter reports 0 rather than reading a "
+              "freed node");
+    }
+
+    CHECK(0 == free_log_overflowed,
+          "the free log held every free, so was_freed() above answered from "
+          "a complete record");
+
+    release_settings_list(&device);
 }
 
 int main(void)
 {
+    /* Line-buffered on purpose. The last case here can abort -- under ASan, or
+    ** on the ESP_ERROR_CHECK stub's own abort -- and with stdout fully buffered
+    ** into a pipe every FAIL line printed before that point is lost with the
+    ** buffer. That happened on the first run of this binary against the unfixed
+    ** subject: the abort was all there was to read, and the checks that had
+    ** already gone red were invisible. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     test_the_layout_that_hid_it();
     test_both_heap_regions_read_as_floats_under_two();
     test_the_getters_return_the_stored_value();
+    test_a_failed_payload_allocation_leaves_the_node_linked();
 
     printf("%d check(s), %d failure(s)\n", checks, failures);
     return (0 == failures) ? 0 : 1;

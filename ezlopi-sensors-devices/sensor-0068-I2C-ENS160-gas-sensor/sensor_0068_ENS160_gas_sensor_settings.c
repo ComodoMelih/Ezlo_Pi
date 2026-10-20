@@ -106,12 +106,39 @@ l_ezlopi_device_settings_v3_t *ens160_gas_sensor_relative_humidity_sensor_settin
 /*******************************************************************************
  *                          Extern Function Definitions
  *******************************************************************************/
+/* Not ESP_ERROR_CHECK.
+**
+** Both initializers below return a plain int, 1 on failure -- not an esp_err_t.
+** ESP_ERROR_CHECK aborts on any non-zero value, and this project builds with
+** CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y and no NDEBUG, so the macro
+** is the _esp_error_check_failed() variant: a panic and a reboot. Wrapping a
+** "returns 1 on failure" function in it makes that failure a reboot switch.
+**
+** The only way either initializer fails is a settings allocation that did not
+** fit, or a NULL device. Neither is a reason to restart the hub; the hub should
+** come up with the sensor working and the setting reported as unavailable. So
+** the failure is logged and returned.
+**
+** Both are attempted even if the first fails, so that one bad allocation does
+** not silently cost the other setting as well.
+**
+** The return reaches sensor_0068_ENS160_gas_sensor.c, which currently discards
+** it -- noted, not fixed here. The value of this change is that a failed
+** allocation no longer reboots, not that anyone acts on the code yet. */
 int ENS160_gas_sensor_settings_init(l_ezlopi_device_t *devices, void *user_arg)
 {
     int ret = 0;
 
-    ESP_ERROR_CHECK(__settings_sensor_0068_gas_sensor_setting_initialize_ambient_temperature_setting(devices, user_arg));
-    ESP_ERROR_CHECK(__settings_sensor_0068_gas_sensor_setting_initialize_relative_humidity_setting(devices, user_arg));
+    if (0 != __settings_sensor_0068_gas_sensor_setting_initialize_ambient_temperature_setting(devices, user_arg))
+    {
+        TRACE_E("ENS160 ambient-temperature setting failed to initialize");
+        ret = 1;
+    }
+    if (0 != __settings_sensor_0068_gas_sensor_setting_initialize_relative_humidity_setting(devices, user_arg))
+    {
+        TRACE_E("ENS160 relative-humidity setting failed to initialize");
+        ret = 1;
+    }
 
     return ret;
 }
@@ -223,7 +250,19 @@ static int __settings_sensor_0068_gas_sensor_setting_initialize_ambient_temperat
             }
             else
             {
-                ezlopi_free(__FUNCTION__, ens160_gas_sensor_ambient_temperature_sensor_setting);
+                /* The node is not ours to free. EZPI_core_device_add_settings_to_device_v3
+                ** has already appended it to device->settings, and freeing it
+                ** here leaves that list holding a dangling pointer -- which the
+                ** very next add_settings_to_device_v3 call walks, to find the
+                ** tail to append to. So the use-after-free is immediate and
+                ** unconditional, not something that waits for the cloud.
+                **
+                ** Leave it linked with user_arg still NULL. Every callback in
+                ** this file already tests user_arg before using it and returns
+                ** 1 when it is absent, and both getters report 0, so a setting
+                ** that failed to initialize reads as unavailable rather than
+                ** as a plausible default. */
+                TRACE_E("ENS160 ambient-temperature payload allocation failed; setting left unavailable");
                 ret = 1;
             }
         }
@@ -277,7 +316,9 @@ static int __settings_sensor_0068_gas_sensor_setting_initialize_relative_humidit
             }
             else
             {
-                ezlopi_free(__FUNCTION__, ens160_gas_sensor_relative_humidity_sensor_setting);
+                /* Left linked, for the reason given on the ambient-temperature
+                ** path above. */
+                TRACE_E("ENS160 relative-humidity payload allocation failed; setting left unavailable");
                 ret = 1;
             }
         }
@@ -300,28 +341,32 @@ static int __settings_callback(e_ezlopi_settings_action_t action, struct l_ezlop
 
     switch (action)
     {
+    /* The four returns were discarded here, which made every `ret` in the four
+    ** dispatchers write-only. Assigned now so the propagation added there is
+    ** not dead code. It still ends at the cloud, which ignores func()'s value
+    ** -- see the note above __settings_get. */
     case EZLOPI_SETTINGS_ACTION_GET_SETTING:
     {
         TRACE_D("EZLOPI_SETTINGS_ACTION_GET_SETTING");
-        __settings_get(arg, setting);
+        ret = __settings_get(arg, setting);
         break;
     }
     case EZLOPI_SETTINGS_ACTION_SET_SETTING:
     {
         TRACE_D("EZLOPI_SETTINGS_ACTION_SET_SETTING");
-        __settings_set(arg, setting);
+        ret = __settings_set(arg, setting);
         break;
     }
     case EZLOPI_SETTINGS_ACTION_RESET_SETTING:
     {
         TRACE_D("EZLOPI_SETTINGS_ACTION_RESET_SETTING");
-        __settings_reset(arg, setting);
+        ret = __settings_reset(arg, setting);
         break;
     }
     case EZLOPI_SETTINGS_ACTION_UPDATE_SETTING:
     {
         TRACE_D("EZLOPI_SETTINGS_ACTION_UPDATE_SETTING");
-        __settings_update(arg, setting);
+        ret = __settings_update(arg, setting);
         break;
     }
 
@@ -402,16 +447,39 @@ static int __settings_get_ens160_gas_sensor_relative_humidity_get(void *arg, l_e
     return ret;
 }
 
+/* The four dispatchers below used to wrap their per-setting helpers in
+** ESP_ERROR_CHECK, and the comment on ENS160_gas_sensor_settings_init applies
+** with more force here: these four are reached from the cloud, through
+** l_ezlopi_device_settings_v3_t::func, when the hub serves hub.device.settings,
+** hub.device.setting.value.set, hub.device.setting.reset or a settings
+** broadcast. Each helper returns 1 when the setting has no payload, which is
+** exactly the state a failed allocation leaves behind -- so with the macro in
+** place the first cloud read of a setting that failed to initialize rebooted
+** the hub, and would have gone on rebooting it on every retry.
+**
+** `int ret = ret = 0;` was also a self-assignment, and ret was never written
+** again, so every one of these four returned 0 whatever happened. The value is
+** now the OR of whatever ran.
+**
+** It stops here, and that is worth being plain about: every settings func()
+** call site in ezlopi-cloud-settings discards the return. The cloud therefore
+** receives a settings object with no value in it rather than an error. That is
+** a defect in the cloud layer, shared by every device, and is not fixed in this
+** file; the change that matters here is that the hub stays up. */
 static int __settings_get(void *arg, l_ezlopi_device_settings_v3_t *setting)
 {
-    int ret = ret = 0;
+    int ret = 0;
     if (setting->cloud_properties.setting_id == ens160_gas_sensor_settings_ids[0])
     {
-        ESP_ERROR_CHECK(__settings_get_ens160_gas_sensor_ambient_temperature_get(arg, setting));
+        ret |= __settings_get_ens160_gas_sensor_ambient_temperature_get(arg, setting);
     }
     if (setting->cloud_properties.setting_id == ens160_gas_sensor_settings_ids[1])
     {
-        ESP_ERROR_CHECK(__settings_get_ens160_gas_sensor_relative_humidity_get(arg, setting));
+        ret |= __settings_get_ens160_gas_sensor_relative_humidity_get(arg, setting);
+    }
+    if (0 != ret)
+    {
+        TRACE_E("ENS160 settings get failed");
     }
     return ret;
 }
@@ -467,14 +535,18 @@ static int __settings_set_ens160_gas_sensor_relative_humidity_get(void *arg, l_e
 static int __settings_set(void *arg, l_ezlopi_device_settings_v3_t *setting)
 {
 
-    int ret = ret = 0;
+    int ret = 0;
     if (setting->cloud_properties.setting_id == ens160_gas_sensor_settings_ids[0])
     {
-        ESP_ERROR_CHECK(__settings_set_ens160_gas_sensor_ambient_temperature_get(arg, setting));
+        ret |= __settings_set_ens160_gas_sensor_ambient_temperature_get(arg, setting);
     }
     if (setting->cloud_properties.setting_id == ens160_gas_sensor_settings_ids[1])
     {
-        ESP_ERROR_CHECK(__settings_set_ens160_gas_sensor_relative_humidity_get(arg, setting));
+        ret |= __settings_set_ens160_gas_sensor_relative_humidity_get(arg, setting);
+    }
+    if (0 != ret)
+    {
+        TRACE_E("ENS160 settings set failed");
     }
     setting_changed = true;
 
@@ -526,14 +598,18 @@ static int __settings_update_ens160_gas_sensor_relative_humidity_get(void *arg, 
 
 static int __settings_update(void *arg, l_ezlopi_device_settings_v3_t *setting)
 {
-    int ret = ret = 0;
+    int ret = 0;
     if (setting->cloud_properties.setting_id == ens160_gas_sensor_settings_ids[0])
     {
-        ESP_ERROR_CHECK(__settings_update_ens160_gas_sensor_ambient_temperature_get(arg, setting));
+        ret |= __settings_update_ens160_gas_sensor_ambient_temperature_get(arg, setting);
     }
     if (setting->cloud_properties.setting_id == ens160_gas_sensor_settings_ids[1])
     {
-        ESP_ERROR_CHECK(__settings_update_ens160_gas_sensor_relative_humidity_get(arg, setting));
+        ret |= __settings_update_ens160_gas_sensor_relative_humidity_get(arg, setting);
+    }
+    if (0 != ret)
+    {
+        TRACE_E("ENS160 settings update failed");
     }
     return ret;
 }
@@ -590,14 +666,18 @@ static int __settings_reset_ens160_gas_sensor_relative_humidity_get(void *arg, l
 static int __settings_reset(void *arg, l_ezlopi_device_settings_v3_t *setting)
 {
 
-    int ret = ret = 0;
+    int ret = 0;
     if (setting->cloud_properties.setting_id == ens160_gas_sensor_settings_ids[0])
     {
-        ESP_ERROR_CHECK(__settings_reset_ens160_gas_sensor_ambient_temperature_get(arg, setting));
+        ret |= __settings_reset_ens160_gas_sensor_ambient_temperature_get(arg, setting);
     }
     if (setting->cloud_properties.setting_id == ens160_gas_sensor_settings_ids[1])
     {
-        ESP_ERROR_CHECK(__settings_reset_ens160_gas_sensor_relative_humidity_get(arg, setting));
+        ret |= __settings_reset_ens160_gas_sensor_relative_humidity_get(arg, setting);
+    }
+    if (0 != ret)
+    {
+        TRACE_E("ENS160 settings reset failed");
     }
     setting_changed = true;
 

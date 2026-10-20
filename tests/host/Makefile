@@ -1269,12 +1269,22 @@ $(BUILD)/test_cjsongpio: test_cjsongpio.c \
 # The nm guard checks the getter is really in the object. The whole point of
 # this test is that it calls the real one; if CONFIG or an #ifdef ever took it
 # out, every check below would pass against nothing.
+#
+# stubs-ens160/ holds one header: an EZLOPI_USER_CONFIG.h whose ezlopi_malloc
+# and ezlopi_free route through two functions the test defines, so an allocation
+# can be made to fail on demand. It is prepended to the include path of *the
+# subject only*, deliberately. cjext.c allocates through the same macro; if it
+# saw this header too, cJSON's allocations would come out of the same failure
+# budget and which allocation failed would depend on how cJSON is implemented.
+# The test's own translation unit does not need it either -- it calls libc
+# malloc and free by name.
 ENS160_DIR := ../../ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor
 CLOUDSET_DIR := ../../ezlopi-cloud/ezlopi-cloud-settings
 ENS160_INC := $(HTTPURL_INC) -I$(ENS160_DIR) -I$(CLOUDSET_DIR)
 $(BUILD)/test_ens160set: ENS160_CFLAGS := -std=c99 -O1 -g $(ENS160_INC) \
                                           $(SANITIZERS)
 $(BUILD)/test_ens160set: test_ens160set.c \
+                         stubs-ens160/EZLOPI_USER_CONFIG.h \
                          $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.c \
                          $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.h \
                          $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
@@ -1282,9 +1292,11 @@ $(BUILD)/test_ens160set: test_ens160set.c \
                          $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c \
                          $(CJEXT_DIR)/cjext.c | $(BUILD)
 	$(CC) $(ENS160_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_ens160set_main.o test_ens160set.c
-	$(CC) $(ENS160_CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -c -o $(BUILD)/ens160set_subject.o $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.c
+	$(CC) -Istubs-ens160 $(ENS160_CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -c -o $(BUILD)/ens160set_subject.o $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.c
 	@nm $(BUILD)/ens160set_subject.o | grep -q ' T ENS160_get_ambient_temp_setting' \
 	  || { echo "sensor_0068_ENS160_gas_sensor_settings.c compiled to an object without ENS160_get_ambient_temp_setting in it -- the checks below would be testing nothing"; exit 1; }
+	@nm -u $(BUILD)/ens160set_subject.o | grep -q 'EZPI_test_alloc' \
+	  || { echo "the subject object does not reference EZPI_test_alloc -- stubs-ens160/EZLOPI_USER_CONFIG.h was not the one on its include path, and the allocation-failure checks below would be exercising a malloc that cannot fail"; exit 1; }
 	$(CC) $(ENS160_CFLAGS) -c -o $(BUILD)/ens160set_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
 	$(CC) $(ENS160_CFLAGS) -c -o $(BUILD)/ens160set_scales.o $(CONSTANTS_DIR)/ezlopi_cloud_scales_str.c
 	$(CC) $(ENS160_CFLAGS) -c -o $(BUILD)/ens160set_valuetypes.o $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c
