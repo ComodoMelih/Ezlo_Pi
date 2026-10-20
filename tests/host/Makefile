@@ -12,6 +12,7 @@ CC      ?= cc
 SANITIZE_DIR := ../../ezlopi-util/ezlopi-util-sanitize
 IMPROV_DIR   := ../../ezlopi-util/ezlopi-util-improv
 HA_DIR       := ../../ezlopi-util/ezlopi-util-ha
+ALED_DIR     := ../../ezlopi-util/ezlopi-util-aled
 CJEXT_DIR    := ../../ezlopi-components/cjext
 UART_HAL_DIR := ../../ezlopi-hal/ezlopi-hal-uart
 ZE08_DIR     := ../../ezlopi-sensors-devices/sensor-0069-UART-ze08-ch02-gas-sensor
@@ -68,6 +69,7 @@ CFLAGS  += -std=c99 -O1 -g \
            -I$(SANITIZE_DIR) \
            -I$(IMPROV_DIR) \
            -I$(HA_DIR) \
+           -I$(ALED_DIR) \
            $(SANITIZERS)
 LDFLAGS += $(SANITIZERS)
 
@@ -77,7 +79,8 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
-           test_httpresp test_suntime test_issun test_coords test_tz
+           test_httpresp test_suntime test_issun test_coords test_tz \
+           test_aled
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -110,6 +113,27 @@ $(BUILD)/test_improv: test_improv.c $(IMPROV_DIR)/ezlopi_util_improv.c | $(BUILD
 # type the drivers in ezlopi-sensors-devices actually assign can be swept in a
 # few milliseconds.
 $(BUILD)/test_ha: test_ha.c $(HA_DIR)/ezlopi_util_ha.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# One line, like test_sanitize and test_improv, because ezlopi-util-aled has no
+# IDF dependency to stub -- see the comment in its CMakeLists.txt for why that
+# is a requirement of the component rather than a happy accident.
+#
+# The HSV sweeps in here are exhaustive -- all 16,777,216 (h,s,v) triples, twice
+# -- and that is a deliberate choice over a table of colours. The way this
+# conversion gets written wrong is at a sector boundary: the hue byte is split
+# into six arcs, and arithmetic that is off by one or two counts inside an arc
+# still sends pure red, green and blue to exactly the right places. A table of
+# primaries is the one test such a bug passes.
+#
+# Even the invariant sweep was not enough on its own. Swapping one sector's
+# green and blue channels satisfies max(r,g,b) == v and every named primary,
+# because at a sector's endpoints the two swapped channels are both zero; it
+# was caught only by also sweeping for continuity between adjacent hues. Both
+# sweeps are affordable precisely because this component is dependency-free:
+# a few seconds of host CPU under ASan and UBSan, and there is no way to get
+# the equivalent from a board at all.
+$(BUILD)/test_aled: test_aled.c $(ALED_DIR)/ezlopi_util_aled.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # cjext.c is vendored third-party code, so it is compiled without -Werror and

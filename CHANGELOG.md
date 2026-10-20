@@ -5002,6 +5002,127 @@ flashed.**
   unsynchronised walks in `ezlopi-cloud`. It belongs in the core, for all of
   them at once. See [Known gaps](#known-gaps).
 
+### Addressable LEDs — [feat]
+
+- **`ezlopi-util-aled` is the colour arithmetic for addressable strips, and
+  nothing else.** Four functions: `EZPI_aled_scale8` (scale a channel by a
+  brightness), `EZPI_aled_hsv_to_rgb` (a hue/saturation/value byte triple to
+  RGBW), `EZPI_aled_wire_len` (how many bytes a strip of *n* pixels needs), and
+  `EZPI_aled_pack` (pixels into the byte order a particular chip expects).
+
+  Its `idf_component_register()` has an empty `REQUIRES`, and that is a
+  requirement of the component rather than a happy accident: needing an IDF
+  header is the signal that whatever is being written belongs in the driver
+  instead. That is what keeps the whole of it host-testable.
+
+  **It drives no hardware and nothing calls it.** There is no RMT driver, no
+  device, and no control surface in this commit. It is the half that can be got
+  wrong silently, separated from the half that needs a board.
+
+- **Clean-room, deliberately and specifically.** Nothing was taken from WLED
+  (Christian Schwinne / Aircoookie, **EUPL-1.2**, an Arduino/PlatformIO
+  firmware), from WS2812FX (Harm Aldick, **MIT**, an Arduino library), or from
+  `hoene/esp32-led-controller` (Christian Hoene / Symonics, **AGPL-3.0**, and
+  the one of the three that is ESP-IDF). Those are three different projects by
+  two different Christians under three different licences, and the AGPL one is
+  the one an ESP-IDF developer would reach for first. This was written from the
+  published WS2812 wire format and the textbook definition of HSV, so the
+  component stays under EASL with no further licence question to answer.
+
+- **Three decisions that look like inefficiencies and are not.** `scale8`
+  divides by 255 rather than shifting by 8, because `(v * 255) >> 8` is 254 —
+  full brightness is not full. The hue is split as `h * 6 >> 8` rather than
+  `h / 43`, because six sectors of 43 do not cover 256: the last one is 41 wide
+  and the offset within a sector spans 0..252 instead of 0..255. And `pack`
+  refuses an undersized destination by writing **nothing** and returning 0,
+  rather than reporting a short count — a half-packed frame is still a frame,
+  and the strip will happily display it.
+
+- **The test is 68 checks, and ten of them exist because the other 58 were not
+  enough.** `tests/host/test_aled.c` sweeps all 65,536 `scale8` pairs and all
+  16,777,216 `(h, s, v)` triples, twice. Exhaustive rather than a table of
+  colours, because the way this conversion gets written wrong is at a sector
+  boundary, and arithmetic that is off by one or two inside an arc still sends
+  pure red, green and blue to exactly the right places.
+
+  That turned out to be the finding. Swapping sector 0's green and blue — so
+  the wheel runs red→magenta instead of red→yellow — **passed all 58 original
+  checks**, including `max(r, g, b) == v`, `s == 0` implies grey, and every
+  named primary. At a sector's endpoints the two swapped channels are both
+  zero, so the invariants cannot see it. This is precisely the defect the
+  component exists to catch: a strip with its colours permuted lights up,
+  answers every command, and looks like a working product.
+
+  Closed by measuring the correct implementation first rather than guessing a
+  tolerance — the largest Manhattan step between adjacent hues is **6**, and
+  the six sector midpoints rank their channels in six distinct orders — and
+  then asserting both. The sector-0 swap now fails with 61,096 discontinuities
+  and a worst step of **509**.
+
+  Continuity alone would not have been enough either, and that was also tested
+  rather than assumed: reversing the entire wheel is perfectly continuous and
+  is caught only by the ranking check.
+
+- **20 mutants, 18 killed, 2 survived, measured in one sweep.** The two
+  survivors are `out.w = 0` deleted and the `0 == n_pixels` early return
+  removed. Both were *predicted* equivalent before being run — the return
+  struct is zero-initialised, and `0 * 3` is 0 either way — and both were run
+  anyway so the prediction is tested instead of asserted.
+
+  Two were killed by the sanitizers alone, with no check failing: removing the
+  colour-order range validation gives UBSan `index 6 out of bounds for type
+  'uint8_t [6][3]'`, and removing the `NULL` pixel check gives a null member
+  access and an ASan SEGV at address 0. Neither would have been caught by the
+  assertions.
+
+  The sweep was re-run from scratch for this entry rather than stitched from
+  two earlier rounds, because those rounds contained **two failures of my own
+  tooling** that reported identically to survivors: a `sed` expression whose
+  `|` delimiter collided with a `||` in its own anchor, and a transient rename
+  denial from this filesystem. Those were my errors, not findings about the
+  subject, and a mutant that never applied is indistinguishable from one that
+  survived. The single clean sweep reports 0 failed edits and 0 mis-anchored
+  no-ops, which is what makes 18/2 a measurement rather than a residue.
+
+- **One check in there is redundant, and saying so is the point.** The
+  "a hue never sets the white channel" check is satisfied twice over: the
+  return struct is zero-initialised *and* `out.w = 0` is assigned. Removing
+  either one alone leaves the other, and nothing fails — measured. Removing
+  both fails it with all 16,777,216 triples violating it.
+
+  The zero-initialiser is kept despite being redundant, because an
+  uninitialised read is the one defect class this suite cannot catch:
+  AddressSanitizer does not model it, and MemorySanitizer, which does, cannot
+  be combined with ASan. A seventh sector arm added later that forgot a channel
+  would return uninitialised stack. A structural guarantee is worth more than a
+  test where no test is available — and it is recorded in both the source and
+  the test, rather than left for someone to find by mutating the line and
+  seeing nothing fail.
+
+- **On onboarding: the cloud side already supports this, and a strip already
+  onboards today — one pixel of it.** `category_dimmable_light`,
+  `subcategory_dimmable_colored` and `dev_type_dimmer_outlet` all exist
+  already, and `device-0009-other-RMT-SK6812` is already registered through all
+  four files of the device contract and appears in the onboarding list as
+  `device-rgp_strip-RMT_SK6812`.
+
+  It sets `sk6812_strip.length = 1`, hardcoded, and the only configuration keys
+  it reads are `ezlopi_gpio1_str`, `ezlopi_duty_cycle_str`, `ezlopi_freq_hz_str`
+  and `ezlopi_dev_type_str`. There is no pixel-count key and no colour-order
+  key anywhere in the config schema. Since `led_strip_fill()` is called with
+  that same `length`, a 60-pixel strip wired to a provisioned EzloPi lights its
+  first LED and nothing else. That is the gap this component is the foundation
+  for closing, and it is a configuration gap rather than a driver one.
+
+  `category_led_strip` and `subcategory_addressable_*` do **not** exist in this
+  tree — they are not being added, because the existing dimmable-colour
+  properties already describe a strip to the cloud and adding new ones would
+  need a cloud-side change this work does not have.
+
+- The full host suite is **6257** checks across **29** binaries, 0 failures,
+  with `test_aled` contributing 68 of them and all 29 binaries reporting in the
+  shape the aggregate greps for.
+
 ### UUID utility — [bug]
 
 **None of this is reachable.** Nothing in the repository calls any function in
