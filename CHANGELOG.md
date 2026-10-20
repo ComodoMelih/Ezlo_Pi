@@ -7047,9 +7047,34 @@ enumerators — so the live half of this component was never affected.
   removed" from "the file was not compiled". No new warning appears in the
   subject on any target, on either side.
 
-  The full host suite is **6160** checks across **27** binaries, 0 failures.
-  (It was 6083 when this entry was written; the suntime backoff below added 71
-  and the field-discriminant guard above added 6.)
+  The full host suite is **6257** checks across **29** binaries, 0 failures.
+
+  That figure replaces a recorded **6160 across 27**, which was wrong in both
+  numbers, and the arithmetic of the correction is worth keeping because the
+  cause was a reporting bug rather than any change in what is tested. The
+  suite totals itself by grepping each binary's output for the bare line
+  `N check(s), M failure(s)`. Four binaries did not print that shape, so their
+  checks summed as zero: `test_issun` prefixed the line with its own name
+  (29 checks), while `test_devcfg_api` (319) and `test_api_envelope` (58)
+  printed `checks`/`failures` without the parentheses and `test_scenefields`
+  printed `test_scenefields: N checks passed` (24). All four now print the
+  canonical shape.
+
+  The recorded 6160 had a second problem: it was produced by an ad-hoc count
+  using a looser pattern than the suite's own, which happened to pick up
+  `test_devcfg_api`, `test_api_envelope` and `test_scenefields` (401 between
+  them) while still missing the prefixed `test_issun`. So those 401 were
+  already inside 6160, and the correction from it is just
+  **6160 + 29 + 68 = 6257** — the recovered `test_issun` and the new
+  `test_aled`. Cross-checked from the other direction: the bare-shape total
+  was 5788 before this work, + 68 for `test_aled` + 401 for the three
+  canonicalised binaries = 6257. The count of binaries is 29 because that is
+  the length of `TESTS`, every one of which now reports.
+
+  The lesson is in the direction of the error: a tally line that matches
+  nothing understates the suite silently and forever, and the figure is quoted
+  in prose here, so nothing contradicts it. It was found only by counting
+  binaries-with-a-tally alongside the total and noticing the two disagreed.
 
   **Untested on hardware.** No board has sent a scene HTTP request. Every
   number above is from a host build of the real translation unit or from a
@@ -7231,7 +7256,10 @@ enumerators — so the live half of this component was never affected.
   on three targets and exactly on `esp32s3`; the remainder is segment alignment
   padding in the image container.
 
-  The full host suite is **6160** checks across **27** binaries, 0 failures.
+  The full host suite is **6257** checks across **29** binaries, 0 failures.
+  (Recorded as 6160 across 27 when this entry was written; four binaries were
+  printing a tally line the suite's aggregate did not match, and so counted as
+  zero. Reconciled in full in the scene-URL entry above.)
 
   **Untested on hardware.** No board has fetched a sunrise time, and nothing has
   been flashed. The 86,400-against-50 figure is a host loop over a pure

@@ -754,6 +754,10 @@ int main(void)
     test_register_counter_counts_attempts_not_failures();
     test_the_subject_exists();
 
-    printf("%d checks, %d failures\n", checks, failures);
+    /* "check(s)" and "failure(s)", not "checks" and "failures": the suite's
+     * aggregate tally greps for the parenthesised form, so this line matched
+     * nothing and these checks were absent from the totals quoted in the
+     * CHANGELOG. */
+    printf("%d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;
 }

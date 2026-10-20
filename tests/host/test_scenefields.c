@@ -462,6 +462,15 @@ int main(void)
     test_a_number_in_the_union_reads_back_as_a_non_null_pointer();
     test_a_real_string_token_still_passes_the_discriminant_test();
 
-    printf("test_scenefields: %d checks passed\n", checks);
+    /* "N check(s), M failure(s)", bare and unprefixed, because that is the
+     * shape the suite's aggregate tally greps for. This line used to read
+     * "test_scenefields: %d checks passed", which matched nothing, so these
+     * checks were absent from every total the CHANGELOG has ever quoted.
+     *
+     * The failure count is the literal 0 rather than a variable, and that is
+     * sound rather than lazy: CHECK above calls exit(1) on the first failure,
+     * so reaching this line at all means none failed. The suite still sees the
+     * failure through the non-zero exit status. */
+    printf("%d check(s), 0 failure(s)\n", checks);
     return 0;
 }

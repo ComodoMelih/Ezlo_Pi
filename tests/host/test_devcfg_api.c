@@ -1977,7 +1977,11 @@ int main(void)
     test_drivers_list_agrees_with_the_write_path();
     test_drivers_list_fits_the_transport();
 
-    printf("%d checks, %d failures\n", checks, failures);
+    /* "check(s)" and "failure(s)", not "checks" and "failures": the suite's
+     * aggregate tally greps for the parenthesised form, so this line matched
+     * nothing and these checks were absent from the totals quoted in the
+     * CHANGELOG. */
+    printf("%d check(s), %d failure(s)\n", checks, failures);
 
     return (0 == failures) ? 0 : 1;
 }
