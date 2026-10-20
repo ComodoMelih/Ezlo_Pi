@@ -77,7 +77,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_mqttcfg test_mqtt_api test_devcfg test_devcfgval \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
-           test_httpresp test_suntime test_coords test_tz
+           test_httpresp test_suntime test_issun test_coords test_tz
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -720,6 +720,87 @@ $(BUILD)/test_suntime: test_suntime.c $(SCENES_DIR)/ezlopi_core_scenes_suntime.c
 	$(CC) $(SUNTIME_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/suntime_cjext.o $(CJEXT_DIR)/cjext.c
 	$(CC) -o $@ $(BUILD)/test_suntime_main.o $(BUILD)/suntime_subject.o \
 	      $(BUILD)/suntime_keywords.o $(BUILD)/suntime_cjext.o $(LDFLAGS) -lm
+
+# The isSunState flag evaluator: the five ISSUNSTATE_* helpers that set bits in
+# `flag_check`, and ISSUNSTATE_check_flag_result, the switch that turns those
+# bits into a fire/don't-fire answer.
+#
+# WHY THIS RULE EXISTS AT ALL
+#
+# Because the file it compiles was recorded in this repository as un-hostable,
+# and that was wrong. The claim is in the Known gaps list and in the test_suntime
+# comment above -- "in the 4000-line when-methods helper file and needs a radio,
+# a clock and an NVS partition" -- and it is why the suntime work was split into
+# a separate, smaller translation unit rather than tested where it lives. The
+# cost was measured rather than inherited: with the include set test_httpurl
+# already uses, *zero* IDF headers needed stubbing, and the entire blocker was
+# eight `case label does not reduce to an integer constant` errors from eight
+# `const uint8_t` locals. Those are now an enum, which is a no-op on target and
+# the one change that made this rule possible. See the comment at
+# ISSUNSTATE_check_flag_result's flag definitions.
+#
+# ISSUN_INC is HTTPURL_INC, deliberately shared and not copied. The two subjects
+# are different files in the same component and the measured include set came out
+# identical; a 20-line duplicate here would drift. The coupling is the point --
+# if someone has to add a path for one of these subjects, both get it.
+#
+# WHAT THE THREE SUPPRESSIONS COST, EACH MEASURED
+#
+# -Wno-unused-parameter: 11 sites. Four are in the ISDATE_* family and seven are
+# on the path this test drives -- ISSUNSTATE_get_offs_tmval (2),
+# ISSUNSTATE_eval_weekdays (2), ISSUNSTATE_eval_days (2), ISSUNSTATE_eval_range
+# (1). All eleven are signature uniformity: these functions are called through a
+# common shape and each ignores the arguments it has no use for. Suppressed
+# rather than fixed, because `(void)x` on seven parameters of the subject under
+# test is a change to the subject made to quiet the test harness.
+#
+# -Wno-sign-compare: 10 sites, and unlike the above, *none* of them is on the
+# isSunState path -- 2 in WHEN_function_for_opr, 2 in WHEN_function_for_repeat,
+# 1 in WHEN_function_for_follow, 5 in WHEN_function_for_pulse. That is uint32_t
+# tick arithmetic compared against an `int` threshold, and it is a real finding
+# in a family of functions no host test drives yet. It is recorded in Known gaps
+# rather than fixed here: those four functions need their own test, and this
+# rule is what makes writing one possible. Do not read this flag as a claim the
+# comparisons are correct.
+#
+# -Wno-error=cpp, not -Wno-cpp: the subject carries an upstream `#warning "need
+# to optimize these switch-case"`. Demoting it to a warning keeps it printing on
+# every build of this rule, which is what upstream wanted; -Wno-cpp would hide
+# it, and deleting it would be editing someone else's note.
+#
+# ezlopi_core_scenes_suntime.c, ezlopi_cloud_keywords.c and cjext.c are linked,
+# not stubbed, for the reasons given at length in the test_httpurl rule. The
+# keywords matter most here: ISSUNSTATE_eval_range compares a field's value
+# against ezlopi_at_str, ezlopi_before_str and ezlopi_after_str, and a test
+# holding stubbed copies of those three would be asserting on the spelling this
+# directory invented rather than the one the cloud sends. The 11 functions that
+# genuinely have to be stubbed are in stub_issun.c, and all 11 abort().
+#
+# The nm guard is load-bearing for the same reason as test_suntime's: the subject
+# is wrapped end to end in #ifdef CONFIG_EZPI_SERV_ENABLE_MESHBOTS (lines 44 and
+# 2334), so without stubs-scenes/ it preprocesses to nothing, the link still
+# succeeds, and the suite would report a pass having compiled an empty object.
+ISSUN_INC := $(HTTPURL_INC)
+ISSUN_CFLAGS := -std=c99 -O1 -g -Wall -Wextra -Werror \
+                $(ISSUN_INC) $(SANITIZERS)
+ISSUN_SUBJ_CFLAGS := $(ISSUN_CFLAGS) -Wno-unused-parameter -Wno-sign-compare \
+                     -Wno-error=cpp
+$(BUILD)/test_issun: test_issun.c stub_issun.c \
+                     $(SCENES_DIR)/ezlopi_core_scenes_when_methods_helper_functions.c \
+                     $(SCENES_DIR)/ezlopi_core_scenes_suntime.c \
+                     $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                     $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(ISSUN_CFLAGS) -c -o $(BUILD)/test_issun_main.o test_issun.c
+	$(CC) $(ISSUN_CFLAGS) -c -o $(BUILD)/issun_stub.o stub_issun.c
+	$(CC) $(ISSUN_SUBJ_CFLAGS) -c -o $(BUILD)/issun_subject.o $(SCENES_DIR)/ezlopi_core_scenes_when_methods_helper_functions.c
+	@nm $(BUILD)/issun_subject.o | grep -q ' T ISSUNSTATE_check_flag_result' \
+	  || { echo "ezlopi_core_scenes_when_methods_helper_functions.c compiled to an object without ISSUNSTATE_check_flag_result in it -- CONFIG_EZPI_SERV_ENABLE_MESHBOTS is not reaching it"; exit 1; }
+	$(CC) $(ISSUN_CFLAGS) -c -o $(BUILD)/issun_suntime.o $(SCENES_DIR)/ezlopi_core_scenes_suntime.c
+	$(CC) $(ISSUN_CFLAGS) -c -o $(BUILD)/issun_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(ISSUN_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/issun_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_issun_main.o $(BUILD)/issun_stub.o \
+	      $(BUILD)/issun_subject.o $(BUILD)/issun_suntime.o \
+	      $(BUILD)/issun_keywords.o $(BUILD)/issun_cjext.o $(LDFLAGS) -lm
 
 # The hub's stored location: hub.coordinates.set, hub.coordinates.get, and the
 # in-RAM pair that hub.info.get reports.

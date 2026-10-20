@@ -47,6 +47,10 @@
 #include <time.h>
 #include <stdint.h>
 #include "cjext.h"
+/* For s_suntime_backoff_t, embedded in s_sunstate_data_t below. Safe to
+ * include from a header: ezlopi_core_scenes_suntime.h includes only sdkconfig,
+ * stdbool, stdint and ezlopi_core_errors.h, so there is no cycle back here. */
+#include "ezlopi_core_scenes_suntime.h"
 
 /*******************************************************************************
  *                          C++ Declaration Wrapper
@@ -89,6 +93,67 @@ extern "C"
         const char *field_name;
         uint8_t (*field_func)(l_scenes_list_v2_t *scene_node, l_fields_v2_t *curr_field, struct tm *info, uint8_t curr_sunstate_mode);
     } s_issunstate_method_t;
+
+    /* Moved here from the .c file, where it was private, so that
+     * tests/host/test_issun.c can build one. Every ISSUNSTATE_* function
+     * declared below reaches this struct through
+     * `scene_node->when_block->fields->user_arg`, so none of them can be
+     * called from a test while the type is invisible -- which is the whole
+     * reason the isSunState path had no test that could fail. The enum goes
+     * with it because the struct has a member of that type. */
+    typedef enum e_issunstate_offset
+    {
+        ISSUNSTATE_INTIME_MODE = 0,
+        ISSUNSTATE_BEFORE_MODE,
+        ISSUNSTATE_AFTER_MODE,
+        ISSUNSTATE_UNDEFINED,
+    } e_issunstate_offset_t;
+
+    typedef struct s_sunstate_data
+    {
+        uint8_t sunstate_mode;             // [sunrise=1,sunset=2,0=NULL]
+        e_issunstate_offset_t tmoffs_type; // [intime=0,before=1,after=2]
+        int curr_tm_day;                   // today's day number
+        struct tm choosen_suntime;         // unique suntime
+        struct tm defined_moment;          // offset+suntime
+
+        /* The day `defined_moment` was last computed for, and whether that
+         * computation worked. 0 means never attempted.
+         *
+         * These two replace a test on `defined_moment` being all-zero, which
+         * was standing in for both of them and could do neither job. It could
+         * not say "already done", because midnight is a time a real offset
+         * produces, so a scene whose moment landed on 00:00:00 recomputed it
+         * on every evaluation. And it could not say "do it again tomorrow",
+         * because nothing ever put the zeroes back: the moment was computed on
+         * the first evaluation and then kept for as long as the hub stayed up,
+         * while `choosen_suntime` was refreshed daily underneath it. An
+         * isSunState scene therefore tracked the sun for exactly one day and
+         * then became a fixed-time scene -- drifting by roughly a minute or
+         * two a day, in the direction that looks like the hub is slightly
+         * wrong rather than broken.
+         *
+         * Keeping the day rather than a plain "done" flag is what makes this
+         * work in either field order. The dispatch loop walks the scene's own
+         * field list, so `time` can be visited before `sunrise`; comparing
+         * against `curr_tm_day` -- which only advances once a suntime has
+         * actually been read -- means the moment is never computed from
+         * yesterday's suntime, at worst one evaluation later than it could
+         * have been. */
+        int moment_tm_day;
+        bool moment_valid;
+
+        /* How long to wait before asking api.sunrisesunset.io again after a
+         * failed lookup. See the policy section in
+         * ezlopi_core_scenes_suntime.h; the short version is that a
+         * when-condition is evaluated about once a second, and before this
+         * field a hub that could not reach the service opened one TLS
+         * connection per second per scene, forever.
+         *
+         * This is the field that required the failure path to stop deleting
+         * the block it lives in. */
+        s_suntime_backoff_t backoff;
+    } s_sunstate_data_t;
 
     typedef struct s_isonce_method
     {

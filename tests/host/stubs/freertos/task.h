@@ -36,4 +36,22 @@ static inline void vTaskDelay(TickType_t ticks)
     (void)ticks;
 }
 
+/* Declared, not defined, and the reason is worth recording: the firmware calls
+ * xTaskGetTickCount() from
+ * ezlopi_core_scenes_when_methods_helper_functions.c without that file
+ * including any header which declares it, so the IDF build only gets a
+ * declaration by accident of include order. On a host it shows up as
+ * -Wimplicit-function-declaration, and under C99's old rule that would give it
+ * a default `int` return -- silently mis-typing the uint32_t tick arithmetic
+ * the WHEN_function_for_* family does with the result. This declaration
+ * matches FreeRTOS's own, so that arithmetic means the same thing in both
+ * builds.
+ *
+ * No definition here. The callers are the pulse/latch/follow/repeat timing
+ * helpers, which no host test drives, so whoever links that translation unit
+ * gets an undefined symbol unless they stub it deliberately. That is the
+ * correct outcome: it stops a test wandering into the timing logic and passing
+ * on the strength of a stub's invented clock. */
+TickType_t xTaskGetTickCount(void);
+
 #endif /* _HOST_STUB_FREERTOS_TASK_H_ */

@@ -69,55 +69,11 @@
 /*******************************************************************************
  *                          Type & Macro Definitions
  *******************************************************************************/
-typedef enum e_issunstate_offset
-{
-    ISSUNSTATE_INTIME_MODE = 0,
-    ISSUNSTATE_BEFORE_MODE,
-    ISSUNSTATE_AFTER_MODE,
-    ISSUNSTATE_UNDEFINED,
-} e_issunstate_offset_t;
-typedef struct s_sunstate_data
-{
-    uint8_t sunstate_mode;             // [sunrise=1,sunset=2,0=NULL]
-    e_issunstate_offset_t tmoffs_type; // [intime=0,before=1,after=2]
-    int curr_tm_day;                   // today's day number
-    struct tm choosen_suntime;         // unique suntime
-    struct tm defined_moment;          // offset+suntime
-
-    /* The day `defined_moment` was last computed for, and whether that
-     * computation worked. 0 means never attempted.
-     *
-     * These two replace a test on `defined_moment` being all-zero, which was
-     * standing in for both of them and could do neither job. It could not say
-     * "already done", because midnight is a time a real offset produces, so a
-     * scene whose moment landed on 00:00:00 recomputed it on every evaluation.
-     * And it could not say "do it again tomorrow", because nothing ever put
-     * the zeroes back: the moment was computed on the first evaluation and
-     * then kept for as long as the hub stayed up, while `choosen_suntime` was
-     * refreshed daily underneath it. An isSunState scene therefore tracked the
-     * sun for exactly one day and then became a fixed-time scene -- drifting
-     * by roughly a minute or two a day, in the direction that looks like the
-     * hub is slightly wrong rather than broken.
-     *
-     * Keeping the day rather than a plain "done" flag is what makes this work
-     * in either field order. The dispatch loop walks the scene's own field
-     * list, so `time` can be visited before `sunrise`; comparing against
-     * `curr_tm_day` -- which only advances once a suntime has actually been
-     * read -- means the moment is never computed from yesterday's suntime, at
-     * worst one evaluation later than it could have been. */
-    int moment_tm_day;
-    bool moment_valid;
-
-    /* How long to wait before asking api.sunrisesunset.io again after a failed
-     * lookup. See the policy section in ezlopi_core_scenes_suntime.h; the short
-     * version is that a when-condition is evaluated about once a second, and
-     * before this field a hub that could not reach the service opened one TLS
-     * connection per second per scene, forever.
-     *
-     * This is the field that required the failure path below to stop deleting
-     * the block it lives in. */
-    s_suntime_backoff_t backoff;
-} s_sunstate_data_t;
+/* e_issunstate_offset_t and s_sunstate_data_t were defined here. They now live
+** in ezlopi_core_scenes_when_methods_helper_functions.h, with the comment that
+** explains the two day fields, so that a host test can construct the struct
+** the five ISSUNSTATE_* functions read out of `fields->user_arg`. Nothing else
+** moved. */
 
 /*******************************************************************************
  *                          Static Function Prototypes
@@ -807,14 +763,26 @@ uint8_t ISSUNSTATE_check_mdrn(uint8_t sunstate_mode, const char *range_type, str
 int ISSUNSTATE_check_flag_result(l_scenes_list_v2_t *scene_node, struct tm *info, uint8_t flag_check)
 {
     int ret = 0;
-    const uint8_t TIME_FLAG = (1 << 0);
-    const uint8_t WEEKDAYS_FLAG = (1 << 1);
-    const uint8_t DAYS_FLAG = (1 << 2);
-    const uint8_t MIDNIGHT_FLAG = (1 << 3);
-    const uint8_t MASK_TIME_FLAG = (1 << 4);
-    const uint8_t MASK_WEEKDAYS_FLAG = (1 << 5);
-    const uint8_t MASK_DAYS_FLAG = (1 << 6);
-    const uint8_t MASK_MIDNIGHT_FLAG = (1 << 7);
+    /* An enum, not eight `const uint8_t` locals. A const-qualified object is
+    ** not an integer constant expression in C, so the eight case labels below
+    ** were not valid C: host GCC 13 rejects all eight with "case label does
+    ** not reduce to an integer constant", and the only reason the firmware
+    ** builds is that the xtensa GCC the IDF ships folds them as an extension.
+    ** That is also the single thing that made this translation unit look
+    ** un-hostable -- with the include set the sibling then-methods helper
+    ** already uses, these eight errors were the *entire* cost, and no IDF
+    ** header needed stubbing at all. The values are unchanged. */
+    enum
+    {
+        TIME_FLAG = (1 << 0),
+        WEEKDAYS_FLAG = (1 << 1),
+        DAYS_FLAG = (1 << 2),
+        MIDNIGHT_FLAG = (1 << 3),
+        MASK_TIME_FLAG = (1 << 4),
+        MASK_WEEKDAYS_FLAG = (1 << 5),
+        MASK_DAYS_FLAG = (1 << 6),
+        MASK_MIDNIGHT_FLAG = (1 << 7),
+    };
     s_sunstate_data_t *user_data = (s_sunstate_data_t *)(scene_node->when_block->fields->user_arg);
     if (user_data)
     {
@@ -825,6 +793,29 @@ int ISSUNSTATE_check_flag_result(l_scenes_list_v2_t *scene_node, struct tm *info
         ** midnight -- a time the clock reaches every night. */
         if ((0 != user_data->curr_tm_day) && (0 != user_data->sunstate_mode) && (user_data->moment_valid) && (flag_check & MASK_TIME_FLAG)) // defined_moment should have the current day
         {
+            /* MASK_TIME_FLAG is consumed by the condition above and cleared
+            ** here, because every case label below enumerates an exact value of
+            ** `flag_check` and not one of the eight includes this bit.
+            **
+            ** It is always set. ISSUNSTATE_get_suntime sets it for the
+            ** sunrise/sunset field, which is the field that makes a scene an
+            ** isSunState scene in the first place, and the condition above
+            ** refuses to go any further without it. So before this line
+            ** `flag_check` always had bit 0x10 set and the eight labels are
+            ** 0x88, 0x01, 0xee, 0x67, 0xcc, 0x45, 0xaa and 0x23 -- none of
+            ** which can be reached. `switch (flag_check)` fell to `default`
+            ** every time and this function returned 0 for every input it can
+            ** be given: no isSunState condition could ever fire, with or
+            ** without weekdays, month-days or a midnight range.
+            **
+            ** That is asserted from the arithmetic rather than from a trace on
+            ** hardware, and it is checked both ways in tests/host/test_issun.c:
+            ** exhaustively over all 512 (flag_check, moment-matches) pairs,
+            ** against the real function, which is why this file is compiled
+            ** there. Clearing the bit here leaves all eight labels meaning
+            ** exactly what their trailing comments say they mean. */
+            flag_check &= (uint8_t)~MASK_TIME_FLAG;
+
             // 1. Set 'time-flag', when defined moment is matched : [sunrise/sunset_moment + offsets (if any)]
             if ((info->tm_hour == user_data->defined_moment.tm_hour) &&
                 (info->tm_min == user_data->defined_moment.tm_min) &&

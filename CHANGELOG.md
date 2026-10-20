@@ -1318,6 +1318,78 @@ None of these have been exercised on physical hardware; see Known gaps.
   cJSON node as a string — but which branch a real controller takes is
   untested. Nothing in this entry has been run on hardware.
 
+- **No `isSunState` scene condition could ever fire. The function that decides
+  deciphered its own input incorrectly and returned 0 for every one of its 512
+  possible inputs.**
+  [`ISSUNSTATE_check_flag_result`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c)
+  accumulates a bitmask describing which scene fields were present and which
+  matched, then `switch`es on it against eight case labels. Bit 4
+  (`MASK_TIME_FLAG`) is set while the time condition is being evaluated and is
+  consumed by the condition guarding the switch — but it was never cleared
+  before the switch ran. So `flag_check` always arrived with 0x10 set, none of
+  the eight labels include that bit, every input fell through to `default`, and
+  `default` returned false. The fix is one line: clear the bit once it has been
+  used.
+
+  This is the "looks like a working product" failure mode in its purest form.
+  A sunrise/sunset scene saved from the app, listed by the hub, and reported as
+  enabled simply never ran. Nothing logged, nothing errored, and the only
+  symptom was a scene that stayed quiet — indistinguishable from a scene whose
+  conditions were genuinely not met, which is exactly what a user debugging it
+  would assume.
+
+  **Evidence, and the reason there is any.** The containing translation unit
+  was previously believed un-hostable, which is why this sat behind no test.
+  That belief was wrong: it needed a `freertos/task.h` stub and three warning
+  suppressions, and nothing else. New
+  [`tests/host/test_issun.c`](tests/host/test_issun.c) is **29** checks at
+  **0** failures, built against the real translation unit rather than a copy.
+  The load-bearing check sweeps **all 512** `(flag_check, clock-matches)` pairs
+  and asserts the firing set is exactly the 16 derived independently from the
+  case labels.
+
+  **18** mutants were run against the subject (`probe/eti5.sh`,
+  `probe/eti10.sh`): **14 killed, 4 survived**, with the subject restored
+  byte-identical and green afterwards. Two results carry the weight:
+
+  - **Deleting the mask-clear — which reproduces the code exactly as it
+    shipped — is killed, with 11 of the 29 checks failing** and the sweep
+    printing `0 of 512 pairs fire`. That is the measurement behind the claim
+    at the top of this entry: not an inference from reading the switch, but
+    the shipped function enumerated over its whole input space.
+  - **Dropping the union-discriminant clause added in `0b72341` is killed by
+    an AddressSanitizer SEGV on address 0x1**, from `strlen()` reading a small
+    integer out of the union as a pointer. That closes a gap recorded against
+    that commit — *"Mutating the layout fails a check; deleting the guard fails
+    nothing"* — which is now false, and the entry above has been corrected.
+
+  The 4 survivors are recorded rather than chased. Two were predicted: every
+  case on this path declares its field type as `TOKEN` and carries a real
+  string, so the schema-type and NULL clauses are unreachable from any input a
+  scene can produce. One is a genuine coverage gap — no test calls
+  `ISSUNSTATE_get_suntime`, so a mutant setting the wrong bit in it survives,
+  and that is listed in [Known gaps](#known-gaps). The fourth is an
+  **equivalent** mutant: removing the NULL check on the range word changes
+  nothing, because `EZPI_STRNCMP_IF_EQUAL` NULL-checks both its arguments
+  itself and the length ternary guards the `strlen`. I had predicted that one
+  would be killed and was wrong, for the ordinary reason — I had not read the
+  macro.
+
+  **Untested on hardware.** No board has evaluated an `isSunState` condition
+  before or after this change. The 512-pair sweep is a host loop over the real
+  function; whether a hub now fires a sunrise scene is not something this
+  establishes, and the clock and suntime inputs it depends on are stubbed here.
+
+  Two things found while making the file hostable are recorded as gaps rather
+  than fixed, to keep this commit to one change: ten `-Wsign-compare` sites in
+  the `WHEN_function_for_opr/repeat/follow/pulse` timing family, comparing a
+  `uint32_t` tick count against an `int` threshold (none of them on the
+  `isSunState` path — I mis-measured this once and said so), and a wrinkle at
+  `flag_check` 0x89, where a range is present and the moment is exact. Both are
+  in [Known gaps](#known-gaps). The suppressions are `-Wno-error=cpp` rather
+  than `-Wno-cpp`, deliberately, so upstream's `#warning` about the switch
+  ladder keeps printing.
+
 ### UART sensor dispatch — [sec]
 
 - **The UART receive task invoked its callback with a NULL buffer on every
@@ -9282,12 +9354,58 @@ Listed because a changelog that only mentions what was finished is misleading.
   lot of green and only half of it is the kind that can go red.
 
   [`ISSUNSTATE_eval_range`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c#L706)
-  is now a third function in this half, and the same way round. The discriminant
-  guard added to it under *Memory safety* has its *premise* measured — three
-  checks in `test_scenefields.c` that write a bool into the union and read a
-  non-null `char *` back out, with the de-unioned layout as a control that makes
-  them fail — and the guard itself demonstrated only by a four-target build.
-  Mutating the layout fails a check; deleting the guard fails nothing.
+  **was** a third function in this half, and this paragraph used to end: *"Mutating
+  the layout fails a check; deleting the guard fails nothing."* **That is no
+  longer true, and the correction is the useful part.** The premise was always
+  measured — three checks in `test_scenefields.c` that write a bool into the
+  union and read a non-null `char *` back out, with the de-unioned layout as a
+  control that makes them fail — but the guard itself was supported only by a
+  four-target build, because the translation unit holding it was believed
+  un-hostable. It was not: it needed a `freertos/task.h` stub and three warning
+  suppressions. With `tests/host/test_issun.c` in place, deleting the
+  discriminant clause now fails loudly — an AddressSanitizer SEGV on address
+  0x1, from `strlen()` reading a small integer out of the union as a pointer.
+  See *Scene triggers*.
+
+  The general lesson is about this gap's own framing rather than about scenes:
+  "untestable" was a conclusion inherited and repeated across several entries
+  here, and in this instance it was never checked. One stub file moved a
+  function from the half that cannot go red into the half that can. The rest of
+  the functions listed in this gap have **not** been re-examined in that light,
+  and should be before anything else here is described as untestable.
+
+- **`ISSUNSTATE_get_suntime` has no test, and a mutant proves it.** Of the 18
+  mutants run against
+  [`ezlopi_core_scenes_when_methods_helper_functions.c`](ezlopi-core/ezlopi-core-scenes/ezlopi_core_scenes_when_methods_helper_functions.c),
+  one survivor is a genuine coverage gap rather than an equivalent mutant:
+  changing which bit `ISSUNSTATE_get_suntime` sets is undetected, because no
+  check calls it. The function is the wiring half described above — it asks for
+  a suntime, records the outcome, and keeps the `user_arg` block — so testing
+  it needs the suntime lookup stubbed, which `test_issun.c` does not do. The
+  29 checks there cover the *decision*, not the *fetch*.
+
+- **Ten `-Wsign-compare` sites in the scene timing family are suppressed, not
+  fixed.** Making the above file hostable required `-Wno-sign-compare`, and the
+  ten sites it hides are all in
+  `WHEN_function_for_opr`/`_repeat`/`_follow`/`_pulse`: a `uint32_t` tick count
+  compared against an `int` threshold. None are on the `isSunState` path — I
+  measured that wrongly once, with a `grep -B20` that caught unrelated "In
+  function" lines, and the corrected attribution by `awk` state-tracking puts
+  all ten in the timing family. The comparison is wrong at the point a tick
+  count exceeds `INT_MAX`, which on a 1 kHz tick is about 25 days of uptime.
+  Left alone because fixing it is a behavioural change to scene timing with no
+  test behind it, and the file only became host-testable in this same change.
+  That file is now hostable, so these are reachable by a test for the first
+  time — which is the argument for fixing them next rather than later.
+
+- **`flag_check == 0x89` — a range present together with an exact moment — is
+  not pinned by any check.** The 512-pair sweep in `test_issun.c` asserts the
+  firing set matches the 16 combinations derived from the case labels, and 0x89
+  is outside that set, so the sweep agrees with the switch without either one
+  being shown correct for this input. Whether a scene that specifies both an
+  `isSunState` range and an exact moment *should* fire is a product question
+  about what the app can actually save, and there is no sample payload in this
+  tree that produces the combination.
 
 - **The wire shape of `hms_interval` is assumed, not verified.** The isSunState
   offset parser described under *Scene triggers* takes a string — `"30"`,
