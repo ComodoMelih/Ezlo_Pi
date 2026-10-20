@@ -4357,6 +4357,31 @@ flashed.**
   unactionable. Neither changes behaviour: the device is dropped in exactly the
   same cases as before.
 
+  **Correction, measured later: the first of those two messages is unreachable
+  from every driver in the tree, and this entry originally failed to say so.**
+  The drop is gated on `< 0`, but `ezlopi_error_t` is a `typedef int32_t` whose
+  only non-positive values are `EZPI_SUCCESS` (0), `EZPI_FAILED` (-1) and
+  `EZPI_NOT_AVAILABLE` (-2) — every named `EZPI_ERR_*` code is a **positive**
+  bit flag, including `EZPI_ERR_INIT_DEVICE_FAILED` (`0x200`), whose own comment
+  in [`ezlopi_core_errors.h`](ezlopi-core/ezlopi-core-errors/ezlopi_core_errors.h#L73)
+  says it is returned "to abort futher initialization of the device in case it
+  has to be deleted from the tree". Brace-matching every
+  `static ezlopi_error_t __init*` body under `ezlopi-sensors-devices/` finds
+  **64** of them: **32** name `EZPI_ERR_INIT_DEVICE_FAILED`, and **none** names
+  `EZPI_FAILED` or `EZPI_NOT_AVAILABLE` or returns a negative literal.
+
+  So no driver can currently report an init failure in the form the core tests
+  for, the device is never dropped, and the message describing the drop cannot
+  print. What the entry above says about the *reason* a drop was invisible is
+  still accurate, and the message is still the right message — it is simply
+  waiting on a defect one layer down. The claim that this addressed "close to
+  the worst failure mode a plug-and-play product can have" was too strong as
+  written: the real failure mode is the opposite one, a device that failed to
+  initialise being **kept** and presented as working. Recorded under *Known
+  gaps* rather than fixed here, because making the gate fire would start
+  dropping devices across 32 drivers at once and that is a behavioural change
+  to put in front of a human, not a cleanup.
+
   `curr_item` is the failing item rather than `NULL` at the point the message is
   built, because the inner loop `break`s on failure and only runs off the end on
   success. It is still NULL-guarded, since reading a pointer because of a
@@ -10412,6 +10437,36 @@ Listed because a changelog that only mentions what was finished is misleading.
   claimed as fixed. It is also why that one fix is unprovable from the host
   suite: no single-device test can distinguish the parameter from the global.
   See the gap list at the foot of `tests/host/test_hilinkset.c`.
+
+- **No driver can report an initialisation failure, because every error code is
+  the wrong sign.** `__EZPI_initialize_devices_v3()` drops a device when an
+  item's `EZLOPI_ACTION_INITIALIZE` returns `< 0`
+  ([`ezlopi_core_ezlopi.c#L239`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L239),
+  freed at
+  [`#L307`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L307)).
+  `ezlopi_error_t` is a `typedef int32_t` whose only non-positive values are
+  `EZPI_SUCCESS` (0), `EZPI_FAILED` (-1) and `EZPI_NOT_AVAILABLE` (-2); every
+  named `EZPI_ERR_*` code is a positive bit flag. Brace-matching every
+  `static ezlopi_error_t __init*` body under `ezlopi-sensors-devices/` gives
+  **64** init functions, of which **32** return
+  [`EZPI_ERR_INIT_DEVICE_FAILED`](ezlopi-core/ezlopi-core-errors/ezlopi_core_errors.h#L73)
+  — `0x200`, positive — and **none** returns `EZPI_FAILED`,
+  `EZPI_NOT_AVAILABLE`, or a negative literal.
+
+  So the gate is dead, and the constant documented as the way to get a device
+  "deleted from the tree" is numerically incapable of doing it. A sensor whose
+  I²C bus never came up, or whose radar never answered, is kept in the device
+  list and published to the cloud as a working device that reports nothing.
+  That is worse than the drop it was meant to cause, because a missing device
+  at least tells the owner to try again.
+
+  Not fixed here, and deliberately so: changing the test to `!= 0`, or the
+  constants' sign, would begin dropping devices from 32 drivers simultaneously
+  on the first boot after the change, including on hardware nobody here can
+  test. It needs a decision about which drivers *should* be fatal, taken by
+  someone who can watch a hub come up. The logging that names a dropped device
+  is already in place for when it does fire — see the corrected entry under
+  *Core device init* above.
 
 - **Seven `int32_t *` pointer-type mismatches are invisible on every target this
   project ships.** Building the tree for `esp32c3` while verifying the hilink
