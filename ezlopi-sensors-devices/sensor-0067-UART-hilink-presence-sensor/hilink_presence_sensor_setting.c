@@ -426,7 +426,17 @@ static int __setting_initialize_hilink_presence_sensor_radar_distance_sensitivit
             if (distance_sensitivity_value)
             {
                 memset(distance_sensitivity_value, 0, sizeof(s_hilink_radar_distance_sensitivity_value_t));
-                int read_value = 0;
+                /* int32_t, not int, because that is what the parameter is:
+                ** EZPI_core_nvs_read_int32 takes an int32_t *. The two spell
+                ** the same type on xtensa, where int32_t is int, so esp32,
+                ** esp32s2 and esp32s3 all accept `int read_value` silently.
+                ** On riscv32 int32_t is long int, and the esp32c3 build warns
+                ** that argument 1 has an incompatible pointer type -- the
+                ** callee would be writing a long int through a pointer to an
+                ** int object. Both are four bytes wide on that target, so
+                ** nothing observably broke, but the constraint violation was
+                ** real and only one of the four targets could see it. */
+                int32_t read_value = 0;
                 ezlopi_error_t error = EZPI_core_nvs_read_int32(&read_value, "rdrsens");
                 if (EZPI_SUCCESS == error)
                 {

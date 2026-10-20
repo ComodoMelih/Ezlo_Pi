@@ -2116,14 +2116,14 @@ None of these have been exercised on physical hardware; see Known gaps.
   **6** of them inverted. All three `EZPI_core_nvs_write_int32` tests were
   correct, and six of the seven `EZPI_core_nvs_write_str` tests were not — the
   single exception being
-  [`__setting_set_pre_defined_setting`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L872).
+  [`__setting_set_pre_defined_setting`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L882).
   An earlier *Known gaps* entry described this as "its NVS-write test is
   **inverted**", singular, from a reading rather than a count; that entry has
   been corrected in place.
 
 - **The one write test written the right way round had its answer thrown
   away.** Immediately after that correct test,
-  [line 898](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L898)
+  [line 908](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L908)
   assigned over `ret` rather than accumulating into it, on every call where the
   template lookup succeeded — which is every call carrying a mode name the app
   can actually send. So the correct test bought nothing: a presence mode that
@@ -2132,9 +2132,9 @@ None of these have been exercised on physical hardware; see Known gaps.
 
 - **An entire error path reported success unconditionally, which is why five
   other fixes could not be seen.**
-  [`__setting_set_change_setting_template`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L761)
+  [`__setting_set_change_setting_template`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L771)
   discarded the return value of all three of its calls to
-  [`__setting_set_change_user_defined_template`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L694),
+  [`__setting_set_change_user_defined_template`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L704),
   and then returned a `ret` that nothing in that branch had ever written. Five
   distinct faults inside the callee — a failed NVS write, a radar refusing the
   custom template, a missing settings node, a missing payload, and a setting
@@ -2163,7 +2163,7 @@ None of these have been exercised on physical hardware; see Known gaps.
     after `nvs_commit` succeeds — so the value is durable before the panic, and
     the next boot takes the "already exists" path. One unexplained restart
     while adding a sensor, then never again.
-  - [`__settings_callback`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L486)
+  - [`__settings_callback`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L496)
     discarded the return of all four dispatchers. Fixing the dispatchers
     without this would have been a change with no observable effect at all.
   - A settings node freed while the device list still pointed at it, in two
@@ -2174,7 +2174,7 @@ None of these have been exercised on physical hardware; see Known gaps.
     dereferenced the settings node while checking only the payload behind it.
     Its caller is the UART frame handler, so once that one allocation had
     failed the hub could not process presence at all.
-  - [`__setting_reset_user_defined_setting`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L1059)
+  - [`__setting_reset_user_defined_setting`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L1069)
     guarded on `setting` — the pointer the line above had already tested — so
     the guard was always true and the `memset` below it wrote **20** bytes
     through a NULL payload pointer. (An earlier draft of this entry, and the
@@ -2185,7 +2185,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   - Four leaks: the string `EZPI_core_nvs_read_str` hands the caller, leaked on
     every boot with a stored predefined mode; the serialized setting string at
     three call sites; and the `cJSON` object in
-    [`__prepare_user_defined_setting_str`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L1358),
+    [`__prepare_user_defined_setting_str`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L1368),
     which was never deleted on any path. Two of these are provable **only** by
     LeakSanitizer and have no named check: `cjext.c` is compiled without
     `stubs-allocfail` on its include path, so its allocations go to libc
@@ -9253,6 +9253,74 @@ enumerators — so the live half of this component was never affected.
   the real project build and confirming the assert fires with that message,
   then removing it; esp32 and esp32c3 (RISC-V, a different ABI) both build
   clean with binary sizes unchanged, since the asserts cost nothing.
+
+  A related count, recorded here because it looks like it contradicts the 87
+  and does not. On esp32c3 the same macro accounts for **83**, not 87. The four
+  missing ones are two sites each in the DHT11 and DHT22 drivers, whose entire
+  bodies sit inside a `CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 ||
+  CONFIG_IDF_TARGET_ESP32S2` guard — so on esp32c3 those two translation units
+  preprocess away to nothing and those drivers are not available on that chip
+  at all. The enum reasoning above is not target-dependent: asked directly,
+  all four toolchains warn identically on passing `enum *` where `int *` is
+  declared.
+
+- **A pointer-type defect that only one of the four targets could see.**
+  [`hilink_presence_sensor_setting.c`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c)
+  read a stored setting into a local declared `int` and passed its address to
+  `EZPI_core_nvs_read_int32`, whose parameter
+  [`ezlopi_core_nvs.h`](ezlopi-core/ezlopi-core-nvs/ezlopi_core_nvs.h) declares
+  as `int32_t *`. The local is now `int32_t`. Pre-existing, not introduced by
+  this branch.
+
+  The mechanism, taken from the compilers rather than argued: `__INT32_TYPE__`
+  is `int` on all three xtensa compilers and `long int` on
+  `riscv32-esp-elf-gcc`. A probe that passes `int *` where `int32_t *` is
+  declared is silent on esp32, esp32s2 and esp32s3 and warns on esp32c3. So
+  the callee would have been writing a `long int` through a pointer to an
+  `int` object. Both are four bytes wide on that target, so nothing
+  observably broke — but the constraint violation was real, and three of the
+  four builds were structurally unable to report it.
+
+  Measured before and after, as distinct warning sites rather than as
+  occurrences, because the same warning is counted once per compilation pass
+  and the totals mislead: esp32c3 goes from **8** distinct
+  `-Wincompatible-pointer-types` sites to **7**, the site that disappears is
+  exactly this one, and none appear. All four targets build, and every image
+  is byte-identical to the pre-fix build — `0x19cf10`, `0x1512b0`, `0x1a0a50`
+  and `0x1aedb0` — which is the expected outcome for two spellings of the same
+  32-bit type and is the evidence that this changed no code generation. The
+  pre-fix build of the same tree supplies the reversed half of the comparison,
+  so this is a measurement and not an assertion.
+
+  **The host suite cannot see this class of defect at all**, and the stub in
+  [`test_hilinkset.c`](tests/host/test_hilinkset.c) had quietly made that
+  worse: it declared the two NVS integer functions with `int` and `int`
+  pointer parameters, copied from the caller rather than from the header. On
+  x86-64 Linux `int32_t` is `int`, so the two spellings are one type and no
+  host build could ever have contradicted the caller. Both now match the
+  header. The suite is unchanged at 34 binaries, 6613 checks and 0 failures
+  before and after, which is the point: this is a correction to what the stub
+  claims, not a fix the host can demonstrate.
+
+  **Six such sites remain on esp32c3 and are deliberately not touched here**,
+  because they are three different defects and one of them is a change of
+  policy rather than of type. Three pass `uint32_t *` where the IDF's
+  `uart_get_buffered_data_len` wants `size_t *` — one in `ezlopi_hal_uart.c`
+  and two in `ezlopi_service_uart.c`. Two pass `e_trace_severity_t *` where
+  `ezlopi_core_nvs.h` declares `uint32_t *`, in `ezlopi_core_log.c`. The last
+  is the same `int`-versus-`int32_t` confusion as the one fixed above, reached
+  through a function pointer's return type:
+  `ezlopi_service_system_temperature_sensor.c` passes a function returning
+  `int` where `EZPI_core_device_add_item_to_device` wants one returning
+  `ezlopi_error_t`, and that return type is part of the broader "no driver can
+  report an initialisation failure" problem recorded under Known gaps.
+
+  CI already builds all four targets in a matrix, so this diagnostic was
+  present in CI output the whole time; it is not escalated, because only
+  `-Werror=format` is. Escalating `-Wincompatible-pointer-types` is not
+  available as an option while the 87 `CJSON_GET_VALUE_INT` sites above are
+  deliberately unchanged, and no baseline has been pinned for the remaining
+  six.
 
 - **`REQUIRES tinyusb` was unconditional while every use of it was not.**
   `ezlopi_service_uart.c` wraps all of its USB-CDC code — includes and calls

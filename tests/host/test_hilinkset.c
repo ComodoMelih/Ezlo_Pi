@@ -94,6 +94,7 @@
  * failed check.
  */
 #include <stdbool.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -203,7 +204,7 @@ static void reset_alloc_state(void)
 static const char *const nvs_names[NVS_KEYS] = {"predef", "userdef", "rdrsens"};
 
 static char *nvs_planted[NVS_KEYS];    /* NULL means the key is absent */
-static int nvs_planted_int;
+static int32_t nvs_planted_int;
 static int nvs_planted_int_present;
 
 /* The pointer each read_str call handed out, so a check can ask whether the
@@ -291,7 +292,17 @@ ezlopi_error_t EZPI_core_nvs_write_str(const char *data, uint32_t len, const cha
     return nvs_write_result[i];
 }
 
-ezlopi_error_t EZPI_core_nvs_read_int32(int *i_val, const char *nvs_name)
+/* int32_t in both signatures, because that is what ezlopi_core_nvs.h declares.
+** These two previously said `int *` and `int`, copied from the caller rather
+** than from the header, and nothing here could have caught it: on x86-64 Linux
+** int32_t is int, so the two spellings are the same type and the compiler has
+** nothing to say. The disagreement was only visible on the esp32c3 build,
+** where int32_t is long int -- and what it flagged there was the caller, in
+** hilink_presence_sensor_setting.c, not this stub. A stub that copies the
+** caller's type can never contradict the caller, which is the whole reason to
+** take stub signatures from the header instead. test_tz.c does this
+** deliberately and says so; this file did not. */
+ezlopi_error_t EZPI_core_nvs_read_int32(int32_t *i_val, const char *nvs_name)
 {
     (void)nvs_name;
     if (nvs_planted_int_present && i_val)
@@ -302,7 +313,7 @@ ezlopi_error_t EZPI_core_nvs_read_int32(int *i_val, const char *nvs_name)
     return EZPI_ERR_NVS_READ_FAILED;
 }
 
-ezlopi_error_t EZPI_core_nvs_write_int32(int i_val, const char *nvs_name)
+ezlopi_error_t EZPI_core_nvs_write_int32(int32_t i_val, const char *nvs_name)
 {
     int i = nvs_index(nvs_name);
     if (i < 0)
@@ -310,7 +321,7 @@ ezlopi_error_t EZPI_core_nvs_write_int32(int i_val, const char *nvs_name)
         return EZPI_ERR_NVS_WRITE_FAILED;
     }
     nvs_writes[i]++;
-    snprintf(nvs_written[i], sizeof(nvs_written[i]), "%d", i_val);
+    snprintf(nvs_written[i], sizeof(nvs_written[i]), "%" PRId32, i_val);
     return nvs_write_result[i];
 }
 
