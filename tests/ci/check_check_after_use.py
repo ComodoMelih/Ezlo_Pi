@@ -65,6 +65,24 @@ in five classes, each fixed here and pinned by a fixture:
     line after they were assigned. Such macros are now found by their shape
     rather than by name.
 
+WHAT IT DOES NOT SEE, EVEN IN SCOPE
+
+`ezlopi-sensors-devices` was outside DIRS until the check-after-use defect in
+`sensor_0067_hilink_presence_sensor.c` was found by reading rather than by this
+scanner. Adding it costs nothing measurable and found nothing: the scan goes
+from 163 files to 251 and the finding count stays at zero. That is worth
+stating plainly, because it means the one defect of this exact class known to
+have existed in that tree would *still* not have been reported.
+
+The reason is the precision anchor, working as designed. The pointer there was
+`ld2410_outputs_t *hilink_data = (ld2410_outputs_t *)item->user_arg;` -- a
+cast of a struct member, not a return value from a call -- so ASSIGN_CALL does
+not match it and the name is never a candidate. Widening the anchor to any
+assignment would turn this into a general unchecked-pointer scan over 251
+files, which the 40-false-positives-in-41 history above says would not be
+read. The payload-cast shape is better served by a check of its own, aimed at
+`item->user_arg` specifically.
+
 One class remains, and is suppressed inline rather than solved: a guard
 enforced through data flow instead of a NULL test. In the wifi scan handler
 `found` is set to 0 in the `NULL == records` branch, so the
@@ -84,6 +102,7 @@ import tempfile
 DIRS = [
     'ezlopi-core', 'ezlopi-hal', 'ezlopi-services', 'ezlopi-cloud',
     'ezlopi-util', 'ezlopi-user-config', 'ezlopi-main',
+    'ezlopi-sensors-devices',
 ]
 
 # Library functions that dereference the pointer argument named here. Position

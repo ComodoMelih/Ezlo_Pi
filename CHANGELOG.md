@@ -10189,6 +10189,28 @@ enumerators — so the live half of this component was never affected.
   format mismatches in driver files no test currently reaches — a change worth
   making on purpose rather than as a side effect.
 
+- **The guard-after-use scanner was skipping the directory most of this
+  branch's defects were found in.**
+  [`tests/ci/check_check_after_use.py`](tests/ci/check_check_after_use.py)'s
+  `DIRS` named seven directories and `ezlopi-sensors-devices` was not one of
+  them, leaving 88 driver sources outside the scan entirely. Adding it takes
+  the scan from 163 files to 251 and reports **zero** new findings, so it costs
+  nothing and uncovers no backlog.
+
+  It is recorded anyway, because the honest reading of that zero is
+  unflattering. The one defect of exactly this class known to have existed in
+  that tree — the `__add_value_to_cjson()` guard in sensor 0067, described
+  above — would still not be reported, since the scanner's precision anchor
+  requires the pointer be assigned from a *call* and that one is a cast of a
+  parameter's field. Checked by running the scanner's own `ASSIGN_CALL` pattern
+  against that exact line: no match. So this widens coverage to future code of
+  a shape the tree does not presently contain; it does not detect the thing
+  that prompted it. The payload-cast shape stays in Known gaps as needing a
+  check of its own.
+
+  Self-test unchanged at 16 fixtures, with the 8 must-fire ones still flagged
+  and the 8 must-be-silent ones still clean.
+
 ### Packaging — [infra]
 
 - **The uploaded firmware artifacts could not flash a blank board.** The
@@ -10546,21 +10568,22 @@ Listed because a changelog that only mentions what was finished is misleading.
   item-update path. A return-type census cannot see the last three classes, so
   the figure of nine above is a lower bound on the remaining work, not a total.
 
-- **`check_check_after_use.py` does not scan the driver tree, and would not have
-  caught the hilink guard-after-use even if it did.** Two independent gaps,
-  measured rather than assumed. Its `DIRS` list names seven directories and
-  `ezlopi-sensors-devices` is not among them, so 88 driver sources — the files
-  most of this branch's defects were found in — are outside its scope entirely;
-  adding the directory takes it from 163 files scanned to 251 with **zero** new
-  findings, so the omission is free to fix and is tracked as its own change.
-  But the seventh hilink defect would still have escaped: the scanner's
-  precision anchor requires the pointer be assigned from a *call* inside the
-  function, and `ld2410_outputs_t *hilink_data = (ld2410_outputs_t *)item->user_arg;`
-  is a cast of a parameter's field, while `item` itself is a parameter. Checked
-  by running the scanner's own `ASSIGN_CALL` pattern against that exact line: no
-  match. Widening the anchor to cover parameters is not attempted here, because
-  the 40-false-positives-in-41 history recorded at the top of that file is what
-  the anchor exists to prevent.
+- **`check_check_after_use.py` would not catch the hilink guard-after-use even
+  though it now scans the driver tree.** This entry originally reported two
+  independent gaps. The first is closed: `ezlopi-sensors-devices` has been added
+  to `DIRS`, taking the scan from 163 files to 251 with zero new findings, and
+  that change is described under Testing above.
+
+  The second remains, and it is the one that mattered. The scanner's precision
+  anchor requires the pointer be assigned from a *call* inside the function, and
+  `ld2410_outputs_t *hilink_data = (ld2410_outputs_t *)item->user_arg;` is a cast
+  of a parameter's field, while `item` itself is a parameter. Checked by running
+  the scanner's own `ASSIGN_CALL` pattern against that exact line: no match.
+  Widening the anchor to any assignment is not attempted, because the
+  40-false-positives-in-41 history recorded at the top of that file is what the
+  anchor exists to prevent; the payload-cast shape needs a check aimed at
+  `item->user_arg` instead, which is the one scoped under Device settings above
+  — three implementations, 30 payload-read sites.
 
 - **A second hilink presence sensor on one hub is broken by design.**
   `hilink_presence_sensor_setting.c` keeps all three setting nodes in
