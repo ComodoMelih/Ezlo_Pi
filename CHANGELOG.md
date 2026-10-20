@@ -10189,6 +10189,45 @@ enumerators — so the live half of this component was never affected.
   format mismatches in driver files no test currently reaches — a change worth
   making on purpose rather than as a side effect.
 
+- **Every fix in the hilink settings file was proved by reversing it, and the
+  five reversals that prove nothing are recorded as such.** Each fix in
+  `hilink_presence_sensor_setting.c` was undone on its own, the suite rebuilt
+  and rerun against it, and the subject restored and checked byte-identical by
+  sha256 before the next reversal. 30 reversals; after the third round 25 of
+  them turn [`tests/host/test_hilinkset.c`](tests/host/test_hilinkset.c) red
+  and 5 do not.
+
+  The three rounds are the point, because the first one was mostly a report on
+  the test file rather than on the subject:
+
+  | Round | Checks | Reversals | Leave the suite green |
+  |---|---|---|---|
+  | 1 | 58 | 25 | 9 |
+  | 2 | 72 | 30 | 6 |
+  | 3 | 75 | 30 | 5 |
+
+  Round 2 added 14 checks and 5 further reversals: the new checks closed six of
+  the nine blind spots — the apply-path and reset write results, the radar's
+  refusal of a custom template, the no-payload apply path, the reset guard
+  testing the wrong pointer, and a leaked reset string — while the five new
+  reversals opened three more. Round 3 added 3 checks to close one of those,
+  the predefined set path overwriting its own write result, which had been
+  reported as success with nothing noticing.
+
+  Of the 25 that do fail, 16 fail a named check and 9 are caught only by a
+  sanitizer or by the stub that aborts: 5 LeakSanitizer leaks with a 0-failure
+  tally, 3 AddressSanitizer faults that print no tally at all, and the
+  `ESP_ERROR_CHECK`-restoring reversal, which exits on `SIGABRT`. A suite that
+  only read the tally would score those 9 as passes, which is the argument for
+  running the host binaries under sanitizers rather than treating the printed
+  count as the result.
+
+  The five that stay green are not written off: they are listed with their
+  reasons at the foot of that test file, and three of them are one underlying
+  defect, recorded under Known gaps. The harness that drives all this is a
+  local scratch script and is deliberately not committed, so the evidence here
+  is the record of what it measured rather than something a reader can re-run.
+
 - **The guard-after-use scanner was skipping the directory most of this
   branch's defects were found in.**
   [`tests/ci/check_check_after_use.py`](tests/ci/check_check_after_use.py)'s
@@ -10541,12 +10580,29 @@ Listed because a changelog that only mentions what was finished is misleading.
   return type anywhere in the tree is plain `int`. Ten were fixed in
   `sensor_0068_ENS160_gas_sensor_settings.c`, nineteen in
   `hilink_presence_sensor_setting.c` and one in
-  `sensor_0067_hilink_presence_sensor.c` — all three files now have none. The
-  remaining **9** are all in `pms_dev_items_prepare.c`. With
+  `sensor_0067_hilink_presence_sensor.c` — all three files are now at zero,
+  re-confirmed by counting call sites with comments stripped. The remaining
+  **9** are all in `pms_dev_items_prepare.c`, at lines 97–105, one per
+  particulate-matter item. With
   `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y` and no `NDEBUG` — this
   project's configuration — each is a panic and reboot on a return value whose
   documented meaning is "failed". They are not fixed here because there is no
   host test for that file.
+
+  Re-derived repo-wide over the 700 tracked `.c` and `.h` files: **69**
+  `ESP_ERROR_CHECK` call sites remain, in 15 files, 67 of them passing a call
+  directly. That does not reconcile with 102 less the 30 fixed, and the earlier
+  figure is not reproducible from here because this entry never recorded the
+  scope it was taken over. So 69 is the current measurement and the 102 is kept
+  only as the history of how the 39 was arrived at. The two largest holdings
+  are *not* the plain-`int` class — `TCS230.c` has 20 and `sensor_bme280.c` 17,
+  on genuine `esp_err_t` returns, which is the wrong policy correctly typed.
+
+  Counting by name rather than by call site inflates all of this. Both hilink
+  files still contain the string `ESP_ERROR_CHECK` — 5 times and 6 times
+  respectively — and every one of those is inside a comment explaining why the
+  macro was removed. With comments stripped, the call-site count in each file
+  is zero. A bare `grep -c` on either file reports otherwise and is wrong.
 
   This entry previously read *"Twenty-nine more"* and counted the nineteen
   hilink settings sites among them, then *"Ten more"* while one
@@ -10591,9 +10647,23 @@ Listed because a changelog that only mentions what was finished is misleading.
   One consequence was fixed here —
   `__setting_update_user_defined_setting` now reads the node it was handed
   rather than the global — but the general problem is untouched and is **not**
-  claimed as fixed. It is also why that one fix is unprovable from the host
-  suite: no single-device test can distinguish the parameter from the global.
-  See the gap list at the foot of `tests/host/test_hilinkset.c`.
+  claimed as fixed.
+
+  How much this costs in evidence is now measured rather than asserted. Of the
+  30 one-at-a-time reversals of this file's fixes, 25 turn the suite red and
+  **5 leave it green**, and three of those five are this defect: two restore
+  the NULL guards on the file-scope nodes, and one puts back the global read in
+  `__setting_update_user_defined_setting`. All three are invisible to a
+  single-device test, because with one sensor the global and the handed-in node
+  *are* the same node. The other two unproven reversals are the `false` arm of
+  the apply path — which differs only when the global's payload is missing
+  while the caller's is not, the same one-device limitation — and the missing
+  `else` on an unserializable setting, which needs `cJSON_PrintBuffered` to
+  fail while `cjext.c` is compiled without the allocation-failure stubs on its
+  include path. All five are listed with their reasons at the foot of
+  [`tests/host/test_hilinkset.c`](tests/host/test_hilinkset.c), which is where
+  a reader looking at a green 75-check run would have to go to learn that five
+  known defects would not disturb it.
 
 - **No driver can report an initialisation failure, because every error code is
   the wrong sign.** `__EZPI_initialize_devices_v3()` drops a device when an
