@@ -5323,9 +5323,54 @@ flashed.**
   and killed. A mutant that never applied is indistinguishable from one that
   survived, so the distinction is recorded rather than smoothed over.
 
-- The full host suite is **6318** checks across **30** binaries, 0 failures —
-  **6257 + 61 = 6318**, with every binary reporting in the shape the aggregate
-  greps for.
+- **How to onboard a strip is now written down, in
+  [`docs/addressable-led-onboarding.md`](docs/addressable-led-onboarding.md).**
+  The keys reach the driver without a schema change, as above — but the shape of
+  the document carrying them was documented nowhere.
+  [`provisioning-schema.md`](docs/provisioning-schema.md) covers the hub payload
+  (`user_id`, certificates, `cloud_server`), which is a different document sent
+  by a different route, so a user with a 60-pixel strip had to read the resolver
+  to find out what to send. The new file states the five required keys and the
+  three strip keys with their JSON types, the `chipset` that must match, the
+  under-4096-byte bound on the whole document, and the three routes in. It is
+  explicit about the three places a reasonable guess is wrong — a quoted count,
+  a fractional count and an out-of-range count all resolve to **1** rather than
+  to an error — and about what the firmware will not honour: five of the six
+  colour orders, and a `pixel_count` change needing a reboot. It repeats that no
+  board has driven a multi-pixel strip, in the file a user reads first.
+
+- **That doc's example is machine-checked, so it cannot drift.**
+  `tests/host/test_aledonboard.c` reads the markdown, extracts two marked
+  blocks, and runs the first through the real `EZPI_util_devcfgval_check()` and
+  `EZPI_aledcfg_from_json()`, comparing the result against the shape the second
+  block claims. The test holds **no copy of the JSON and no expected numbers**:
+  a copy is the thing that drifts, and two copies agreeing with each other and
+  not with the firmware would both pass. The expected chipset string is linked
+  from `ezlopi_cloud_keywords.c` rather than typed, so a renamed constant cannot
+  leave the test green while every real config is refused. The doc is listed as
+  a prerequisite of the binary, so editing it rebuilds the test. **14 checks**,
+  clean under ASan and UBSan.
+
+  Confirmed able to fail before being believed, which for a test whose subject
+  is a *file* is the whole question — the easy mistake is one that reports
+  "0 checks, 0 failures" and exits 0 when it cannot find the document, which
+  reads as a pass. Eight mutated copies of the doc under `/root` with `DOC_PATH`
+  repointed at each: count changed in one block, `rgbw` flipped in the other,
+  chipset lowercased, `id_item` 9 → 11, marker deleted, marker and fenced block
+  deleted, file absent, order `grb` → `rbg`. The real doc passed; all eight went
+  red at the check that should catch them.
+
+  One of the eight was green on the first run and **the fault was in the
+  mutation, not the test**: the edit anchored on `"rgbw": true` at end of line,
+  both occurrences in the doc carry a trailing comma, so it wrote out a
+  byte-identical copy. A no-op mutant is indistinguishable from a test that
+  failed to notice — the same confusion as the mis-anchored aledcfg mutants
+  above and the empty-toolchain `nm` skip — so the falsification script now
+  compares each mutant against the original before it will report a green.
+
+- The full host suite is **6332** checks across **31** binaries, 0 failures —
+  **6257 + 61 + 14 = 6332**, with every binary reporting in the shape the
+  aggregate greps for.
 
 ### UUID utility — [bug]
 
