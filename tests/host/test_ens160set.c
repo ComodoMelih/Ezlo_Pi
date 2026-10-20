@@ -106,7 +106,7 @@ static int failures;
     } while (0)
 
 /*******************************************************************************
- * The controllable allocator. stubs-ens160/EZLOPI_USER_CONFIG.h points
+ * The controllable allocator. stubs-allocfail/EZLOPI_USER_CONFIG.h points
  * ezlopi_malloc and ezlopi_free at these two, which is what makes the
  * allocation-failure paths of settings initialization reachable at all.
  *

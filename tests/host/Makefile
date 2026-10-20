@@ -82,7 +82,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_devcfg_api test_wssession test_scenefields test_ble_buffer \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
            test_httpresp test_suntime test_issun test_coords test_tz \
-           test_aled test_aledcfg test_aledonboard test_ens160set
+           test_aled test_aledcfg test_aledonboard test_ens160set test_hilinkset
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -1270,7 +1270,7 @@ $(BUILD)/test_cjsongpio: test_cjsongpio.c \
 # this test is that it calls the real one; if CONFIG or an #ifdef ever took it
 # out, every check below would pass against nothing.
 #
-# stubs-ens160/ holds one header: an EZLOPI_USER_CONFIG.h whose ezlopi_malloc
+# stubs-allocfail/ holds one header: an EZLOPI_USER_CONFIG.h whose ezlopi_malloc
 # and ezlopi_free route through two functions the test defines, so an allocation
 # can be made to fail on demand. It is prepended to the include path of *the
 # subject only*, deliberately. cjext.c allocates through the same macro; if it
@@ -1284,7 +1284,7 @@ ENS160_INC := $(HTTPURL_INC) -I$(ENS160_DIR) -I$(CLOUDSET_DIR)
 $(BUILD)/test_ens160set: ENS160_CFLAGS := -std=c99 -O1 -g $(ENS160_INC) \
                                           $(SANITIZERS)
 $(BUILD)/test_ens160set: test_ens160set.c \
-                         stubs-ens160/EZLOPI_USER_CONFIG.h \
+                         stubs-allocfail/EZLOPI_USER_CONFIG.h \
                          $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.c \
                          $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.h \
                          $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
@@ -1292,11 +1292,11 @@ $(BUILD)/test_ens160set: test_ens160set.c \
                          $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c \
                          $(CJEXT_DIR)/cjext.c | $(BUILD)
 	$(CC) $(ENS160_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_ens160set_main.o test_ens160set.c
-	$(CC) -Istubs-ens160 $(ENS160_CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -c -o $(BUILD)/ens160set_subject.o $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.c
+	$(CC) -Istubs-allocfail $(ENS160_CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -c -o $(BUILD)/ens160set_subject.o $(ENS160_DIR)/sensor_0068_ENS160_gas_sensor_settings.c
 	@nm $(BUILD)/ens160set_subject.o | grep -q ' T ENS160_get_ambient_temp_setting' \
 	  || { echo "sensor_0068_ENS160_gas_sensor_settings.c compiled to an object without ENS160_get_ambient_temp_setting in it -- the checks below would be testing nothing"; exit 1; }
 	@nm -u $(BUILD)/ens160set_subject.o | grep -q 'EZPI_test_alloc' \
-	  || { echo "the subject object does not reference EZPI_test_alloc -- stubs-ens160/EZLOPI_USER_CONFIG.h was not the one on its include path, and the allocation-failure checks below would be exercising a malloc that cannot fail"; exit 1; }
+	  || { echo "the subject object does not reference EZPI_test_alloc -- stubs-allocfail/EZLOPI_USER_CONFIG.h was not the one on its include path, and the allocation-failure checks below would be exercising a malloc that cannot fail"; exit 1; }
 	$(CC) $(ENS160_CFLAGS) -c -o $(BUILD)/ens160set_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
 	$(CC) $(ENS160_CFLAGS) -c -o $(BUILD)/ens160set_scales.o $(CONSTANTS_DIR)/ezlopi_cloud_scales_str.c
 	$(CC) $(ENS160_CFLAGS) -c -o $(BUILD)/ens160set_valuetypes.o $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c
@@ -1304,6 +1304,60 @@ $(BUILD)/test_ens160set: test_ens160set.c \
 	$(CC) -o $@ $(BUILD)/test_ens160set_main.o $(BUILD)/ens160set_subject.o \
 	      $(BUILD)/ens160set_keywords.o $(BUILD)/ens160set_scales.o \
 	      $(BUILD)/ens160set_valuetypes.o $(BUILD)/ens160set_cjext.o \
+	      $(LDFLAGS) -lm
+
+# The Hilink presence sensor's settings file, on the same pattern as
+# test_ens160set above and sharing stubs-allocfail with it for the same reason:
+# two of its three initializers free a settings node the core has already
+# linked, on a path only a failing allocator can reach.
+#
+# ezlopi_core_cjson_macros.c is linked rather than stubbed. The subject reads a
+# stored user-defined mode back through CJSON_GET_VALUE_FLOAT and friends, and
+# those macros are the real extraction; five hand-written no-op stubs would have
+# made the stored-value case agree with whatever it was given.
+#
+# ld2410/ and ld2410_driver/ are on the include path only for ld2410.h, which
+# the subject includes for ld2410_template_t and ld2410_set_template. The driver
+# itself is not linked -- the test defines that one function, because what
+# matters here is whether applying a setting reaches it, not what it does to a
+# UART.
+#
+# -Wno-error=cpp, and only here: the subject carries a `#warning "NABIN ; Need
+# to remove these global variables";` at line 117, which -Werror would turn into
+# a build failure. Downgraded rather than suppressed with -Wno-cpp, so the
+# warning still prints on every build and the note stays visible instead of
+# being quietly hidden by the test that compiles the file.
+HILINK_DIR := ../../ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor
+LD2410_DIR := ../../ezlopi-components/ld2410
+LD2410_DRV_DIR := ../../ezlopi-components/ld2410_driver
+COREEZ_DIR := ../../ezlopi-core/ezlopi-core-ezlopi
+HILINK_INC := $(HTTPURL_INC) -I$(HILINK_DIR) -I$(CLOUDSET_DIR) \
+              -I$(LD2410_DIR) -I$(LD2410_DRV_DIR)
+$(BUILD)/test_hilinkset: HILINK_CFLAGS := -std=c99 -O1 -g $(HILINK_INC) \
+                                          $(SANITIZERS)
+$(BUILD)/test_hilinkset: test_hilinkset.c \
+                         stubs-allocfail/EZLOPI_USER_CONFIG.h \
+                         $(HILINK_DIR)/hilink_presence_sensor_setting.c \
+                         $(HILINK_DIR)/hilink_presence_sensor_setting.h \
+                         $(COREEZ_DIR)/ezlopi_core_cjson_macros.c \
+                         $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                         $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c \
+                         $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(HILINK_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_hilinkset_main.o test_hilinkset.c
+	$(CC) -Istubs-allocfail $(HILINK_CFLAGS) -Wall -Wextra -Werror -Wno-error=cpp -Wno-unused-parameter -c -o $(BUILD)/hilinkset_subject.o $(HILINK_DIR)/hilink_presence_sensor_setting.c
+	@nm $(BUILD)/hilinkset_subject.o | grep -q ' T HILINK_presence_sensor_initialize_settings' \
+	  || { echo "hilink_presence_sensor_setting.c compiled to an object without HILINK_presence_sensor_initialize_settings in it -- the checks below would be testing nothing"; exit 1; }
+	@nm -u $(BUILD)/hilinkset_subject.o | grep -q 'EZPI_test_alloc' \
+	  || { echo "the subject object does not reference EZPI_test_alloc -- stubs-allocfail/EZLOPI_USER_CONFIG.h was not the one on its include path, and the allocation-failure checks below would be exercising a malloc that cannot fail"; exit 1; }
+	@nm -u $(BUILD)/hilinkset_subject.o | grep -q 'EZPI_core_nvs_write_str' \
+	  || { echo "the subject object does not reference EZPI_core_nvs_write_str -- the inverted write test is the whole subject of this file, and the checks below would not be reaching it"; exit 1; }
+	$(CC) $(HILINK_CFLAGS) -c -o $(BUILD)/hilinkset_cjsonmacros.o $(COREEZ_DIR)/ezlopi_core_cjson_macros.c
+	$(CC) $(HILINK_CFLAGS) -c -o $(BUILD)/hilinkset_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(HILINK_CFLAGS) -c -o $(BUILD)/hilinkset_valuetypes.o $(CONSTANTS_DIR)/ezlopi_cloud_value_type_str.c
+	$(CC) $(HILINK_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/hilinkset_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_hilinkset_main.o $(BUILD)/hilinkset_subject.o \
+	      $(BUILD)/hilinkset_cjsonmacros.o $(BUILD)/hilinkset_keywords.o \
+	      $(BUILD)/hilinkset_valuetypes.o $(BUILD)/hilinkset_cjext.o \
 	      $(LDFLAGS) -lm
 
 $(BUILD):

@@ -22,10 +22,17 @@
  * routing allocations through a wrapper that kept its own arena would hide
  * exactly the use-after-free this test is about.
  *
- * ezlopi_calloc and ezlopi_realloc are left on libc. The subject uses neither,
- * and cjext's use of them has nothing to do with these tests; wrapping them
- * would put cJSON's allocations under the same failure budget and make which
+ * ezlopi_calloc and ezlopi_realloc are left on libc. Neither subject that uses
+ * this header calls either -- both were counted rather than assumed -- and
+ * cjext's use of them has nothing to do with these tests; wrapping them would
+ * put cJSON's allocations under the same failure budget and make which
  * allocation failed depend on how cJSON happens to be implemented.
+ *
+ * This directory was called stubs-ens160 while test_ens160set.c was the only
+ * caller. It is named for what it does now that test_hilinkset.c needs the same
+ * thing -- which it needs because the two files carry the same defect: a
+ * settings initializer that frees a node the core has already linked into
+ * device->settings when a payload allocation fails.
  */
 
 #ifndef __EZLOPI_USER_CONFIG_H__
@@ -38,9 +45,10 @@
 
 #include <stdlib.h>
 
-/* Defined in test_ens160set.c. Declared here rather than in a header of their
-** own because this file is the only thing that needs to name them, and the
-** subject must not be able to see them. */
+/* Defined by whichever test is being linked -- test_ens160set.c or
+** test_hilinkset.c. Declared here rather than in a header of their own because
+** this file is the only thing that needs to name them, and the subject must not
+** be able to see them. */
 void *EZPI_test_alloc(unsigned long size);
 void EZPI_test_release(void *ptr);
 

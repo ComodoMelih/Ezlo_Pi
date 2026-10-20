@@ -1874,7 +1874,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   Evidenced by 11 more checks in
   [`tests/host/test_ens160set.c`](tests/host/test_ens160set.c), which needed one
   thing it did not have: an allocation that can be made to fail.
-  [`tests/host/stubs-ens160/EZLOPI_USER_CONFIG.h`](tests/host/stubs-ens160/EZLOPI_USER_CONFIG.h)
+  [`tests/host/stubs-allocfail/EZLOPI_USER_CONFIG.h`](tests/host/stubs-allocfail/EZLOPI_USER_CONFIG.h)
   routes `ezlopi_malloc` and `ezlopi_free` through two functions the test
   defines, and is on the include path of **the subject only** — `cjext.c`
   allocates through the same macro, and sharing the header would have put
@@ -1969,6 +1969,183 @@ None of these have been exercised on physical hardware; see Known gaps.
   operand is a settings-node pointer and which does not end in `->user_arg`.
   Recorded here with the corrected numbers rather than left standing on the
   wrong one, because the wrong count was the whole argument for not doing it.
+
+- **Choosing a presence mode on the hilink sensor stored the mode and never
+  applied it.** Six of the seven NVS *string*-write tests in
+  [`hilink_presence_sensor_setting.c`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c)
+  were written `EZPI_SUCCESS ==` where they meant `EZPI_SUCCESS !=`. On the
+  initialization paths that cost a wrong return value. On the set and reset
+  paths it cost the feature, because the branch guarded by the test is the
+  branch that programs the radar:
+
+  ```c
+  if (EZPI_SUCCESS == EZPI_core_nvs_write_str(value_str, strlen(value_str), "userdef"))
+  {
+      TRACE_E("Failed to write to NVS");    /* reached when the write worked */
+      ret = 1;
+  }
+  else
+  {
+      ret = __setting_set_change_setting_template(...);   /* the radar */
+  }
+  ```
+
+  So a *successful* write logged "Failed to write to NVS", returned an error,
+  and skipped the radar; only a *failed* write went on to configure the sensor.
+  The mode was stored, so the app read it back correctly on that call and on
+  every boot afterwards — while the radar kept whatever template it already
+  had. A user would report it as "the modes do nothing", and reading the
+  setting back could never have shown it.
+
+  Re-deriving the count before writing this entry: **10** write-result tests,
+  **6** of them inverted. All three `EZPI_core_nvs_write_int32` tests were
+  correct, and six of the seven `EZPI_core_nvs_write_str` tests were not — the
+  single exception being
+  [`__setting_set_pre_defined_setting`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L872).
+  An earlier *Known gaps* entry described this as "its NVS-write test is
+  **inverted**", singular, from a reading rather than a count; that entry has
+  been corrected in place.
+
+- **The one write test written the right way round had its answer thrown
+  away.** Immediately after that correct test,
+  [line 898](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L898)
+  assigned over `ret` rather than accumulating into it, on every call where the
+  template lookup succeeded — which is every call carrying a mode name the app
+  can actually send. So the correct test bought nothing: a presence mode that
+  could not be stored still reported success, and came back as the old mode on
+  the next boot. Now `ret |=`.
+
+- **An entire error path reported success unconditionally, which is why five
+  other fixes could not be seen.**
+  [`__setting_set_change_setting_template`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L761)
+  discarded the return value of all three of its calls to
+  [`__setting_set_change_user_defined_template`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L694),
+  and then returned a `ret` that nothing in that branch had ever written. Five
+  distinct faults inside the callee — a failed NVS write, a radar refusing the
+  custom template, a missing settings node, a missing payload, and a setting
+  that could not be serialized — each set `ret = 1` and had it dropped one
+  frame up.
+
+  This one was found by the test suite rather than by reading, and that is
+  worth recording. The five faults in the callee had already been fixed, and
+  the suite was green. Re-breaking each of the five one at a time left it
+  green *every time*. Five independent fixes all failing to be observable is
+  not five coincidences, and the shared cause was the caller. Without the
+  re-break step those five would have been committed as proven when nothing
+  outside the function could observe any of them.
+
+- **The remaining defects fixed in the same file.** All verified by re-break
+  unless noted:
+
+  - Nineteen `ESP_ERROR_CHECK` wrappers on functions returning plain `int`,
+    including three in
+    [`HILINK_presence_sensor_initialize_settings`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L210)
+    and the four cloud dispatchers. The file now has none. The initialization
+    one is the reason this was reached at all: with the predefined write test
+    inverted, the first-ever configuration of a presence sensor returned 1 from
+    a write that had worked, and `ESP_ERROR_CHECK(1)` panicked and rebooted the
+    hub. It fires exactly once, because `EZPI_core_nvs_write_str` returns only
+    after `nvs_commit` succeeds — so the value is durable before the panic, and
+    the next boot takes the "already exists" path. One unexplained restart
+    while adding a sensor, then never again.
+  - [`__settings_callback`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L486)
+    discarded the return of all four dispatchers. Fixing the dispatchers
+    without this would have been a change with no observable effect at all.
+  - A settings node freed while the device list still pointed at it, in two
+    initializers. ASan reports it as a heap-use-after-free on the *next*
+    initializer's `while (curr->next)` walk — dangling before initialization
+    has even finished, not at some later shutdown.
+  - [`HILINK_presence_sensor_target_in_detectable_range`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L247)
+    dereferenced the settings node while checking only the payload behind it.
+    Its caller is the UART frame handler, so once that one allocation had
+    failed the hub could not process presence at all.
+  - [`__setting_reset_user_defined_setting`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L1059)
+    guarded on `setting` — the pointer the line above had already tested — so
+    the guard was always true and the `memset` below it wrote **20** bytes
+    through a NULL payload pointer. (An earlier draft of this entry, and the
+    comment in the source, both said 56. `sizeof` was measured rather than
+    recalled before publishing it: four `float` plus a `uint8_t` and a `bool`
+    is 20 bytes, confirmed on the host and on `xtensa-esp32-elf-gcc` by
+    `_Static_assert`. The 56 was not derived from anything.)
+  - Four leaks: the string `EZPI_core_nvs_read_str` hands the caller, leaked on
+    every boot with a stored predefined mode; the serialized setting string at
+    three call sites; and the `cJSON` object in
+    [`__prepare_user_defined_setting_str`](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L1358),
+    which was never deleted on any path. Two of these are provable **only** by
+    LeakSanitizer and have no named check: `cjext.c` is compiled without
+    `stubs-allocfail` on its include path, so its allocations go to libc
+    `malloc` and are invisible to the test's own free log.
+  - `strlen(ret)` on the result of `cJSON_PrintBuffered` before anything
+    checked it for NULL — in a trace line whose whole purpose is the
+    allocation-failure case.
+  - A radar payload that could not be allocated reported `ret = 0`.
+  - Four missing `else` branches that let a failure return success, and four
+    dead frees of pointers that were provably NULL. The dead frees are removed
+    as dead code, not as bugs; no test can show a difference.
+
+- **The evidence, and what it does not cover.**
+  [`tests/host/test_hilinkset.c`](tests/host/test_hilinkset.c) is new: **75**
+  checks, which brings the host suite to 33 binaries and 6572 checks with no
+  failures. Each fix was then re-broken one at a time against the fixed file,
+  rebuilt, and run — **26 of 31** reversals went red in the expected place,
+  with every restore verified byte-identical by SHA-256.
+
+  The five that stay green are listed in full at the foot of the test file
+  rather than papered over. Four are unobservable for structural reasons: two
+  added NULL guards on file-scope statics that are NULL only before
+  initialization has run, when nothing can reach them; one arm of the apply
+  path that differs only when a global and the caller's own node disagree; and
+  one fix observable only with two hilink sensors on one hub, which these
+  file-scope statics break far more generally — see *Known gaps*. The fifth
+  needs a `cJSON` allocation to fail, which this harness cannot yet arrange.
+
+  Staging was necessary and is recorded in the test's comments: the unfixed
+  file does not fail, it *aborts* at the first `ESP_ERROR_CHECK`, so "see every
+  check red before anything changes" was impossible. The panic was removed
+  first, which made the later checks reachable, and each was then proven red in
+  turn.
+
+  Two checks in this file passed against the unfixed subject before they were
+  made to fail, for two different wrong reasons, and both are written into the
+  test rather than quietly fixed. The first: a single shared `nvs_write_result`
+  let the one correctly-written test satisfy a check meant for the other two.
+  The second, after splitting it per key, is the trap the inversion itself
+  sets — an inverted test reports failure when the write *succeeds*, so a
+  healthy write contributed a spurious error that made the check pass for a
+  reason that had nothing to do with its subject. Planting all three keys is
+  what makes the return value attributable.
+
+  The rewritten file was compiled for **four** targets — `esp32`, `esp32s2`,
+  `esp32s3` and `esp32c3` — all four reaching `build=0` with the subject
+  confirmed actually compiled, so a zero diagnostic count means something.
+  Images are `0x19d070`, `0x151420`, `0x1a0bb0` and `0x1aef50`. Diagnostics
+  were filtered to this commit's two files, so a pre-existing warning elsewhere
+  could not be read as either a pass or a regression here. Three of the four
+  report exactly the two `#warning "NABIN ..."` lines that were already in the
+  file.
+
+  `esp32c3` reports a third, and it is worth naming rather than rounding off,
+  because catching exactly this is why more than one target is built:
+
+  ```
+  hilink_presence_sensor_setting.c:430:65: warning: passing argument 1 of
+    'EZPI_core_nvs_read_int32' from incompatible pointer type
+  ```
+
+  It is **pre-existing, not introduced by this change** — `HEAD` carries the
+  identical two lines (`int read_value = 0;` then `&read_value`) and this
+  diff does not touch either. It is invisible on the xtensa targets because
+  [`EZPI_core_nvs_read_int32`](ezlopi-core/ezlopi-core-nvs/ezlopi_core_nvs.h#L242)
+  takes `int32_t *`, and `int32_t` is `int` on xtensa but `long int` on
+  riscv32. Both are 32 bits with the same representation, so nothing
+  misbehaves today; it is a latent portability fault, left alone here as a
+  separate concern and recorded under *Known gaps*.
+
+  Nothing here has been exercised on hardware. No hilink presence sensor is
+  attached to this board, so the radar behaviour above is reasoned from the
+  driver's interface and proven only against a stub that counts calls. Only
+  `esp32` has ever been run on a device; the other three are compile evidence
+  and nothing more.
 
 ### BLE provisioning — [bug]
 
@@ -10196,28 +10373,68 @@ enumerators — so the live half of this component was never affected.
 
 Listed because a changelog that only mentions what was finished is misleading.
 
-- **Twenty-nine more `ESP_ERROR_CHECK`-on-plain-`int` sites are still reboot
-  switches.** The census behind *Device settings* found 102 `ESP_ERROR_CHECK`
-  call sites tree-wide with a direct function call, 39 of them on a callee whose
-  only return type anywhere in the tree is plain `int`. Ten were fixed, in
-  `sensor_0068_ENS160_gas_sensor_settings.c`. The rest: **19** in
-  `hilink_presence_sensor_setting.c`, **9** in `pms_dev_items_prepare.c`, **1**
-  in `sensor_0067_hilink_presence_sensor.c`. With
+- **Ten more `ESP_ERROR_CHECK`-on-plain-`int` sites are still reboot switches.**
+  The census behind *Device settings* found 102 `ESP_ERROR_CHECK` call sites
+  tree-wide with a direct function call, 39 of them on a callee whose only
+  return type anywhere in the tree is plain `int`. Ten were fixed in
+  `sensor_0068_ENS160_gas_sensor_settings.c` and nineteen in
+  `hilink_presence_sensor_setting.c` — that file now has none. The rest: **9**
+  in `pms_dev_items_prepare.c`, **1** in
+  `sensor_0067_hilink_presence_sensor.c`. With
   `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y` and no `NDEBUG` — this
   project's configuration — each is a panic and reboot on a return value whose
   documented meaning is "failed". They are not fixed here because there is no
-  host test for those files and the hilink one carries four other defects on the
-  same path, listed next.
+  host test for either file.
 
-- **`hilink_presence_sensor_setting.c` has the same pair of defects plus three
-  more, all unfixed.** Read while measuring the above, not guessed at: it frees
-  an already-linked settings node on the payload-allocation failure path at two
-  places, the same defect fixed in the ENS160 file; it frees an already-`NULL`
-  node at two further places; it sets `ret = 0` — success — on an allocation
-  failure; and its NVS-write test is **inverted**, logging *"Failed to write to
-  NVS"* and returning an error when the write succeeded. The ENS160 file gets
-  that last one right, which is how the inversion was noticed. This needs its
-  own commit and its own host test; nothing here has been verified against it.
+  This entry previously read *"Twenty-nine more"* and counted the nineteen
+  hilink sites among them; nineteen are now fixed, so the figure is ten.
+
+- **`sensor_0067_hilink_presence_sensor.c` has six `ESP_ERROR_CHECK` sites, and
+  the census was never going to find five of them.** The census criterion above
+  is "callee whose only return type anywhere in the tree is plain `int`", which
+  in this file matches exactly one site —
+  `ESP_ERROR_CHECK(HILINK_presence_sensor_apply_settings())`. That is why this
+  file is recorded as **1** above, and that figure is right for what it
+  measures. Counting every `ESP_ERROR_CHECK` in the file instead gives **6**:
+  one on `int`, three on `ezlopi_error_t` (an enum whose values are not
+  `esp_err_t` codes at all), and two on `ld2410_get_data`, which does return
+  `esp_err_t` and so is correctly *typed* while still being the wrong
+  *policy* — both of those sit on the 1-second item-update path, so a radar
+  that stops answering over UART does not degrade, it reboot-loops the hub.
+  Unfixed, and listed separately because a return-type census cannot see it.
+
+- **A second hilink presence sensor on one hub is broken by design.**
+  `hilink_presence_sensor_setting.c` keeps all three setting nodes in
+  file-scope statics, so initializing a second sensor overwrites the first's.
+  One consequence was fixed here —
+  `__setting_update_user_defined_setting` now reads the node it was handed
+  rather than the global — but the general problem is untouched and is **not**
+  claimed as fixed. It is also why that one fix is unprovable from the host
+  suite: no single-device test can distinguish the parameter from the global.
+  See the gap list at the foot of `tests/host/test_hilinkset.c`.
+
+- **Seven `int32_t *` pointer-type mismatches are invisible on every target this
+  project ships.** Building the tree for `esp32c3` while verifying the hilink
+  change surfaced **7** `-Wincompatible-pointer-types` sites that produce
+  **zero** warnings on `esp32`, `esp32s2` and `esp32s3`:
+  `ezlopi_core_log.c:109` and `:110`, `ezlopi_hal_uart.c:282`,
+  `ezlopi_service_system_temperature_sensor.c:201`, `ezlopi_service_uart.c:707`
+  and `:715`, and `hilink_presence_sensor_setting.c:430`.
+
+  The cause is one typedef: `int32_t` is `int` on xtensa and `long int` on
+  riscv32, so an `int *` handed to a parameter declared `int32_t *` is a
+  same-type pointer on the three xtensa targets and a different-type pointer on
+  the one riscv target. Nothing misbehaves at runtime — both are 32-bit with
+  identical representation — so this is a portability and strictness fault, not
+  a live bug, which is exactly why it has survived: the warning cannot appear
+  unless somebody builds the riscv target.
+
+  Not fixed here. The hilink one sits in this commit's file but predates it and
+  is a separate concern from the error-handling this commit is about; the other
+  six are in files with no host coverage. Distinct from the **8**
+  `-Wdiscarded-qualifiers` sites in `ezlopi_service_uart.c`, which do fire on
+  all four targets and are also still open — the two were briefly conflated by
+  a grep loose enough to match both tags, and are counted separately here.
 
 - **The cloud discards every settings callback's return value.** All four
   `curr_setting->func(...)` call sites in `ezlopi-cloud-settings`, and the one
