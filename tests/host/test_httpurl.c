@@ -46,7 +46,8 @@
  * running this file unchanged. 150 of the 478 checks fail that way, against 0
  * on the fixed subject -- so the suite distinguishes the two in both
  * directions, which is the only thing that makes "0 failures" mean anything.
- * probe/hurestore.sh is that run.
+ * probe/hurestore.sh is that run -- an uncommitted throwaway in the audit
+ * working directory beside this checkout, not a path in this tree.
  *
  * The last ten checks added moved that total from 468 to 478 and left the
  * failure count at 150, which is itself their answer: a leading space and a

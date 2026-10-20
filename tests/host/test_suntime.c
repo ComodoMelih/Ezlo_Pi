@@ -1130,7 +1130,8 @@ static void test_backoff_success_clears_it(void)
     ** sees the cleared day as a day change and writes 14 straight back, so by
     ** the time the assertion ran the field had been repaired by the call it was
     ** supposed to be independent of. The check was there and it could not fail.
-    ** See probe/bomut.py, mutant C3. */
+    ** See mutant C3 of probe/bomut.py -- an uncommitted throwaway in the audit
+    ** working directory beside this checkout, not a path in this tree. */
     ok(14 == bo.attempt_tm_day, "note_success does not touch the day");
 
     /* The deadline too, and this one is asserted on the field rather than

@@ -1006,8 +1006,10 @@ static void test_a_radar_that_refuses_a_template_is_reported(void)
 /*******************************************************************************
  * The apply path, reached through its caller.
  *
- * The four cases above left nine of the re-breaks in probe/hlbreak.py green,
- * and five of those nine failed for one shared reason rather than five:
+ * The four cases above left nine of the re-breaks in probe/hlbreak.py green --
+ * an uncommitted throwaway in the audit working directory beside this
+ * checkout, not a path in this tree. Five of those nine failed for one shared
+ * reason rather than five:
  * __setting_set_change_setting_template discarded the return of all three of
  * its calls to __setting_set_change_user_defined_template and then returned a
  * `ret` that nothing in that branch had written. Every defect inside the callee
@@ -1204,10 +1206,11 @@ static void test_a_failing_write_on_the_predefined_set_path_is_reported(void)
 /*******************************************************************************
  * What this suite does not prove.
  *
- * probe/hlbreak.py re-breaks each fix in the subject one at a time and records
- * what goes red. Five of its reversals leave this suite green, and they are
- * listed here rather than left to be rediscovered -- or worse, papered over
- * with a check that does not actually observe them.
+ * probe/hlbreak.py -- again, an uncommitted throwaway beside this checkout and
+ * not a path in this tree -- re-breaks each fix in the subject one at a time
+ * and records what goes red. Five of its reversals leave this suite green, and
+ * they are listed here rather than left to be rediscovered -- or worse,
+ * papered over with a check that does not actually observe them.
  *
  *   O, CC  The two added NULL guards on the file-scope setting nodes
  *          (__setting_set_change_user_defined_template, and the predefined
