@@ -5176,18 +5176,42 @@ flashed.**
 
   **Not verified on hardware.** No board has driven a multi-pixel strip, and
   this is the half of the fix no host test can reach — it needs an RMT
-  peripheral and the IDF. What *is* verified is an esp32 build with zero
-  diagnostics in either touched file, and `nm` on the linked ELF showing
-  `EZPI_aledcfg_from_json` and `EZPI_aledcfg_order_from_str` present, so the
-  driver's call survives `--gc-sections` rather than being compiled and
-  dropped. Image: `0x19d1c0` bytes, 17% of the app partition free.
+  peripheral and the IDF. What *is* verified is a build on **all four CI
+  targets** with zero diagnostics in either touched file, and `nm` on each
+  linked ELF showing `EZPI_aledcfg_from_json` and
+  `EZPI_aledcfg_order_from_str` present, so the driver's call survives
+  `--gc-sections` rather than being compiled and dropped:
 
-  `EZPI_aled_wire_len` is **absent** from that ELF, and that is the expected
-  result rather than a missing link: nothing in the firmware calls
-  `EZPI_aledcfg_wire_len()`, so it and the function it wraps are both collected.
-  They are reached only from the host test. Recorded because an absent symbol
-  that is *fine* and an absent symbol that means the feature was dropped look
+  | Target | `set-target` | build | diagnostics in touched files | resolver in ELF | image |
+  |---|---|---|---|---|---|
+  | esp32 | 0 | 0 | 0 | present | `0x19d1c0` |
+  | esp32s2 | 0 | 0 | 0 | present | `0x151590` |
+  | esp32s3 | 0 | 0 | 0 | present | `0x1a0d30` |
+  | esp32c3 | 0 | 0 | 0 | present | `0x1af080` |
+
+  The esp32 image leaves 17% of the app partition free. esp32c3 is in that
+  table for a reason rather than for completeness: device-0009 drives an RMT
+  peripheral, the RMT driver differs across these parts, and the DHT sensors
+  are already target-guarded off c3 for timing reasons — so "an RMT-based
+  device builds on c3" was not something to assume. It does.
+
+  `EZPI_aledcfg_wire_len` and the `EZPI_aled_wire_len()` it wraps are **absent
+  from all four** ELFs, and that is the expected result rather than a missing
+  link: nothing in the firmware calls the wrapper, so both are collected. They
+  are reached only from the host test. Recorded because an absent symbol that
+  is *fine* and an absent symbol that means the feature was dropped look
   identical in an `nm` listing, and only one of them is this.
+
+  One note on how that was measured, because it nearly went unrecorded. The
+  first run of the symbol check reported `resolver=n/a` for all three new
+  targets — its `nm` glob was one directory level too shallow for the real
+  `tools/<name>/<ver>/<name>/bin/` layout, so the toolchain path came back
+  empty and the check silently did nothing. An empty toolchain path is a
+  *skip*, not a failure, and `n/a` sits in a summary table looking much like
+  `ABSENT` when only one of the two would have been a finding. The corrected
+  check picks the toolchain per target by name, proves `nm` can actually read
+  each ELF and prints its symbol total, and only then believes a negative
+  result.
 
 - **`color_order` is parsed but cannot be honoured, and the driver says so.**
   This was found while wiring the driver, and it contradicts what the resolver's
@@ -9554,10 +9578,13 @@ Listed because a changelog that only mentions what was finished is misleading.
   in the firmware says so to the user.
 
   **No board has driven a multi-pixel strip.** The parser is host-tested and
-  the driver compiles for esp32, but the actuation — RMT timing at length,
-  `is_rgbw` producing a fourth byte per pixel, the `>=50 µs` reset gap at 2048
-  pixels — has never run on hardware. The 2048 cap in particular is derived
-  from the wire protocol on paper and has not been observed to be drivable.
+  the driver compiles clean on all four CI targets, c3 included, but the
+  actuation — RMT timing at length, `is_rgbw` producing a fourth byte per
+  pixel, the `>=50 µs` reset gap at 2048 pixels — has never run on hardware.
+  Compiling on four targets says nothing about any of that; it only removes
+  "it might not even build there" from the list. The 2048 cap in particular is
+  derived from the wire protocol on paper and has not been observed to be
+  drivable.
 
 - **Two target gaps are now stated by the build instead of being fixed, because
   both need hardware to close.** The target-guard work under *Build and
