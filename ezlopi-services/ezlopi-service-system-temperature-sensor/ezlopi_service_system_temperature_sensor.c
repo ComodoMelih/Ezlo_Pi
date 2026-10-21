@@ -77,31 +77,35 @@
 /**
  * @brief Function to prepare temperature sensor related cloud parameters and items
  *
- * @return int
+ * @return ezlopi_error_t EZPI_SUCCESS, or EZPI_FAILED if the device or its
+ *         item could not be added
  */
-static int ezpi_prepare();
+static ezlopi_error_t ezpi_prepare();
 /**
  * @brief Function to initialize and start temperature data
  *
  * @param item Pointer to item linked to temperature sensor
- * @return int
+ * @return ezlopi_error_t always EZPI_SUCCESS -- see the definition for why it
+ *         cannot currently report a failure
  */
-static int ezpi_init(l_ezlopi_item_t *item);
+static ezlopi_error_t ezpi_init(l_ezlopi_item_t *item);
 /**
  * @brief Function to populate JSON with temperature data and scale to send to cloud
  *
  * @param item Pointer to item linked to temperature sensor
  * @param arg User argument, contains JSON to be populated
- * @return int
+ * @return ezlopi_error_t EZPI_SUCCESS, or EZPI_FAILED if either argument was
+ *         NULL. The caller discards this, which is pre-existing.
  */
-static int ezpi_get_cjson_value(l_ezlopi_item_t *item, void *arg);
+static ezlopi_error_t ezpi_get_cjson_value(l_ezlopi_item_t *item, void *arg);
 /**
  * @brief Function to notify the cloud about the data
  *
  * @param item Pointer to item linked to temperature sensor
- * @return int
+ * @return ezlopi_error_t always EZPI_SUCCESS, including on a failed sensor
+ *         read -- see the definition
  */
-static int ezpi_notify(l_ezlopi_item_t *item);
+static ezlopi_error_t ezpi_notify(l_ezlopi_item_t *item);
 /**
  * @brief Function to prepare cloud properties for provided device
  *
@@ -128,9 +132,22 @@ static float system_temperature = 0.0f;
 /*******************************************************************************
  *                          Extern Function Definitions
  *******************************************************************************/
-int EZPI_system_temperature_device(e_ezlopi_actions_t action, l_ezlopi_item_t *item, void *arg, void *user_arg)
+/* ezlopi_error_t, not int, because that is what the item_func contract
+** declares: EZPI_core_device_add_item_to_device() takes
+** `ezlopi_error_t (*)(e_ezlopi_actions_t, l_ezlopi_item_t *, void *, void *)`.
+** ezlopi_error_t is a typedef for int32_t, which is `int` on xtensa and
+** `long int` on riscv32, so a function returning plain int was a compatible
+** pointer on the three xtensa targets and -Wincompatible-pointer-types on
+** esp32c3 -- the last of the four such sites in the tree.
+**
+** This is the type the rest of the tree already uses: of the 63 driver entry
+** points declared against e_ezlopi_actions_t, 62 return ezlopi_error_t and
+** this was the one that did not. The values do not change either, because
+** EZPI_SUCCESS is 0 and EZPI_FAILED is -1, which is exactly what the helpers
+** below were already returning as bare literals. */
+ezlopi_error_t EZPI_system_temperature_device(e_ezlopi_actions_t action, l_ezlopi_item_t *item, void *arg, void *user_arg)
 {
-    int ret = 0;
+    ezlopi_error_t ret = EZPI_SUCCESS;
     switch (action)
     {
     case EZLOPI_ACTION_PREPARE:
@@ -191,9 +208,9 @@ static void ezpi_prepare_item_properties(l_ezlopi_item_t *item)
     item->interface.adc.resln_bit = 0;
 }
 
-static int ezpi_prepare()
+static ezlopi_error_t ezpi_prepare()
 {
-    int ret = -1;
+    ezlopi_error_t ret = EZPI_FAILED;
     l_ezlopi_device_t *device = EZPI_core_device_add_device(NULL, NULL);
     if (device)
     {
@@ -202,7 +219,7 @@ static int ezpi_prepare()
         if (temp_item)
         {
             ezpi_prepare_item_properties(temp_item);
-            ret = 0;
+            ret = EZPI_SUCCESS;
         }
         else
         {
@@ -212,9 +229,16 @@ static int ezpi_prepare()
     return ret;
 }
 
-static int ezpi_init(l_ezlopi_item_t *item)
+/* Still cannot fail, and that is not fixed here. Both ESP_ERROR_CHECK() calls
+** below abort the hub rather than returning, so the only value this can ever
+** produce is EZPI_SUCCESS. Unlike the hilink initialisers, the macro is at
+** least being used on esp_err_t-returning functions here, so it is not the
+** same defect -- it is the "no driver can report an initialisation failure"
+** gap, recorded under Known gaps and deliberately out of scope for a
+** pointer-type commit. */
+static ezlopi_error_t ezpi_init(l_ezlopi_item_t *item)
 {
-    int ret = 0;
+    ezlopi_error_t ret = EZPI_SUCCESS;
     if (!system_temperature_initialized)
     {
         ESP_ERROR_CHECK(temp_sensor_set_config(device_tempeature_sensor_configuration));
@@ -224,21 +248,26 @@ static int ezpi_init(l_ezlopi_item_t *item)
     return ret;
 }
 
-static int ezpi_get_cjson_value(l_ezlopi_item_t *item, void *arg)
+static ezlopi_error_t ezpi_get_cjson_value(l_ezlopi_item_t *item, void *arg)
 {
-    int ret = -1;
+    ezlopi_error_t ret = EZPI_FAILED;
     if (item && arg)
     {
         cJSON *cj_result = (cJSON *)arg;
         EZPI_core_valueformatter_float_to_cjson(cj_result, system_temperature, item->cloud_properties.scale);
-        ret = 0;
+        ret = EZPI_SUCCESS;
     }
     return ret;
 }
 
-static int ezpi_notify(l_ezlopi_item_t *item)
+/* EZPI_SUCCESS unconditionally, including when temp_sensor_read_celsius()
+** fails, which is how it already behaved as `int ret = 0`. Made explicit
+** rather than changed: making a failed read report EZPI_FAILED would be a
+** behaviour change in the notify path, and the caller discards this value
+** anyway. Both halves of that are worth someone deciding on deliberately. */
+static ezlopi_error_t ezpi_notify(l_ezlopi_item_t *item)
 {
-    int ret = 0;
+    ezlopi_error_t ret = EZPI_SUCCESS;
     float system_temperature_current_value = 0;
     float _eplison = 1.0;
     esp_err_t error = temp_sensor_read_celsius(&system_temperature_current_value);
