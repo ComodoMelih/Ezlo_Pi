@@ -702,8 +702,21 @@ static void ezpi_service_uart_task(void *arg)
 
     while (1)
     {
-        uint32_t tmp_len = 0;
-        uint32_t buffred_data_len = 0;
+        /* size_t for both, because uart_get_buffered_data_len() writes a
+        ** size_t through the pointer it is given. As uint32_t these were the
+        ** two -Wincompatible-pointer-types the esp32c3 build reported in this
+        ** file, and silent on the three xtensa targets: size_t is unsigned
+        ** long on riscv32 and unsigned int on xtensa. Both are 32-bit and
+        ** unsigned everywhere this project builds, so no value changes.
+        **
+        ** Only tmp_len is ever passed by address, so strictly only it had to
+        ** change. buffred_data_len changes with it because the two are
+        ** compared and assigned to each other below, and leaving one of a
+        ** matched pair as the other type is how this kind of thing comes
+        ** back. Its remaining uses -- ezlopi_malloc(), memset() and
+        ** uart_read_bytes() -- all take size_t already. */
+        size_t tmp_len = 0;
+        size_t buffred_data_len = 0;
         uart_get_buffered_data_len(EZPI_SERV_UART_NUM_DEFAULT, &tmp_len);
 
         if (tmp_len > 0)
@@ -743,8 +756,14 @@ static void ezpi_service_uart_task(void *arg)
                          * non-Improv traffic, in its original order, which is
                          * exactly what this parser received before Improv
                          * existed. */
+                        /* The (uint32_t) on out_cap is explicit for the same
+                        ** reason as the one on rxBytes beside it:
+                        ** buffred_data_len is a size_t and this parameter is
+                        ** declared uint32_t. Same width and signedness on
+                        ** every target here, so the cast documents the
+                        ** narrowing rather than performing one. */
                         rxBytes = (int)EZPI_SERV_improv_serial_filter(uart_rx_data, (uint32_t)rxBytes,
-                                                                      uart_rx_data, buffred_data_len);
+                                                                      uart_rx_data, (uint32_t)buffred_data_len);
                     }
 #endif
 

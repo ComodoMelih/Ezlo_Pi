@@ -278,7 +278,17 @@ static void ezlopi_uart_channel_task(void *args)
             {
             case UART_DATA:
             {
-                uint32_t bufferred_data_len = 0;
+                /* size_t, because that is what uart_get_buffered_data_len()
+                ** writes through this pointer. As uint32_t it was
+                ** -Wincompatible-pointer-types on esp32c3 and silent on the
+                ** three xtensa targets, because size_t is unsigned long on
+                ** riscv32 and unsigned int on xtensa. Both are 32-bit and
+                ** unsigned on every target this project builds, so nothing
+                ** about the value changes -- what changes is that the IDF is
+                ** no longer writing through a pointer to a different type
+                ** than it was handed. It also happens to be the type
+                ** event.size and the `to_read` below already have. */
+                size_t bufferred_data_len = 0;
                 uart_get_buffered_data_len(ezlopi_uart_object->ezlopi_uart.channel, &bufferred_data_len);
                 if (bufferred_data_len)
                 {
