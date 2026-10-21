@@ -83,7 +83,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
            test_httpresp test_suntime test_issun test_coords test_tz \
            test_aled test_aledcfg test_aledonboard test_ens160set test_hilinkset \
-           test_hilink0067 test_settings_api
+           test_hilink0067 test_settings_api test_logseverity
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -1486,6 +1486,142 @@ $(BUILD)/test_settings_api: test_settings_api.c \
 	      $(BUILD)/settings_api_cjsonmacros.o $(BUILD)/settings_api_keywords.o \
 	      $(BUILD)/settings_api_cjext.o \
 	      $(LDFLAGS) -lm
+
+# A log severity is an index into a six-element table of names, and
+# ezlopi_core_log.c used ENUM_EZLOPI_TRACE_SEVERITY_MAX -- the table's length --
+# as the default value of one of them. See the header of test_logseverity.c for
+# what that does and, more importantly, for what it does not do: two
+# unconditional debug overrides at ezlopi_core_ezlopi.c:137 and
+# ezlopi_core_setting_commands.c:258 mask it on a booted hub, and each one sits
+# under a commented-out `#warning "remove this in release"`.
+#
+# WHAT WAS MEASURED
+# -----------------
+# 108 checks, 0 failures against the fixed subject, which compiles under
+# -Wall -Wextra -Werror with no exemption.
+#
+# Against the PRISTINE pre-fix subject (probe reproduced it with
+# -Wno-sign-compare, since the unfixed file has two of those and this suite is
+# -Werror; suppressing a warning is not changing behaviour):
+#
+#   with -fsanitize=undefined -- ezlopi_core_log.c:194:36: runtime error:
+#   index 6 out of bounds for type 'char *[6]'
+#
+#   with -fsanitize=address -- global-buffer-overflow, "0 bytes after global
+#   variable 'ezlopi_log_severity_enum' ... of size 48", READ of size 8,
+#   reached through EZPI_core_serial_log_get_current_severity_enum_str
+#
+#   with NO sanitizers -- 6 assertion failures on their own, then a hard
+#   segfault inside EZPI_core_cloud_log_get_current_severity_enum_str once a
+#   case puts 0xDEADBEEF in the NVS entry. The test is not a sanitizer
+#   wrapper; the sanitizers supply the line number, not the finding.
+#
+# SELECTIVITY. Four breakages applied to the FIXED subject one at a time, each
+# reverting exactly one part of the fix, out of 108 checks:
+#
+#   1  default back to ENUM_EZLOPI_TRACE_SEVERITY_MAX ........  2 failures
+#   2  NVS value assigned with no range or return check ......  2 failures
+#   3  __severity_str() indexes with no bound ................  0 failures
+#   4  cloud-log gate drops the lower bound on its argument ..  4 failures
+#
+# Breakage 3 being invisible is not a gap being glossed over -- it is what the
+# fix having three independent guards means. With 1, 2 and 4 in place nothing
+# can hand __severity_str() a value outside the enum, so its own bound is
+# unreachable by construction. Applying 1 AND 3 together is the measurement
+# that shows what that bound is for: ASan global-buffer-overflow at
+# __severity_str, and the process halts before the tally. So guard 3 is what
+# turns a regressed default from an out-of-bounds read into a merely wrong
+# default -- which is exactly the job of the innermost of three guards.
+#
+# -fno-sanitize-recover for both address and undefined, because gcc's default
+# for each is to print "runtime error", continue, and exit 0 -- which would put
+# an out-of-bounds read in the log of a suite reporting success. Empty when
+# SANITIZERS is overridden away, same shape as CJSONGPIO_SAN above.
+LOGSEV_SAN := $(if $(SANITIZERS),-fno-sanitize-recover=address \
+                                 -fno-sanitize-recover=undefined,)
+
+# HEAP_DIR is new here. ezlopi_core_log.c includes ezlopi_core_heap.h and calls
+# nothing from it; the directory is on the path so the real header is used
+# rather than a stub that could drift.
+HEAP_DIR := ../../ezlopi-core/ezlopi-core-heap
+LOG_DIR  := ../../ezlopi-core/ezlopi-core-log
+
+# stubs-log/ FIRST, and that ordering is load-bearing twice over:
+#
+#   sdkconfig.h -- stubs-log's defines CONFIG_EZPI_UTIL_TRACE_EN, without which
+#   the entire subject, .c and .h alike, preprocesses to an empty translation
+#   unit. stubs-httpurl/ has no sdkconfig.h so it cannot shadow it, but putting
+#   stubs-log first means nothing added to another stub dir later can either.
+#
+#   ezlopi_util_trace.h -- stubs-log's wraps ../stubs/ and adds the
+#   ezlopi_util_set_log_upcalls prototype. See that file for why the prototype
+#   cannot live in the shared stub.
+#
+# stubs-httpurl/ is reused rather than copied, for its nvs_flash.h: the real
+# ezlopi_core_nvs.h includes that ESP-IDF header and the subject includes
+# ezlopi_core_nvs.h. Same stub, same reason, already written down there.
+#
+# ezlopi-core-ezlopi is on the path for ezlopi_core_broadcast.h, which lives
+# there rather than in a directory named after it.
+LOGSEV_INC := -Istubs-log -Istubs-httpurl -I$(STUBS_DIR) \
+              -I$(LOG_DIR) \
+              -I$(NVS_DIR) \
+              -I$(SNTP_DIR) \
+              -I$(COREEZLOPI_DIR) \
+              -I$(EVENTGRP_DIR) \
+              -I$(ERRORS_DIR) \
+              -I$(HEAP_DIR) \
+              -I$(CONSTANTS_DIR) \
+              -I$(CJEXT_DIR)
+
+# -D_GNU_SOURCE for fileno(), which -std=c99 alone hides: the test redirects
+# stdout around each call into the real static serial upcall so the assertion
+# can be on what the subject actually printed. Same flag test_httpurl carries,
+# for an unrelated reason.
+$(BUILD)/test_logseverity: LOGSEV_CFLAGS := -std=c99 -O1 -g -D_GNU_SOURCE \
+                                            $(LOGSEV_INC) \
+                                            $(SANITIZERS) $(LOGSEV_SAN)
+$(BUILD)/test_logseverity: test_logseverity.c \
+                           $(LOG_DIR)/ezlopi_core_log.c \
+                           $(LOG_DIR)/ezlopi_core_log.h \
+                           stubs-log/sdkconfig.h \
+                           stubs-log/ezlopi_util_trace.h \
+                           $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                           $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(LOGSEV_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_logseverity_main.o test_logseverity.c
+	$(CC) $(LOGSEV_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/logseverity_subject.o $(LOG_DIR)/ezlopi_core_log.c
+# The subject compiles under -Wall -Wextra -Werror with no exemption, which is
+# not true of most files in this tree and is worth keeping that way. It needed
+# two -Wsign-compare fixes to get there, both of them the same `int severity`
+# compared against the unsigned-underlying-type enum that the bounds work was
+# about anyway.
+#
+# Five nm guards. The first three are the functions under test, and they exist
+# because of the specific failure mode this subject has: with
+# CONFIG_EZPI_UTIL_TRACE_EN undefined the file compiles to nothing at all and
+# the only symptom would be a link error for symbols the test file happens to
+# fake. The fourth is ezlopi_log_severity_enum itself, because that array's
+# length IS the bound every check here is written against -- a subject that
+# stopped defining it would be a different subject. The fifth is what makes the
+# serial-upcall cases mean anything: EZPI_core_serial_log_upcall is static and
+# unreachable except through the pointer ezlopi_util_set_log_upcalls is handed,
+# so if the subject stopped referencing that function the fake would hold NULL
+# and __serial_upcall() would exit(2) rather than pass.
+	@nm $(BUILD)/logseverity_subject.o | grep -q ' T EZPI_core_serial_log_get_current_severity_enum_str' \
+	  || { echo "ezlopi_core_log.c compiled to an object without EZPI_core_serial_log_get_current_severity_enum_str in it -- most likely CONFIG_EZPI_UTIL_TRACE_EN was lost and the whole file preprocessed away"; exit 1; }
+	@nm $(BUILD)/logseverity_subject.o | grep -q ' T EZPI_core_read_set_log_severities' \
+	  || { echo "the subject object has no EZPI_core_read_set_log_severities -- the NVS cases below would be testing nothing"; exit 1; }
+	@nm $(BUILD)/logseverity_subject.o | grep -q ' T EZPI_core_send_cloud_log' \
+	  || { echo "the subject object has no EZPI_core_send_cloud_log -- the broadcast cases below would be testing nothing"; exit 1; }
+	@nm $(BUILD)/logseverity_subject.o | grep -q ' [DdRr] ezlopi_log_severity_enum' \
+	  || { echo "the subject object does not define ezlopi_log_severity_enum -- that array IS the bound every check below is written against"; exit 1; }
+	@nm -u $(BUILD)/logseverity_subject.o | grep -q 'ezlopi_util_set_log_upcalls' \
+	  || { echo "the subject object does not reference ezlopi_util_set_log_upcalls -- that call is the only handle on the static EZPI_core_serial_log_upcall, so the serial gate cases would be unreachable"; exit 1; }
+	$(CC) $(LOGSEV_CFLAGS) -c -o $(BUILD)/logseverity_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(LOGSEV_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/logseverity_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_logseverity_main.o $(BUILD)/logseverity_subject.o \
+	      $(BUILD)/logseverity_keywords.o $(BUILD)/logseverity_cjext.o \
+	      $(LDFLAGS) $(LOGSEV_SAN) -lm
 
 $(BUILD):
 	mkdir -p $(BUILD)
