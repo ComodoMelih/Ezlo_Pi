@@ -112,22 +112,37 @@ def strip_comments(text):
     corrected lines, and several of those comments contain the literal
     "is_user_arg_unique = true" while describing what used to be there. A
     check that counted those would report the files it had just fixed.
+
+    Every newline inside a removed region is kept. That is not cosmetic: the
+    line numbers this check prints are the only thing a maintainer has to go
+    on, and the first version of this function dropped the newlines inside
+    /* */ blocks. Counts stayed correct, so the gate still passed and failed
+    in the right places -- but every number it printed for a file with a
+    multi-line block comment was short by the number of lines those comments
+    spanned. Measured on Ezlo's device_0009 it reported lines 607-612 for
+    assignments that are really at 680-685, a 73-line error pointing into an
+    unrelated function. See the self-test cases that assert positions.
     """
     out = []
     i, n = 0, len(text)
     while i < n:
         if text.startswith('/*', i):
             end = text.find('*/', i + 2)
-            i = n if end < 0 else end + 2
+            stop = n if end < 0 else end + 2
+            out.append('\n' * text.count('\n', i, stop))
+            i = stop
         elif text.startswith('//', i):
             end = text.find('\n', i)
+            # The newline itself is left in place for the next iteration.
             i = n if end < 0 else end
         elif text[i] in '"\'':
             quote = text[i]
+            start = i
             i += 1
             while i < n and text[i] != quote:
                 i += 2 if text[i] == '\\' else 1
             i += 1
+            out.append('\n' * text.count('\n', start, min(i, n)))
         else:
             out.append(text[i])
             i += 1
@@ -135,7 +150,11 @@ def strip_comments(text):
 
 
 def owners_in(text):
-    """Line numbers of owner assignments, comments and strings excluded."""
+    """Line numbers of owner assignments, comments and strings excluded.
+
+    The numbers are line numbers in the ORIGINAL text, which is only true
+    because strip_comments() preserves newlines; see the note there.
+    """
     lines = strip_comments(text).splitlines()
     return [i for i, line in enumerate(lines, 1) if OWNER.search(line)]
 
@@ -162,6 +181,30 @@ def self_test():
             print('SELF-TEST FAILED: %s -- expected %d owner(s), counted %d'
                   % (name, expected, got))
             ok = False
+
+    # Counting alone is not enough. Every case above passed while the printed
+    # line numbers were wrong, because none of them contained a comment
+    # spanning more than one line. These assert the POSITION.
+    banner = '/*\n * a license header, several lines long\n * mentioning nothing\n */\n'
+    position_cases = [
+        ('owner on line 1', one, [1]),
+        ('owner after a 4-line block comment', banner + one, [5]),
+        ('owner after two block comments',
+         banner + banner + one, [9]),
+        ('owner between two block comments',
+         banner + one + banner + one, [5, 10]),
+        ('owner after a // comment line',
+         '// nothing here\n' + one, [2]),
+        ('owner after a multi-line string continuation',
+         'const char *s = "abc"\n                "def";\n' + one, [3]),
+    ]
+    for name, text, expected in position_cases:
+        got = owners_in(text)
+        if got != expected:
+            print('SELF-TEST FAILED: %s -- expected owner(s) at line(s) %s, '
+                  'reported %s' % (name, expected, got))
+            ok = False
+
     if not ok:
         print('\nThe counter is wrong, so neither a pass nor a failure below '
               'would mean anything.')

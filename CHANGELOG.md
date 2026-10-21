@@ -454,6 +454,28 @@ None of these have been exercised on physical hardware; see Known gaps.
   stops honouring the flag — which would leave every driver compiling and every
   shared arg leaking — or if the collapse loop is removed.
 
+  **Its comment-stripper reported line numbers that did not exist.**
+  `strip_comments()` dropped the newlines inside `/* */` blocks, so the text it
+  handed to `owners_in()` was shorter than the file and every line number after
+  the first multi-line comment was low by however many lines those comments
+  spanned. The counts were unaffected, which is why the gate still passed and
+  failed in the right places and why this survived: the only wrong output was
+  the part a maintainer actually follows. Pointed at a driver with a long
+  licence header it named lines 607-612 for assignments really at 680-685 — a
+  73-line error landing in an unrelated function.
+
+  The five existing fixtures all passed throughout, because every one of them
+  was a single line and none contained a comment spanning two. **Six fixtures
+  now assert the position rather than the count** — an owner after a four-line
+  block comment, after two of them, between two, after a `//` line, and after a
+  continued string literal — and three of those six fail against the old
+  stripper, which makes the self-test refuse to run the gate at all. That is
+  the property worth having: a line number this check prints is a line number
+  in the file.
+
+  Found by cross-checking one row of its output against `grep -n` while
+  measuring a different tree, not by reading the function.
+
   The leak half is **not** enforced, and that is deliberate: 12 driver files
   assign `user_arg` and name no owner, and they are mostly right to.
   [`sensor_0026_ADC_LDR.c:268`](ezlopi-sensors-devices/sensor-0026-ADC-LDR/sensor_0026_ADC_LDR.c#L268)
