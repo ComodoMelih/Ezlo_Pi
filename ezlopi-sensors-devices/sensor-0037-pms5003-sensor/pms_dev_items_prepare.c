@@ -40,6 +40,8 @@
  *                          Include Files
  *******************************************************************************/
 
+#include "ezlopi_util_trace.h"
+
 #include "ezlopi_core_devices_list.h"
 #include "ezlopi_core_devices.h"
 #include "ezlopi_core_cjson_macros.h"
@@ -61,6 +63,15 @@
 /*******************************************************************************
  *                          Type & Macro Definitions
  *******************************************************************************/
+
+/* Return codes of the nine __prepare_*_device_and_items() helpers below.
+** Deliberately NOT esp_err_t: these were previously fed to ESP_ERROR_CHECK(),
+** which aborts on any non-zero value, so a helper returning 1 for success
+** panicked the hub on exactly the path that had worked. Naming them keeps that
+** from being re-introduced by someone reading `return 1` as "fine".
+*/
+#define PMS_PREPARE_OK 1
+#define PMS_PREPARE_FAILED 0
 
 /*******************************************************************************
  *                          Static Function Prototypes
@@ -94,16 +105,41 @@ ezlopi_error_t PMS5003_sensor_prepare_devices_and_items(cJSON *cj_properties, ui
     if (pms_object)
     {
         pms5003_set_pms_object_details(cj_properties, pms_object);
-        ESP_ERROR_CHECK(__prepare_particulate_matter_particles_0_dot_3_um_device_and_items(cj_properties, parent_id, (void *)pms_object));
-        ESP_ERROR_CHECK(__prepare_particulate_matter_particles_0_dot_5_um_device_and_items(cj_properties, *parent_id, (void *)pms_object));
-        ESP_ERROR_CHECK(__prepare_particulate_matter_particles_1_um_device_and_items(cj_properties, *parent_id, (void *)pms_object));
-        ESP_ERROR_CHECK(__prepare_particulate_matter_particles_2_dot_5_um_device_and_items(cj_properties, *parent_id, (void *)pms_object));
-        ESP_ERROR_CHECK(__prepare_particulate_matter_particles_5_um_device_and_items(cj_properties, *parent_id, (void *)pms_object));
-        ESP_ERROR_CHECK(__prepare_particulate_matter_particles_10_um_device_and_items(cj_properties, *parent_id, (void *)pms_object));
-        ESP_ERROR_CHECK(__prepare_particulate_matter_standard_particles_1_um_device_and_items(cj_properties, *parent_id, (void *)pms_object));
-        ESP_ERROR_CHECK(__prepare_particulate_matter_standard_particles_2_dot_5_um_device_and_items(cj_properties, *parent_id, (void *)pms_object));
-        ESP_ERROR_CHECK(__prepare_particulate_matter_standard_particles_10_um_device_and_items(cj_properties, *parent_id, (void *)pms_object));
-        ret = EZPI_SUCCESS;
+
+        /* Device 0 is special three times over and so is handled on its own:
+        ** it is the parent whose id the other eight are children of, it is the
+        ** only one that writes *parent_id, and its item is the sole owner of
+        ** pms_object (is_user_arg_unique). If it fails, *parent_id is never
+        ** written, so calling the others would pass them an uninitialised
+        ** value from the caller's stack.
+        */
+        if (PMS_PREPARE_OK == __prepare_particulate_matter_particles_0_dot_3_um_device_and_items(cj_properties, parent_id, (void *)pms_object))
+        {
+            /* The remaining eight are each allowed to fail without taking the
+            ** sensor down: a hub with 7 of 9 dust channels is more useful than
+            ** no hub. They are children of device 0, which already exists, and
+            ** none of them owns pms_object, so a failure leaks nothing.
+            */
+            (void)__prepare_particulate_matter_particles_0_dot_5_um_device_and_items(cj_properties, *parent_id, (void *)pms_object);
+            (void)__prepare_particulate_matter_particles_1_um_device_and_items(cj_properties, *parent_id, (void *)pms_object);
+            (void)__prepare_particulate_matter_particles_2_dot_5_um_device_and_items(cj_properties, *parent_id, (void *)pms_object);
+            (void)__prepare_particulate_matter_particles_5_um_device_and_items(cj_properties, *parent_id, (void *)pms_object);
+            (void)__prepare_particulate_matter_particles_10_um_device_and_items(cj_properties, *parent_id, (void *)pms_object);
+            (void)__prepare_particulate_matter_standard_particles_1_um_device_and_items(cj_properties, *parent_id, (void *)pms_object);
+            (void)__prepare_particulate_matter_standard_particles_2_dot_5_um_device_and_items(cj_properties, *parent_id, (void *)pms_object);
+            (void)__prepare_particulate_matter_standard_particles_10_um_device_and_items(cj_properties, *parent_id, (void *)pms_object);
+
+            ret = EZPI_SUCCESS;
+        }
+        else
+        {
+            /* Nothing took ownership of pms_object: device 0's item is the only
+            ** thing that ever would have, and it does not exist. Both failure
+            ** paths inside that helper free the device they made, if any.
+            */
+            TRACE_E("PMS5003: parent device could not be prepared; sensor not added");
+            ezlopi_free(__FUNCTION__, pms_object);
+        }
     }
 
     return ret;
@@ -121,7 +157,7 @@ static int __prepare_particulate_matter_particles_0_dot_3_um_device_and_items(cJ
     l_ezlopi_device_t *particles_0_dot_3_um_device = EZPI_core_device_add_device(cj_properties, "Dust_Particles_0.3um");
     if (particles_0_dot_3_um_device)
     {
-        ret = 1;
+        ret = PMS_PREPARE_OK;
         // char *dev_name = "Dust Particles 0.3 um";
         particles_0_dot_3_um_device->cloud_properties.category = category_level_sensor;
         particles_0_dot_3_um_device->cloud_properties.subcategory = subcategory_particulate_matter;
@@ -152,12 +188,12 @@ static int __prepare_particulate_matter_particles_0_dot_3_um_device_and_items(cJ
         else
         {
             EZPI_core_device_free_device(particles_0_dot_3_um_device);
-            ret = -1;
+            ret = PMS_PREPARE_FAILED;
         }
     }
     else
     {
-        ret = 1;
+        ret = PMS_PREPARE_FAILED;
     }
 
     return ret;
@@ -171,7 +207,7 @@ static int __prepare_particulate_matter_particles_0_dot_5_um_device_and_items(cJ
     l_ezlopi_device_t *particles_0_dot_5_um_device = EZPI_core_device_add_device(cj_properties, "Dust_Particles_0.5_um");
     if (particles_0_dot_5_um_device)
     {
-        ret = 1;
+        ret = PMS_PREPARE_OK;
         // char *dev_name = "Dust Particles 0.5 um";
         particles_0_dot_5_um_device->cloud_properties.category = category_level_sensor;
         particles_0_dot_5_um_device->cloud_properties.subcategory = subcategory_particulate_matter;
@@ -198,13 +234,13 @@ static int __prepare_particulate_matter_particles_0_dot_5_um_device_and_items(cJ
         }
         else
         {
-            ret = -1;
+            ret = PMS_PREPARE_FAILED;
             EZPI_core_device_free_device(particles_0_dot_5_um_device);
         }
     }
     else
     {
-        ret = 1;
+        ret = PMS_PREPARE_FAILED;
     }
 
     return ret;
@@ -218,7 +254,7 @@ static int __prepare_particulate_matter_particles_1_um_device_and_items(cJSON *c
     l_ezlopi_device_t *particles_1_um_device = EZPI_core_device_add_device(cj_properties, "Dust_Particles_1_um");
     if (particles_1_um_device)
     {
-        ret = 1;
+        ret = PMS_PREPARE_OK;
         // char *dev_name = "Dust Particles 1 um";
         particles_1_um_device->cloud_properties.category = category_level_sensor;
         particles_1_um_device->cloud_properties.subcategory = subcategory_particulate_matter;
@@ -245,13 +281,13 @@ static int __prepare_particulate_matter_particles_1_um_device_and_items(cJSON *c
         }
         else
         {
-            ret = -1;
+            ret = PMS_PREPARE_FAILED;
             EZPI_core_device_free_device(particles_1_um_device);
         }
     }
     else
     {
-        ret = 1;
+        ret = PMS_PREPARE_FAILED;
     }
 
     return ret;
@@ -265,7 +301,7 @@ static int __prepare_particulate_matter_particles_2_dot_5_um_device_and_items(cJ
     l_ezlopi_device_t *particles_2_dot_5_um_device = EZPI_core_device_add_device(cj_properties, "Dust_Particles_2.5_um");
     if (particles_2_dot_5_um_device)
     {
-        ret = 1;
+        ret = PMS_PREPARE_OK;
         // char *dev_name = "Dust Particles 2.5 um";
         particles_2_dot_5_um_device->cloud_properties.category = category_level_sensor;
         particles_2_dot_5_um_device->cloud_properties.subcategory = subcategory_particulate_matter;
@@ -292,13 +328,13 @@ static int __prepare_particulate_matter_particles_2_dot_5_um_device_and_items(cJ
         }
         else
         {
-            ret = -1;
+            ret = PMS_PREPARE_FAILED;
             EZPI_core_device_free_device(particles_2_dot_5_um_device);
         }
     }
     else
     {
-        ret = 1;
+        ret = PMS_PREPARE_FAILED;
     }
 
     return ret;
@@ -312,7 +348,7 @@ static int __prepare_particulate_matter_particles_5_um_device_and_items(cJSON *c
     l_ezlopi_device_t *particles_5_um_device = EZPI_core_device_add_device(cj_properties, "Dust_Particles_5_um");
     if (particles_5_um_device)
     {
-        ret = 1;
+        ret = PMS_PREPARE_OK;
         // char *dev_name = "Dust Particles 5 um";
         particles_5_um_device->cloud_properties.category = category_level_sensor;
         particles_5_um_device->cloud_properties.subcategory = subcategory_particulate_matter;
@@ -339,13 +375,13 @@ static int __prepare_particulate_matter_particles_5_um_device_and_items(cJSON *c
         }
         else
         {
-            ret = -1;
+            ret = PMS_PREPARE_FAILED;
             EZPI_core_device_free_device(particles_5_um_device);
         }
     }
     else
     {
-        ret = 1;
+        ret = PMS_PREPARE_FAILED;
     }
 
     return ret;
@@ -359,7 +395,7 @@ static int __prepare_particulate_matter_particles_10_um_device_and_items(cJSON *
     l_ezlopi_device_t *particles_10_um_device = EZPI_core_device_add_device(cj_properties, "Dust_Particles_10_um");
     if (particles_10_um_device)
     {
-        ret = 1;
+        ret = PMS_PREPARE_OK;
         // char *dev_name = "Dust Particles 10 um";
         particles_10_um_device->cloud_properties.category = category_level_sensor;
         particles_10_um_device->cloud_properties.subcategory = subcategory_particulate_matter;
@@ -386,13 +422,13 @@ static int __prepare_particulate_matter_particles_10_um_device_and_items(cJSON *
         }
         else
         {
-            ret = -1;
+            ret = PMS_PREPARE_FAILED;
             EZPI_core_device_free_device(particles_10_um_device);
         }
     }
     else
     {
-        ret = 1;
+        ret = PMS_PREPARE_FAILED;
     }
 
     return ret;
@@ -406,7 +442,7 @@ static int __prepare_particulate_matter_standard_particles_1_um_device_and_items
     l_ezlopi_device_t *standard_particles_1_um_device = EZPI_core_device_add_device(cj_properties, "Dust_Particles_PM_1_um");
     if (standard_particles_1_um_device)
     {
-        ret = 1;
+        ret = PMS_PREPARE_OK;
         // char *dev_name = "Dust Particles PM 1 um";
         standard_particles_1_um_device->cloud_properties.category = category_level_sensor;
         standard_particles_1_um_device->cloud_properties.subcategory = subcategory_particulate_matter;
@@ -433,13 +469,13 @@ static int __prepare_particulate_matter_standard_particles_1_um_device_and_items
         }
         else
         {
-            ret = -1;
+            ret = PMS_PREPARE_FAILED;
             EZPI_core_device_free_device(standard_particles_1_um_device);
         }
     }
     else
     {
-        ret = -1;
+        ret = PMS_PREPARE_FAILED;
     }
 
     return ret;
@@ -453,7 +489,7 @@ static int __prepare_particulate_matter_standard_particles_2_dot_5_um_device_and
     l_ezlopi_device_t *standard_particles_2_dot_5_um_device = EZPI_core_device_add_device(cj_properties, "Dust_Particles_PM_2.5_um");
     if (standard_particles_2_dot_5_um_device)
     {
-        ret = 1;
+        ret = PMS_PREPARE_OK;
         // char *dev_name = "Dust Particles PM 2.5 um";
         standard_particles_2_dot_5_um_device->cloud_properties.category = category_level_sensor;
         standard_particles_2_dot_5_um_device->cloud_properties.subcategory = subcategory_particulate_matter;
@@ -480,13 +516,13 @@ static int __prepare_particulate_matter_standard_particles_2_dot_5_um_device_and
         }
         else
         {
-            ret = -1;
+            ret = PMS_PREPARE_FAILED;
             EZPI_core_device_free_device(standard_particles_2_dot_5_um_device);
         }
     }
     else
     {
-        ret = 1;
+        ret = PMS_PREPARE_FAILED;
     }
 
     return ret;
@@ -500,7 +536,7 @@ static int __prepare_particulate_matter_standard_particles_10_um_device_and_item
     l_ezlopi_device_t *standard_particles_10_um_device = EZPI_core_device_add_device(cj_properties, "Dust_Particles_PM_10_um");
     if (standard_particles_10_um_device)
     {
-        ret = 1;
+        ret = PMS_PREPARE_OK;
         // char *dev_name = "Dust Particles PM 10 um";
         standard_particles_10_um_device->cloud_properties.category = category_level_sensor;
         standard_particles_10_um_device->cloud_properties.subcategory = subcategory_particulate_matter;
@@ -527,13 +563,13 @@ static int __prepare_particulate_matter_standard_particles_10_um_device_and_item
         }
         else
         {
-            ret = -1;
+            ret = PMS_PREPARE_FAILED;
             EZPI_core_device_free_device(standard_particles_10_um_device);
         }
     }
     else
     {
-        ret = 1;
+        ret = PMS_PREPARE_FAILED;
     }
 
     return ret;
