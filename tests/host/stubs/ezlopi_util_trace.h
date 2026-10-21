@@ -73,6 +73,35 @@ static inline void ezpi_trace_noop(const char *fmt, ...)
 #define TRACE_S(...) EZPI_TRACE_NOOP(__VA_ARGS__)
 #define TRACE_W(...) EZPI_TRACE_NOOP(__VA_ARGS__)
 
+/* Copied from the real header rather than invented, because a file that passes
+ * one of these enumerators to TRACE_OTEL has to name the same one here. Added
+ * for test_settings_api: ezlopi_cloud_settings.c is the first host-compiled
+ * subject that calls TRACE_OTEL, and without the enum it failed on the
+ * enumerator rather than on the macro -- which is the more confusing half of
+ * the same omission. */
+typedef enum
+{
+    ENUM_EZLOPI_TRACE_SEVERITY_NONE = 0,
+    ENUM_EZLOPI_TRACE_SEVERITY_ERROR,
+    ENUM_EZLOPI_TRACE_SEVERITY_WARNING,
+    ENUM_EZLOPI_TRACE_SEVERITY_INFO,
+    ENUM_EZLOPI_TRACE_SEVERITY_DEBUG,
+    ENUM_EZLOPI_TRACE_SEVERITY_TRACE,
+    ENUM_EZLOPI_TRACE_SEVERITY_MAX,
+} e_trace_severity_t;
+
+/* The severity is discarded rather than forwarded to the no-op, because it is
+ * an enum and not a format string: passing it as the first argument of a
+ * variadic that declares `const char *fmt` is the one shape here that would be
+ * undefined rather than merely useless. Cast to void so an undefined
+ * enumerator is still a compile error. */
+#define TRACE_OTEL(severity, ...) \
+    do                            \
+    {                             \
+        (void)(severity);         \
+        EZPI_TRACE_NOOP(__VA_ARGS__); \
+    } while (0)
+
 /* CJSON_TRACE is deliberately NOT defined here, and that is a correction
  * rather than an omission. This stub stands in for ezlopi_util_trace.h, and
  * the real one does not define it: CJSON_TRACE belongs to
