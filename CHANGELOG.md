@@ -1814,6 +1814,69 @@ None of these have been exercised on physical hardware; see Known gaps.
   `EZPI_hal_i2c_master_deinit()` is declared in the header and called from
   nowhere in the tree.
 
+### Particulate matter sensor — [bug]
+
+- **Configuring a PMS5003 panicked the hub on its own success path.**
+  [`PMS5003_sensor_prepare_devices_and_items`:100](ezlopi-sensors-devices/sensor-0037-pms5003-sensor/pms_dev_items_prepare.c#L100)
+  built its nine devices through nine `__prepare_*_device_and_items()` helpers
+  and passed each return value to `ESP_ERROR_CHECK()`, which aborts whenever
+  its argument differs from `ESP_OK` — and `ESP_OK` is zero. Every reachable
+  path of all nine helpers assigns `ret = 1` or `ret = -1`; the `int ret = 0;`
+  each one opens with is dead, because both arms of `if (device)` assign before
+  the return. So the macro aborted unconditionally, on success exactly as
+  readily as on failure, at the very first call. Nothing here was
+  configuration-dependent and nothing was optimised away: all four
+  `sdkconfig.defaults.*` set `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y`
+  with both `..._SILENT` and `..._DISABLE` explicitly unset, which selects the
+  variant of the macro that calls `_esp_error_check_failed()`.
+
+  Underneath that sat a second defect that the first one hid. In eight of the
+  nine helpers, the `else` arm reached when `EZPI_core_device_add_device()`
+  returns `NULL` set `ret = 1` — the same value as success. Only the
+  standard-particles-1µm helper set `-1` there, which is what the other eight
+  were meant to say. Replacing the macro with a plain comparison and nothing
+  else would therefore have produced a sensor reporting success for eight
+  devices that were never created.
+
+  Both outcomes are now named — [`PMS_PREPARE_OK`:73](ezlopi-sensors-devices/sensor-0037-pms5003-sensor/pms_dev_items_prepare.c#L73)
+  and [`PMS_PREPARE_FAILED`:74](ezlopi-sensors-devices/sensor-0037-pms5003-sensor/pms_dev_items_prepare.c#L74)
+  — deliberately not `esp_err_t`, and deliberately not bare integers: `return 1`
+  reads as "fine" to anyone who has not gone looking for the macro that
+  disagrees, and that reading is how this got shipped.
+
+  The caller now splits the two cases it actually has. Device 0 is handled on
+  its own, because it is special three times over: it is the parent whose id the
+  other eight are children of, it is the only helper that writes `*parent_id`,
+  and its item is the sole owner of the shared `pms_object`. Had it failed,
+  `*parent_id` would never have been written, and the remaining eight calls
+  would each have been handed an uninitialised value off the caller's stack. The
+  other eight are now each allowed to fail without taking the sensor down — a
+  hub with seven of nine dust channels is more use than no hub — which is safe
+  precisely because none of them owns `pms_object`. On the one path that does
+  matter, `pms_object` is freed; it used to leak there, a leak unreachable only
+  because the abort arrived first.
+
+  Ownership was audited and deliberately left as it was. Nine items receive
+  `user_arg` and exactly one claims it, at
+  [`is_user_arg_unique = true`:186](ezlopi-sensors-devices/sensor-0037-pms5003-sensor/pms_dev_items_prepare.c#L186)
+  on the parent device. The other eight leave the flag false implicitly rather
+  than setting it, which is sound here only because
+  [`memset(new_item, 0, sizeof(l_ezlopi_item_t))`:548](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.c#L548)
+  zeroes every item at allocation — worth knowing before anyone writes a
+  tenth channel by copying one of the eight.
+
+  Built green for both esp32 and esp32c3, with the object confirmed recompiled
+  in each run and no new warnings from the component. The build was watched to
+  fail first: an undefined call placed in this file gives `rc=2`, and
+  redefining `PMS_PREPARE_OK` raises a redefinition warning at the definition
+  itself, which is what proves the macro is genuinely in the translation unit
+  rather than merely present in the text. **Not exercised on hardware** — no
+  PMS5003 is attached here, so the abort is established by reading the macro
+  and the assignments, not by watching a hub reboot.
+
+  Not fixed, and recorded under Known gaps instead: whether removing the parent
+  device frees `pms_object` while the items on children 1–8 still point at it.
+
 ### Device settings — [bug]
 
 - **The ENS160 compensated its air-quality readings against a heap address.**
@@ -10664,46 +10727,56 @@ enumerators — so the live half of this component was never affected.
 
 Listed because a changelog that only mentions what was finished is misleading.
 
-- **Nine more `ESP_ERROR_CHECK`-on-plain-`int` sites are still reboot switches.**
-  The census behind *Device settings* found 102 `ESP_ERROR_CHECK` call sites
-  tree-wide with a direct function call, 39 of them on a callee whose only
-  return type anywhere in the tree is plain `int`. Ten were fixed in
+- **The `ESP_ERROR_CHECK`-on-plain-`int` class is now closed, but the wider
+  policy of aborting on a return value is not.** The census behind *Device
+  settings* found 102 `ESP_ERROR_CHECK` call sites tree-wide with a direct
+  function call, 39 of them on a callee whose only return type anywhere in the
+  tree is plain `int`. Ten were fixed in
   `sensor_0068_ENS160_gas_sensor_settings.c`, nineteen in
-  `hilink_presence_sensor_setting.c` and one in
-  `sensor_0067_hilink_presence_sensor.c` — all three files are now at zero,
-  re-confirmed by counting call sites with comments stripped. The remaining
-  **9** are all in `pms_dev_items_prepare.c`, at lines 97–105, one per
-  particulate-matter item. With
-  `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y` and no `NDEBUG` — this
-  project's configuration — each is a panic and reboot on a return value whose
-  documented meaning is "failed". They are not fixed here because there is no
-  host test for that file.
+  `hilink_presence_sensor_setting.c`, one in
+  `sensor_0067_hilink_presence_sensor.c`, and the last **9** in
+  `pms_dev_items_prepare.c` — see *Particulate matter sensor*, where the nine
+  turned out to abort on success rather than only on failure. All four files
+  are now at zero, re-confirmed by counting call sites with comments stripped.
 
-  Re-derived repo-wide over the 700 tracked `.c` and `.h` files: **69**
-  `ESP_ERROR_CHECK` call sites remain, in 15 files, 67 of them passing a call
-  directly. That does not reconcile with 102 less the 30 fixed, and the earlier
-  figure is not reproducible from here because this entry never recorded the
-  scope it was taken over. So 69 is the current measurement and the 102 is kept
-  only as the history of how the 39 was arrived at. The two largest holdings
-  are *not* the plain-`int` class — `TCS230.c` has 20 and `sensor_bme280.c` 17,
-  on genuine `esp_err_t` returns, which is the wrong policy correctly typed.
+  Re-derived repo-wide over the 700 tracked `.c` and `.h` files: **60**
+  `ESP_ERROR_CHECK` call sites remain, in 14 files, 58 of them passing a call
+  directly. The drop from the 69/15/67 recorded before the PMS5003 fix is
+  exactly those nine, and `pms_dev_items_prepare.c` leaves the list entirely,
+  which is where the one-file difference comes from. The figure is measured each
+  time rather than carried forward by subtraction. It still does not reconcile
+  with 102 less the 39, and the 102 is not reproducible from here because this
+  entry never recorded the scope it was taken over; 60 is the current
+  measurement and the 102 is kept only as the history of how the 39 was arrived
+  at. The two largest holdings are *not* the plain-`int` class — `TCS230.c` has
+  20 and `sensor_bme280.c` 17, on genuine `esp_err_t` returns, which is the
+  wrong policy correctly typed. The same is true of the two remaining sites in
+  the PMS5003 directory, `pms5003.c:220` and `:224`, on `esp_timer_create()`
+  and `esp_timer_start_periodic()`: both really do return `esp_err_t`, so they
+  are a policy question about whether a failed timer should take the hub down,
+  not the type confusion that the nine were.
 
   Counting by name rather than by call site inflates all of this. Both hilink
   files still contain the string `ESP_ERROR_CHECK` — 5 times and 6 times
   respectively — and every one of those is inside a comment explaining why the
   macro was removed. With comments stripped, the call-site count in each file
   is zero. A bare `grep -c` on either file reports otherwise and is wrong.
+  `pms_dev_items_prepare.c` has now joined them: one occurrence of the string,
+  zero call sites, because the comment above the two new return-code macros
+  names the macro it exists to keep out. Repo-wide the same gap is 71 against
+  60 — eleven of the apparent sites are prose about the other sixty.
 
   This entry previously read *"Twenty-nine more"* and counted the nineteen
   hilink settings sites among them, then *"Ten more"* while one
-  `sensor_0067_hilink_presence_sensor.c` site was still open. Both are now
-  fixed, so the figure is nine.
+  `sensor_0067_hilink_presence_sensor.c` site was still open, then *"Nine
+  more"* for the PMS5003 set. All are now fixed, so the figure for this class
+  is zero and the heading above no longer counts anything.
 
 - **The census was never going to find five of the six `ESP_ERROR_CHECK` sites
   in `sensor_0067_hilink_presence_sensor.c`, and that blind spot is still
   open.** Those six are fixed — see *UART sensor dispatch* — but the reason only
-  one of them appeared in the count above is worth keeping, because the same
-  criterion is still what is being used on `pms_dev_items_prepare.c`. The
+  one of them appeared in the count above is worth keeping, because the
+  criterion is still how any future census of this would be taken. The
   criterion is "callee whose only return type anywhere in the tree is plain
   `int`", which in that file matched exactly one site,
   `HILINK_presence_sensor_apply_settings()`. Counting every `ESP_ERROR_CHECK`
@@ -10712,7 +10785,16 @@ Listed because a changelog that only mentions what was finished is misleading.
   on `ld2410_get_data`, which *does* return `esp_err_t` and so was correctly
   typed while still being the wrong policy — one of those sat on the 1-second
   item-update path. A return-type census cannot see the last three classes, so
-  the figure of nine above is a lower bound on the remaining work, not a total.
+  the 60 above is a lower bound on the remaining work, not a total.
+
+  The PMS5003 nine added a fourth thing the criterion cannot see, and it is the
+  worst of them: the *direction* of the convention. Those nine matched the
+  criterion perfectly and were duly counted, but what the count recorded was
+  "aborts on a value meaning failure" when the truth was "aborts on every value,
+  including the one meaning success". The census tells you a site is suspect; it
+  cannot tell you which way round the callee's convention runs, and the two
+  readings differ by whether the sensor is merely fragile or completely
+  unusable. Reading the callee is not optional.
 
 - **`check_check_after_use.py` would not catch the hilink guard-after-use even
   though it now scans the driver tree.** This entry originally reported two
@@ -11431,6 +11513,37 @@ Listed because a changelog that only mentions what was finished is misleading.
   guard that was added is silent, because the function it is in runs about once
   a second, so a mistyped `range` field now yields a scene that never fires and
   no log line saying why.
+
+- **Whether removing a PMS5003's parent device frees `pms_object` out from
+  under its eight children is not established.** The sensor builds nine devices
+  whose items all point at one heap allocation, with ownership claimed exactly
+  once, on the parent — see *Particulate matter sensor*. That is the correct
+  shape for the free path as written: `ezlopi_device_free_item()` frees only on
+  the flag, so removing a child frees nothing shared. The untested direction is
+  the other one. If the parent can be removed while children 1–8 survive, its
+  item's flag fires, `pms_object` goes back to the heap, and eight items keep a
+  dangling `user_arg` which their `func()` casts and dereferences on every
+  update. The alternative is that device removal is always parent-and-children
+  together, in which case there is nothing here at all.
+
+  Which of those holds is a question about device-removal semantics in
+  `ezlopi-core-devices`, not about this sensor, and it was not chased because
+  the abort fixed above made the whole file unreachable in practice and so there
+  was never a live PMS5003 to observe. Stated as an open question rather than a
+  defect: calling it a use-after-free would assert a removal order that has not
+  been read, and calling it safe would assert the same thing in the other
+  direction.
+
+  Worth separating from the five drivers in *Memory safety*, because the shape
+  is not the same one. Those share a `user_arg` across several items *of one
+  device*, which is why `ezlopi_device_free_item()` walking that device's item
+  list is the function that matters for them. PMS5003 gives each of its nine
+  devices exactly one item and shares the allocation *across the devices* — so
+  it is correctly absent from the six multi-item drivers counted elsewhere in
+  this section, and the walk that would have to be reasoned about is device
+  removal rather than item removal. A driver can therefore be entirely sound
+  item-wise and still hold this question open, which is also why the
+  one-owner-per-item check that passes on this file cannot answer it.
 
 - **`EZPI_hal_i2c_master_deinit()` is dead code with two defects in it, and was
   left alone deliberately.** It is declared in
