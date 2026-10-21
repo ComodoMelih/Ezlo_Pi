@@ -130,10 +130,29 @@ void EZPI_device_settings_list_v3(cJSON *cj_request, cJSON *cj_response)
                         ** which is the same reasoning __prepare_error() in
                         ** ezlopi_cloud_devcfg.c gives for leaving out
                         ** "badIndex" rather than sending -1.
+                        **
+                        ** Added only if the handler left the member out, and
+                        ** that condition is not defensive padding. Five GET
+                        ** paths across the two settings-carrying drivers in the
+                        ** tree -- hilink_presence_sensor_setting.c and
+                        ** sensor_0068_ENS160_gas_sensor_settings.c -- write
+                        ** "status": "synced" themselves, and cJSON appends
+                        ** without checking, so every real list response has
+                        ** gone out with the key twice. Harmless only while both
+                        ** copies agree: a client taking the first member reads
+                        ** a different one than a client taking the last, and a
+                        ** driver with something more specific to report would
+                        ** have been overruled by whichever copy its parser
+                        ** happened to pick. Deferring to the handler keeps that
+                        ** room open; supplying the default keeps the member
+                        ** present for the handlers that say nothing.
                         */
                         if (0 == curr_setting->func(EZLOPI_SETTINGS_ACTION_GET_SETTING, curr_setting, cj_properties, curr_setting->user_arg))
                         {
-                            cJSON_AddStringToObject(__FUNCTION__, cj_properties, ezlopi_status_str, ezlopi_synced_str);
+                            if (false == cJSON_HasObjectItem(__FUNCTION__, cj_properties, ezlopi_status_str))
+                            {
+                                cJSON_AddStringToObject(__FUNCTION__, cj_properties, ezlopi_status_str, ezlopi_synced_str);
+                            }
                         }
                         else
                         {

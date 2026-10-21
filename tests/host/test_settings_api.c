@@ -169,6 +169,7 @@ typedef struct
     int call_count;                    /* how many times it ran */
     e_ezlopi_settings_action_t action;  /* the action of the LAST call */
     bool add_a_value;                  /* emulate a GET that populated fields */
+    bool writes_own_status;            /* emulate a GET that reports a status */
 } s_handler_t;
 
 static s_handler_t g_handler[MAX_DEVICES][MAX_SETTINGS];
@@ -190,6 +191,17 @@ static int __fake_settings_func(e_ezlopi_settings_action_t action,
     if (h->add_a_value && (EZLOPI_SETTINGS_ACTION_GET_SETTING == action) && arg)
     {
         cJSON_AddNumberToObject("fake", (cJSON *)arg, "value", 42);
+    }
+
+    /* Not an invention: five GET paths across the two drivers in the tree that
+    ** have settings -- hilink_presence_sensor_setting.c and
+    ** sensor_0068_ENS160_gas_sensor_settings.c -- write this member themselves
+    ** on their success path. A handler that does so is the common case, not the
+    ** odd one, so one case here has to behave like one.
+    */
+    if (h->writes_own_status && (EZLOPI_SETTINGS_ACTION_GET_SETTING == action) && arg)
+    {
+        cJSON_AddStringToObject("fake", (cJSON *)arg, ezlopi_status_str, ezlopi_synced_str);
     }
 
     return h->return_value;
@@ -266,6 +278,28 @@ static int __error_code(cJSON *response)
     cJSON *code = err ? cJSON_GetObjectItem("test", err, ezlopi_code_str) : NULL;
 
     return code ? (int)code->valuedouble : 0;
+}
+
+/* How many members of this object carry that name. cJSON_GetObjectItem stops
+** at the first match, so it cannot answer this -- and a duplicated key is
+** exactly the defect one case below is about. Walking the sibling chain is the
+** only way to see the second one.
+*/
+static int __count_members(cJSON *object, const char *name)
+{
+    int count = 0;
+    cJSON *child = object ? object->child : NULL;
+
+    while (child)
+    {
+        if (child->string && (0 == strcmp(name, child->string)))
+        {
+            count++;
+        }
+        child = child->next;
+    }
+
+    return count;
 }
 
 static const char *__error_data(cJSON *response)
@@ -537,6 +571,66 @@ static void test_list_claims_synced_when_the_handler_agrees(void)
     cJSON_Delete("test", request);
 }
 
+/* The handler, not the subject, is the usual author of this member: five GET
+** paths in the two settings-carrying drivers write "status": "synced"
+** themselves. So the subject adding its own produced an entry with the key
+** twice, and that is what every real list response has carried.
+**
+** Benign only for as long as both copies say the same thing. A parser taking
+** the first wins differently from one taking the last, cJSON_GetObjectItem
+** here returns the subject's and hides the handler's, and the moment a driver
+** wants to report something other than "synced" the two disagree and which one
+** the app believes is luck.
+**
+** The subject now supplies the member only when the handler left it out, which
+** also leaves room for a handler with something more specific to say. Asserted
+** by counting rather than by looking up, because a lookup cannot see a
+** duplicate -- which is why this went unnoticed.
+*/
+static void test_list_does_not_duplicate_a_status_the_handler_wrote(void)
+{
+    cJSON *response = cJSON_CreateObject("test");
+    cJSON *request = __request_without_params();
+    cJSON *result;
+    cJSON *array;
+    cJSON *entry;
+
+    __build(1, 1);
+    g_handler[0][0].writes_own_status = true;
+
+    EZPI_device_settings_list_v3(request, response);
+
+    result = cJSON_GetObjectItem("test", response, ezlopi_result_str);
+    array = result ? cJSON_GetObjectItem("test", result, ezlopi_settings_str) : NULL;
+    entry = array ? cJSON_GetArrayItem(array, 0) : NULL;
+
+    ok(NULL != entry, "a handler that writes its own status still produces an entry");
+    ok(1 == __count_members(entry, ezlopi_status_str),
+       "the status member appears exactly once, not twice");
+
+    cJSON_Delete("test", response);
+    cJSON_Delete("test", request);
+}
+
+/* The counter itself has to be wrong-proof, or the case above passes by not
+** working. Two members with the same name really are two, and a name that is
+** absent really is zero.
+*/
+static void test_the_duplicate_counter_can_count(void)
+{
+    cJSON *object = cJSON_CreateObject("test");
+
+    cJSON_AddStringToObject("test", object, ezlopi_status_str, ezlopi_synced_str);
+    cJSON_AddStringToObject("test", object, ezlopi_status_str, ezlopi_synced_str);
+
+    ok(2 == __count_members(object, ezlopi_status_str),
+       "the counter sees a key added twice as two");
+    ok(0 == __count_members(object, ezlopi_deviceId_str),
+       "the counter sees an absent key as zero");
+
+    cJSON_Delete("test", object);
+}
+
 /* A list spanning several devices, because both the set and reset walks have
 ** an outer loop over devices that a single-device test cannot exercise.
 */
@@ -579,6 +673,8 @@ int main(void)
     test_reset_by_setting_id_reports_a_refusal();
     test_list_omits_status_when_the_handler_fails();
     test_list_claims_synced_when_the_handler_agrees();
+    test_the_duplicate_counter_can_count();
+    test_list_does_not_duplicate_a_status_the_handler_wrote();
     test_list_and_set_cross_devices();
 
     printf("  %d checks, %d failures\n", checks, failures);
