@@ -3200,10 +3200,14 @@ printing one.
   ([`ezlopi_util_trace.h:213`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L213)),
   which passes severity 4
   ([`:175`](ezlopi-util/ezlopi-util-trace/ezlopi_util_trace.h#L175));
-  `serial_log_severity` defaults to `ENUM_EZLOPI_TRACE_SEVERITY_MAX`
-  ([`ezlopi_core_log.c:86`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L86));
-  the upcall is registered at `:255` and ends in `printf` at `:309`. The
-  default build printed it.
+  `serial_log_severity` defaults to `ENUM_EZLOPI_TRACE_SEVERITY_TRACE` = 5
+  ([`ezlopi_core_log.c:131`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L131));
+  the upcall is registered at `:375` and ends in `printf` at `:478`. 4 ≤ 5, so
+  the default build printed it. That default used to be
+  `ENUM_EZLOPI_TRACE_SEVERITY_MAX` = 6, which is the table's length and not a
+  severity at all; the entry below on the severity-as-an-array-index fix has
+  the detail. It does not change this conclusion — 4 was ≤ 6 and is ≤ 5 — and
+  the two line numbers above moved with that fix.
 
   There *is* a switch that compiles these macros away, and it is worth naming
   precisely because finding it is the obvious way to talk yourself out of this
@@ -3410,17 +3414,17 @@ of reading the serial console would have revealed it.
   from `CONFIG_EZPI_UTIL_TRACE_EN`, which is `=y` in **4 of 4** of those files.
   And `trace_color_print()` does no severity filtering at all — the only filter
   is in the registered serial upcall
-  ([`:307`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L307)), which
+  ([`:476`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L476)), which
   [`EZPI_init()` defeats on every boot](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L119)
   by raising `serial_log_severity` to `TRACE` after reading NVS. So a
   severity-3 `TRACE_I` printed regardless of what anyone configured.
 
   The exposure is the UART and only the UART, which is worth being exact about
   rather than overstating. Cloud log severity is capped at `WARNING` in both
-  setters ([`:142`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L142),
-  [`:276`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L276)) and
+  setters ([`:245`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L245),
+  [`:434`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L434)) and
   `EZPI_core_send_cloud_log` gates on it
-  ([`:211`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L211)), so these
+  ([`:331`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L331)), so these
   traces never left the device by that route.
 
   **Testing, all four targets.** The fix removes three format strings from
@@ -3637,6 +3641,117 @@ the original line and watching the count go 0 → 1 → 0.
   keeps a prefix comparison for the BLE user id, with a note saying it is what
   the shipped app authenticates against. Enforcing strict equality here while
   that path deliberately does not would be incoherent.
+
+### Log severity — [bug]
+
+- **The default serial log severity was the length of the table it indexes.**
+  [`ezlopi_log_severity_enum[]`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L136)
+  has six entries, `"NONE"` through `"TRACE"`, and
+  `ENUM_EZLOPI_TRACE_SEVERITY_MAX` is simultaneously that length and the enum's
+  past-the-end sentinel. `serial_log_severity` was initialised to it, and
+  `EZPI_core_serial_log_get_current_severity_enum_str()` returned
+  `ezlopi_log_severity_enum[serial_log_severity]` directly — index 6 of a
+  6-element array. The value read is whatever pointer-sized bytes follow the
+  array, and all three callers of the two getters hand it straight to
+  `cJSON_AddStringToObject()` or `snprintf("%s")`, so it is read as a string.
+
+  **What this is not, stated first, because the first conclusion drawn here was
+  wrong and the wrong one was nearly written down.** It is *not* reachable on a
+  booted hub through that default. Two call sites raise `serial_log_severity`
+  to `TRACE` unconditionally, immediately after the NVS read —
+  [`ezlopi_core_ezlopi.c:137`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_ezlopi.c#L137)
+  and
+  [`ezlopi_core_setting_commands.c:258`](ezlopi-core/ezlopi-core-setting-commands/ezlopi_core_setting_commands.c#L258)
+  — each sitting under a commented-out `// #warning "remove this in release"`.
+  So the out-of-bounds index is real in the source and masked in the image, by
+  a debug line that is explicitly marked for deletion. Deleting that line, which
+  is the stated intent, is what would expose it.
+
+  Those two overrides are also the evidence for the fix's choice of default.
+  `TRACE` is what every shipped boot has actually run with, so initialising to
+  `TRACE` rather than to `NONE` changes the behaviour of nothing while making
+  the initialiser a severity instead of a count.
+
+  **One route in is not masked.** `EZPI_core_read_set_log_severities()` also
+  reads both severities out of NVS, and `cloud_log_severity` is not touched by
+  either override. That read was unchecked three ways over: the value was
+  assigned with no range test, the `EZPI_SUCCESS` return was discarded, and
+  `&cloud_log_severity` — an `e_trace_severity_t *` — was passed to a parameter
+  declared `uint32_t *`. `EZPI_core_nvs_read_uint32()` does not write through
+  its output pointer when it fails, so "the key is absent" silently meant "keep
+  whatever was there", which only ever worked out because of the initialiser.
+  A stored value outside the enum, from a downgrade, a renumbering or a
+  partially written entry, became the index. Measured on a host with
+  `0xDEADBEEF` in the entry: the unfixed code segfaults inside
+  `EZPI_core_cloud_log_get_current_severity_enum_str()`. That is not a claim
+  that an unauthenticated client can set it — both setters cap cloud severity
+  at `WARNING` — it is a claim that nothing in the read path cared.
+
+  **Fixed** by three independent guards and one corrected initialiser:
+  [`__is_a_severity()`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L389) on
+  every path that writes the index,
+  [`__severity_str()`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L418) on
+  every path that reads it, and an explicit unsigned bound on the NVS value
+  ([`:208`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L208),
+  [`:216`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L216)) read through a
+  `uint32_t` temporary rather than a pointer pun. An out-of-range severity
+  answers `"NONE"` rather than `NULL`, deliberately: every caller would read
+  through a `NULL`, so returning one would trade an out-of-bounds read for a
+  null dereference.
+
+  Two smaller things came out of the same file and are fixed with it. The
+  cloud-log gate compared a signed `int severity` against the enum, whose
+  underlying type the compiler is free to make unsigned — and on this toolchain
+  does, so `-1` was promoted to a huge unsigned value and *accidentally* failed
+  the gate. The correct outcome rested on a choice no line of source made; the
+  bound is now explicit at both ends
+  ([`:331`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L331),
+  [`:476`](ezlopi-core/ezlopi-core-log/ezlopi_core_log.c#L476)). Those two
+  comparisons were also the file's two `-Wsign-compare`, which is why it can now
+  be compiled `-Wall -Wextra -Werror` with no exemption.
+
+  **Evidence.** [`tests/host/test_logseverity.c`](tests/host/test_logseverity.c)
+  is the 36th host binary: 7 cases, **108** checks, 0 failures. It compiles the
+  real `ezlopi_core_log.c` — with an `nm` guard for the case that nearly wasted
+  the whole harness, because with `CONFIG_EZPI_UTIL_TRACE_EN` undefined the file
+  and its header preprocess to an empty translation unit and the compiler
+  reports success. `EZPI_core_serial_log_upcall` is `static`, so the test
+  captures the pointer the subject hands to `ezlopi_util_set_log_upcalls()` and
+  reaches it through that, redirecting `stdout` to a `tmpfile()` around each call
+  to assert on what was printed as well as what was returned.
+
+  Watched to fail against the pristine pre-fix subject, in three regimes,
+  because each says something different:
+
+  | regime | what it reported |
+  |---|---|
+  | `-fsanitize=undefined` | `ezlopi_core_log.c:194:36: runtime error: index 6 out of bounds for type 'char *[6]'` |
+  | `-fsanitize=address` | `global-buffer-overflow`, `0 bytes after global variable 'ezlopi_log_severity_enum' ... of size 48`, `READ of size 8` |
+  | no sanitizers | 6 assertion failures unaided, then a segfault once a case stores `0xDEADBEEF` |
+
+  The third row is the one worth keeping: the sanitizers supply the line number,
+  not the finding. (The probe compiled the unfixed file with `-Wno-sign-compare`,
+  since it carries two of those and this suite is `-Werror`. Suppressing a
+  diagnostic is not changing behaviour.)
+
+  Selectivity, each breakage applied alone to the fixed subject and reverting
+  exactly one part of it, out of 108 checks: default back to `MAX` — **2**
+  failures; NVS value assigned unchecked — **2**; `__severity_str()` indexing
+  with no bound — **0**; cloud gate dropping its lower bound — **4**. The zero
+  is not a gap being passed over. With the other three guards standing, nothing
+  can hand `__severity_str()` an out-of-range value, so its bound is unreachable
+  by construction; applying the first and third breakages *together* brings back
+  the ASan `global-buffer-overflow`, which is the measurement that shows what the
+  innermost guard is for. It turns a regressed default from an out-of-bounds read
+  into a merely wrong default.
+
+  On hardware toolchains, both targets build `rc=0` with the object confirmed
+  recompiled in the same run — a green build of a stale object looks identical to
+  a green build of the fix — and zero diagnostics of any kind in the file. The
+  fix also removes the two `-Wincompatible-pointer-types` that the esp32c3 build
+  reported at the pre-fix `:109` and `:110`, those being the pointer pun
+  described above. The current full-tree count is in the entry below, which this
+  fix corrects.
 
 ### Local API sessions — [sec]
 
@@ -9510,12 +9625,13 @@ enumerators — so the live half of this component was never affected.
   before and after, which is the point: this is a correction to what the stub
   claims, not a fix the host can demonstrate.
 
-  **Six such sites remain on esp32c3 and are deliberately not touched here**,
+  **Six such sites remained on esp32c3 and were deliberately not touched here**,
   because they are three different defects and one of them is a change of
   policy rather than of type. Three pass `uint32_t *` where the IDF's
   `uart_get_buffered_data_len` wants `size_t *` — one in `ezlopi_hal_uart.c`
-  and two in `ezlopi_service_uart.c`. Two pass `e_trace_severity_t *` where
-  `ezlopi_core_nvs.h` declares `uint32_t *`, in `ezlopi_core_log.c`. The last
+  and two in `ezlopi_service_uart.c`. Two passed `e_trace_severity_t *` where
+  `ezlopi_core_nvs.h` declares `uint32_t *`, in `ezlopi_core_log.c`; **those two
+  are now fixed** under *Log severity* above, leaving **4**. The last
   is the same `int`-versus-`int32_t` confusion as the one fixed above, reached
   through a function pointer's return type:
   `ezlopi_service_system_temperature_sensor.c` passes a function returning
@@ -11008,10 +11124,33 @@ Listed because a changelog that only mentions what was finished is misleading.
 
   Not fixed here. The hilink one sits in this commit's file but predates it and
   is a separate concern from the error-handling this commit is about; the other
-  six are in files with no host coverage. Distinct from the **8**
-  `-Wdiscarded-qualifiers` sites in `ezlopi_service_uart.c`, which do fire on
-  all four targets and are also still open — the two were briefly conflated by
-  a grep loose enough to match both tags, and are counted separately here.
+  six are in files with no host coverage. Distinct from the
+  `-Wdiscarded-qualifiers` sites, which do fire on all four targets and are also
+  still open — the two were briefly conflated by a grep loose enough to match
+  both tags, and are counted separately here.
+
+  **Both counts in this entry have since been superseded, and the way they were
+  taken is the reason.** They came from incremental builds, and an incremental
+  build cannot produce a tree total: a file that is not recompiled emits no
+  diagnostics, so the figure is "warnings among whatever happened to rebuild".
+  Worse, the esp32c3 build tree had drifted **77 of 663** tracked C and header
+  files behind the audited tree, so recompiling the files named here measured a
+  mixture of current and stale sources — at one point resurrecting the hilink
+  site that commit `1629ec0` had already fixed, purely because the build tree
+  still held the old copy of that file.
+
+  Re-derived properly, from a `fullclean` build of a freshly synced tree
+  (**1491** objects compiled, `rc=0`, so every file in the tree was asked):
+
+  - `-Wincompatible-pointer-types`: **4** distinct sites on esp32c3 —
+    `ezlopi_hal_uart.c:282`, `ezlopi_service_uart.c:707` and `:715`, and
+    `ezlopi_service_system_temperature_sensor.c:201`. The hilink site is gone,
+    and the two in `ezlopi_core_log.c` are fixed under *Log severity* above.
+  - `-Wdiscarded-qualifiers`: **9** distinct sites, not 8. Eight are the ones
+    named here in `ezlopi_service_uart.c` (`:443-448`, `:534-535`); the ninth is
+    [`ezlopi_core_wifi.c:189`](ezlopi-core/ezlopi-core-wifi/ezlopi_core_wifi.c#L189),
+    which no entry in this document had ever named because no incremental
+    measurement ever recompiled that file. Still open.
 
 - **Five markdown links in the root documents are still not examined by
   `check_doc_citations.py`, down from nine, and its "links examined" line
@@ -11863,11 +12002,14 @@ Listed because a changelog that only mentions what was finished is misleading.
   offered without a driver, but a driver compiled without the function it calls —
   and is fixed in the target-guard entry under *Build and configuration*.
 
-  The remaining 7 on the C3 are in five files that every target builds —
+  There were 7 on the C3 at the time, in five files that every target builds —
   `ezlopi_service_uart.c` and
   `ezlopi_core_log.c` (2 each), `ezlopi_hal_uart.c`,
   `hilink_presence_sensor_setting.c` and
-  `ezlopi_service_system_temperature_sensor.c`. Those 7 are an ABI difference,
+  `ezlopi_service_system_temperature_sensor.c`. **4 remain**: the hilink one was
+  fixed by `1629ec0` and the two in `ezlopi_core_log.c` under *Log severity*
+  above, re-derived from a `fullclean` build rather than an incremental one, for
+  the reason given in that entry. Those 7 are an ABI difference,
   not a c3-only bug: `__UINT32_TYPE__` is `unsigned int` on
   `xtensa-esp32-elf-gcc` and `long unsigned int` on `riscv32-esp-elf-gcc`, so
   `&some_enum` passed to a `uint32_t *` parameter is compatible on xtensa and
