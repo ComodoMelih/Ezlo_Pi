@@ -83,7 +83,7 @@ TESTS   := test_sanitize test_cjext test_improv test_ha test_ze08 test_pms5003 \
            test_i2c_shared_bus test_api_envelope test_cjsongpio test_httpurl \
            test_httpresp test_suntime test_issun test_coords test_tz \
            test_aled test_aledcfg test_aledonboard test_ens160set test_hilinkset \
-           test_hilink0067
+           test_hilink0067 test_settings_api
 
 BINARIES := $(addprefix $(BUILD)/,$(TESTS))
 
@@ -1427,6 +1427,64 @@ $(BUILD)/test_hilink0067: test_hilink0067.c \
 	      $(BUILD)/hilink0067_itemnames.o $(BUILD)/hilink0067_keywords.o \
 	      $(BUILD)/hilink0067_scales.o $(BUILD)/hilink0067_valuetypes.o \
 	      $(BUILD)/hilink0067_cjext.o \
+	      $(LDFLAGS) -lm
+
+# The three device-settings cloud methods. The subject is the cloud layer, not a
+# driver: every setting handler in the tree returns 0 for success and non-zero
+# for failure, EZPI_device_settings_value_set_v3 and friends called them and
+# threw the answer away, and the hub replied with an empty success either way.
+#
+# Only one fake of the subject's own dependencies is needed, and that was
+# measured rather than guessed: nm on the compiled subject leaves
+# EZPI_core_device_get_head undefined and nothing else that the three linked
+# translation units below do not define. The device list is exactly the thing a
+# test wants to control, so that is a fake worth having; everything else is
+# linked real. (The test file carries a second trivial definition,
+# EZPI_core_pin_is_mspi, which the subject never calls -- it is pulled in by a
+# sibling function inside cjson_macros and exists for the linker alone, exactly
+# as in the two test_hilink* rules.)
+#
+# ezlopi_cloud_keywords.c is linked, not stubbed, for the reason the
+# test_hilink0067 rule spells out at length -- the subject writes keys using
+# those globals, and a stub holding equal-but-separate strings would make the
+# assertions below agree with an empty object.
+#
+# ezlopi_core_cjson_macros.c is linked because EZPI_core_cjson_get_id is the
+# real id parser; the whole not-found-vs-refused distinction depends on a
+# settingId being extracted the way the firmware extracts it.
+#
+# -Wno-unused-parameter on the subject only: EZPI_device_settings_list_v3 does
+# not read its cj_request, which is pre-existing and not this test's business.
+# stubs-scenes/ is on the path (via HTTPURL_INC) for the sdkconfig.h that
+# ezlopi_service_webprov.h wants, and webprov's own dir for that header.
+WEBPROV_DIR := ../../ezlopi-services/ezlopi-service-webprov
+SETTINGS_INC := $(HTTPURL_INC) -I$(CLOUDSET_DIR) -I$(WEBPROV_DIR)
+$(BUILD)/test_settings_api: SETTINGS_CFLAGS := -std=c99 -O1 -g $(SETTINGS_INC) \
+                                               $(SANITIZERS)
+$(BUILD)/test_settings_api: test_settings_api.c \
+                            $(CLOUDSET_DIR)/ezlopi_cloud_settings.c \
+                            $(CLOUDSET_DIR)/ezlopi_cloud_settings.h \
+                            $(COREEZ_DIR)/ezlopi_core_cjson_macros.c \
+                            $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c \
+                            $(CJEXT_DIR)/cjext.c | $(BUILD)
+	$(CC) $(SETTINGS_CFLAGS) -Wall -Wextra -Werror -c -o $(BUILD)/test_settings_api_main.o test_settings_api.c
+	$(CC) $(SETTINGS_CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -c -o $(BUILD)/settings_api_subject.o $(CLOUDSET_DIR)/ezlopi_cloud_settings.c
+	@nm $(BUILD)/settings_api_subject.o | grep -q ' T EZPI_device_settings_value_set_v3' \
+	  || { echo "ezlopi_cloud_settings.c compiled to an object without EZPI_device_settings_value_set_v3 in it -- the checks below would be testing nothing"; exit 1; }
+	@nm $(BUILD)/settings_api_subject.o | grep -q ' T EZPI_device_settings_reset_v3' \
+	  || { echo "the subject object has no EZPI_device_settings_reset_v3 -- the reset checks below would be testing nothing"; exit 1; }
+	@nm $(BUILD)/settings_api_subject.o | grep -q ' T EZPI_device_settings_list_v3' \
+	  || { echo "the subject object has no EZPI_device_settings_list_v3 -- the list checks below would be testing nothing"; exit 1; }
+	@nm -u $(BUILD)/settings_api_subject.o | grep -q 'EZPI_core_device_get_head' \
+	  || { echo "the subject object does not reference EZPI_core_device_get_head -- the fake device list this test builds is not the one the subject walks, and every assertion below would be about an empty tree"; exit 1; }
+	@nm -u $(BUILD)/settings_api_subject.o | grep -q 'ezlopi_error_str' \
+	  || { echo "the subject object does not reference ezlopi_error_str -- the error member is keyed by that global, so the error assertions below would be looking for a key the subject never writes"; exit 1; }
+	$(CC) $(SETTINGS_CFLAGS) -c -o $(BUILD)/settings_api_cjsonmacros.o $(COREEZ_DIR)/ezlopi_core_cjson_macros.c
+	$(CC) $(SETTINGS_CFLAGS) -c -o $(BUILD)/settings_api_keywords.o $(CONSTANTS_DIR)/ezlopi_cloud_keywords.c
+	$(CC) $(SETTINGS_CFLAGS) -Wno-unused-parameter -c -o $(BUILD)/settings_api_cjext.o $(CJEXT_DIR)/cjext.c
+	$(CC) -o $@ $(BUILD)/test_settings_api_main.o $(BUILD)/settings_api_subject.o \
+	      $(BUILD)/settings_api_cjsonmacros.o $(BUILD)/settings_api_keywords.o \
+	      $(BUILD)/settings_api_cjext.o \
 	      $(LDFLAGS) -lm
 
 $(BUILD):
