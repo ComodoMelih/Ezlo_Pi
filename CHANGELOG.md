@@ -12462,6 +12462,107 @@ Listed because a changelog that only mentions what was finished is misleading.
   never pushing, while "the keys are already upstream and public" is an
   argument for filing a report. Only the second is true.
 
+- **Nothing invalidates the three TLS-material caches when provisioning
+  overwrites them, so a hub can go on using the certificate and keys it held
+  before it was provisioned.**
+  [`EZPI_core_factory_info_v3_get_ca_certificate()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L513),
+  [`EZPI_core_factory_info_v3_get_ssl_private_key()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L531)
+  and
+  [`EZPI_core_factory_info_v3_get_ssl_shared_key()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L549)
+  each read flash on first call and keep the result in the file statics
+  `__ca_cert`, `__pvt_key` and `__pub_key`
+  ([`__ca_cert`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L90)–92),
+  returning the cached pointer on every later call. The four setters that write
+  those same flash regions —
+  [`EZPI_core_factory_info_v3_set_ca_cert()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L919),
+  [`EZPI_core_factory_info_v3_set_ssl_private_key()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L851),
+  [`EZPI_core_factory_info_v3_set_ssl_public_key()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L881)
+  and
+  [`EZPI_core_factory_info_v3_set_ssl_shared_key()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L900)
+  — all go through `__EZPI_core_factory_info_v3_set_4kb()` and none of them
+  touches a static. So the order within one uptime is: read, and the cache
+  fills; write, and flash changes while the cache does not; read again, and the
+  pre-write value comes back.
+
+  Three functions exist to clear exactly these —
+  [`EZPI_core_factory_info_v3_free_ca_certificate()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L505),
+  [`EZPI_core_factory_info_v3_free_ssl_private_key()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L523)
+  and
+  [`EZPI_core_factory_info_v3_free_ssl_shared_key()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L541)
+  — and a tree-wide search finds **no caller for any of the three**. They are
+  declared in the header and called from nowhere, which is the clearest
+  statement available that the invalidation was meant to exist.
+
+  The stale value is not merely held, it is handed to the client that connects
+  to the cloud. All three provisioning transports write: BLE at
+  [`EZPI_core_factory_info_v3_set_ca_cert()`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c#L530)–532,
+  UART at
+  [`EZPI_core_factory_info_v3_set_ca_cert()`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L658)–660,
+  and
+  [`__provision_update()`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L664)
+  at `:745`, `:751`, `:757` and `:763`. Two of them read first, which is what
+  arms the cache:
+  [`ezpi_provisioning_info_jsonify()`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c#L826)
+  reads all three at `:841`–843 to answer a read of provisioning info, so an
+  app that inspects the current configuration before writing a new one fills
+  the cache a few hundred milliseconds before invalidating it on flash. And
+  [`__fetch_wss_endpoint()`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L228)
+  reads them at `:230`–232 to build the TLS connection itself, with
+  [`__provision_check()`](ezlopi-services/ezlopi-service-webprov/ezlopi_service_webprov.c#L550)
+  reading them again at `:564`–566.
+
+  No reboot closes the window. The tree contains exactly two live
+  `esp_restart()` calls,
+  [`esp_restart()`](ezlopi-core/ezlopi-core-api/ezlopi_core_api.c#L329)
+  and
+  the one at the end of
+  [`EZPI_core_reset_reboot()`](ezlopi-core/ezlopi-core-reset/ezlopi_core_reset.c#L84),
+  and neither is on the provisioning-success path. The first is a partial mask
+  rather than a fix, and worth stating because it shapes the symptom: it
+  reboots the hub on the sixth response whose method is `register` — attempts,
+  not failures, as pinned by
+  `test_register_counter_counts_attempts_not_failures()` in
+  [`tests/host/test_api_envelope.c`](tests/host/test_api_envelope.c#L712) — and
+  that reboot clears the statics. So what an onboarding user sees is not a
+  permanent failure but "it did not take, the hub restarted by itself, now it
+  works", with nothing in any log naming a cause.
+
+  Not fixed here, and the reason is specific. Calling the three existing
+  invalidators from the four setters is the small change, but the getters hand
+  out the cached pointer and their call sites are explicitly told not to free
+  it — the `// allocated once for all, do not free` comments at
+  [`EZPI_core_factory_info_v3_free`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L203)–205
+  and
+  [`ezpi_provisioning_info_jsonify()`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_provisioning.c#L826)
+  `:868`–870.
+  Freeing from a setter on the BLE or UART task while the webprov task is
+  holding that same pointer inside `__fetch_wss_endpoint()` turns a stale read
+  into a use-after-free during TLS setup, which is the worse of the two. An
+  in-place update is not available either:
+  `__EZPI_core_factory_info_v3_read_string()` allocates `s_length + 1`, sized
+  to the content rather than to the field, so a longer replacement certificate
+  would not fit the existing buffer. The real fix is to stop caching and give
+  each caller its own copy, which rewrites the ownership contract at all six
+  read sites and the comments documenting it, and which wants hardware to
+  verify. Recorded rather than attempted.
+
+  Two smaller things fell out of the same reading. The field lengths are
+  `0x1000` each
+  ([`EZLOPI_FINFO_LEN_CA_CERTIFICATE`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.h#L136)–138),
+  and because an erased region is all `0xFF` with no zero byte in it, `strlen`
+  on an unprovisioned field returns the full 4096 — so on a factory-fresh hub
+  these three caches hold about 12 KB of `0xFF`, permanently, whereas on a
+  provisioned one they hold only the PEM lengths. And three of the five
+  `-Wunused-variable` sites in the tree are `ca_certificate`,
+  `ssl_private_key` and `ssl_shared_key` at
+  [`EZPI_print_factory_info_v3()`](ezlopi-core/ezlopi-core-factory-info/ezlopi_core_factory_info.c#L144)
+  `:163`–165, whose three `TRACE_W` lines are commented out at `:185`–187. They
+  are not a leak — the caching makes the "do not free" correct — but they are
+  three reads whose only effect is to populate the caches, inside
+  `#if (1 == ENABLE_TRACE)`. A trace build therefore arms this staleness at
+  boot and a release build does not, which is a difference in behaviour between
+  the two builds hiding behind an unused-variable warning.
+
 - **Only `esp32` has been run on hardware.** All four targets now compile
   cleanly, but compiling is not running. `esp32s2`, `esp32s3` and `esp32c3`
   have never been flashed or booted, so for those three "supported" means "the
