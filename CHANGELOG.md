@@ -4357,7 +4357,7 @@ different property.
 
   The three writers of that configuration all use the *copying* parser —
   [`ezlopi_service_ble_dynamic_config.c:347`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_dynamic_config.c#L347),
-  [`ezlopi_service_uart.c:1402`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1402)
+  [`ezlopi_service_uart.c:1421`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1421)
   and the local API's
   [`EZPI_CLOUD_devcfg_port_write()`](ezlopi-cloud/ezlopi-cloud-devcfg/ezlopi_cloud_devcfg_port.c#L88)
   — so the *write* was safe and the fault fired on the next boot instead, and on
@@ -4988,7 +4988,7 @@ flashed.**
   entry below.) From
   [`ezpi_dynamic_config_write_func()`](ezlopi-services/ezlopi-service-ble/ezlopi_service_ble_dynamic_config.c#L265),
   and the same shape in
-  [`ezpi_service_uart_set_config()`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1399):
+  [`ezpi_service_uart_set_config()`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1418):
 
   ```c
   cJSON *cjson_config = cJSON_Parse(__FUNCTION__, decoded_data);
@@ -9615,6 +9615,16 @@ enumerators — so the live half of this component was never affected.
   pre-fix build of the same tree supplies the reversed half of the comparison,
   so this is a measurement and not an assertion.
 
+  One accounting note, because two figures here look off by one against the
+  list further down this entry. The **8** and the **7** count every distinct
+  site the build reports, and one of them is not in a `.c` file at all: it is
+  the single line inside
+  [`ezlopi_core_cjson_macros.h`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_cjson_macros.h#L123)
+  that all 87 `CJSON_GET_VALUE_INT` expansions are reported at, described above.
+  The "six remaining" list below counts only sites in `.c` files, because that
+  macro's call sites are a separate population deliberately left alone. So
+  7 = 6 + 1, and the two figures are counting different things on purpose.
+
   **The host suite cannot see this class of defect at all**, and the stub in
   [`test_hilinkset.c`](tests/host/test_hilinkset.c) had quietly made that
   worse: it declared the two NVS integer functions with `int` and `int`
@@ -9625,26 +9635,148 @@ enumerators — so the live half of this component was never affected.
   before and after, which is the point: this is a correction to what the stub
   claims, not a fix the host can demonstrate.
 
-  **Six such sites remained on esp32c3 and were deliberately not touched here**,
-  because they are three different defects and one of them is a change of
-  policy rather than of type. Three pass `uint32_t *` where the IDF's
-  `uart_get_buffered_data_len` wants `size_t *` — one in `ezlopi_hal_uart.c`
-  and two in `ezlopi_service_uart.c`. Two passed `e_trace_severity_t *` where
-  `ezlopi_core_nvs.h` declares `uint32_t *`, in `ezlopi_core_log.c`; **those two
-  are now fixed** under *Log severity* above, leaving **4**. The last
-  is the same `int`-versus-`int32_t` confusion as the one fixed above, reached
-  through a function pointer's return type:
-  `ezlopi_service_system_temperature_sensor.c` passes a function returning
-  `int` where `EZPI_core_device_add_item_to_device` wants one returning
-  `ezlopi_error_t`, and that return type is part of the broader "no driver can
-  report an initialisation failure" problem recorded under Known gaps.
+  **Six such sites in `.c` files remained on esp32c3 when this was written, and
+  they were three different defects rather than one.** Three passed
+  `uint32_t *` where the IDF's `uart_get_buffered_data_len` wants `size_t *` —
+  one in `ezlopi_hal_uart.c` and two in `ezlopi_service_uart.c`. Two passed
+  `e_trace_severity_t *` where `ezlopi_core_nvs.h` declares `uint32_t *`, in
+  `ezlopi_core_log.c`. The sixth was a function pointer's return type, in
+  `ezlopi_service_system_temperature_sensor.c`.
+
+  **All six are now fixed** — the `ezlopi_core_log.c` pair under *Log severity*
+  above, the other four in the entry immediately below, which also gives the
+  whole-tree figure both of them produce.
+
+  One claim made here did not survive the fix, and is corrected rather than
+  quietly dropped. This entry called the temperature-sensor site "a change of
+  policy rather than of type" and attached it to the "no driver can report an
+  initialisation failure" problem under Known gaps. It was a plain type error:
+  of the 63 functions in this tree whose first parameter is
+  `e_ezlopi_actions_t`, 62 already returned `ezlopi_error_t`, so the one that
+  returned `int` was the exception and not the policy. The
+  initialisation-failure gap is real and still open, and that driver is still
+  an example of it — its `ezpi_init()` cannot report a failure because both of
+  its `ESP_ERROR_CHECK()` calls abort instead of returning — but that gap was
+  never what made the compiler warn, and conflating the two is what kept a
+  one-line type fix sitting behind a design decision for the length of this
+  audit.
 
   CI already builds all four targets in a matrix, so this diagnostic was
   present in CI output the whole time; it is not escalated, because only
-  `-Werror=format` is. Escalating `-Wincompatible-pointer-types` is not
-  available as an option while the 87 `CJSON_GET_VALUE_INT` sites above are
-  deliberately unchanged, and no baseline has been pinned for the remaining
-  six.
+  `-Werror=format` is. Escalating `-Wincompatible-pointer-types` is still not
+  available as an option, and now for exactly one reason: the 87
+  `CJSON_GET_VALUE_INT` expansions above are deliberately unchanged, and they
+  are all that is left of this diagnostic on either ABI.
+
+- **The last four pointer-type mismatches are fixed, and the two ABIs now
+  report the same diagnostics.** These are the four left standing by the entry
+  above. They were two unrelated defects, and each needed a different argument
+  before it could be changed.
+
+  Three were `uint32_t` locals whose address was handed to
+  `uart_get_buffered_data_len()`, which writes a `size_t` through that pointer:
+  [`ezlopi_hal_uart.c:291`](ezlopi-hal/ezlopi-hal-uart/ezlopi_hal_uart.c#L291),
+  [`ezlopi_service_uart.c:718`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L718)
+  and
+  [`:719`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L719).
+  All three are now `size_t`. Value-neutral, and that is asserted rather than
+  assumed: a `_Static_assert` probe compiled by both toolchains establishes
+  `sizeof(size_t) == 4`, `sizeof(size_t) == sizeof(uint32_t)` and
+  `(size_t)-1 > 0` on each. Had `size_t` been wider than 32 bits on either
+  target, the IDF would have been writing eight bytes into a four-byte local on
+  every UART read and this would be a memory-safety entry instead of a
+  portability one — which is the reason to measure it rather than reason about
+  it.
+
+  Only `tmp_len` is ever passed by address, so strictly only it had to change.
+  `buffred_data_len` changed with it because the two are compared and assigned
+  to each other, and leaving one of a matched pair as the other type is how
+  this comes back. Its other consumers — `ezlopi_malloc()`, `memset()`,
+  `uart_read_bytes()` — already take `size_t`. The one that does not is
+  `EZPI_SERV_improv_serial_filter()`'s `uint32_t out_cap`, which now carries an
+  explicit cast beside the one that was already on `rxBytes`.
+
+  The fourth was a function pointer's return type.
+  [`EZPI_system_temperature_device()`](ezlopi-services/ezlopi-service-system-temperature-sensor/ezlopi_service_system_temperature_sensor.c#L148)
+  returned plain `int`, while
+  [`ezlopi_core_devices.h:226`](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.h#L226)
+  declares the `item_func` it is registered as returning `ezlopi_error_t`. It
+  now returns `ezlopi_error_t`, along with the four file-static helpers reached
+  through its action switch. No value changes anywhere in that file, because
+  `EZPI_SUCCESS` is `0` and `EZPI_FAILED` is `-1` — exactly the bare literals
+  those five functions were already returning. The header names `ezlopi_error_t`
+  now, so it includes `ezlopi_core_errors.h` and the component declares
+  `ezlopi-core-errors` in `REQUIRES`; it compiled without that line, because
+  `ezlopi-core-devices` lists `ezlopi-core-errors` under public `REQUIRES` and
+  IDF propagates it, but 95 other component `CMakeLists.txt` in this tree
+  declare what they include and this one now does too.
+
+  **Measured as a whole-tree total on both ABIs**, from `fullclean` builds of
+  trees synced to the committed bytes — **1491** objects on esp32c3 and
+  **1511** on esp32, `rc=0` and zero errors on both, so every file was asked:
+
+  - `-Wincompatible-pointer-types` in a `.c` file anywhere in the tree: **0**,
+    on both targets, down from 4 on esp32c3.
+  - The only site of that diagnostic left on either target is
+    [`ezlopi_core_cjson_macros.h:123`](ezlopi-core/ezlopi-core-ezlopi/ezlopi_core_cjson_macros.h#L123),
+    the `CJSON_GET_VALUE_INT` population described above: **87** expansions
+    from 87 distinct call sites on esp32, **83** from 83 on esp32c3, all
+    reported at that one line and all deliberately unchanged. The four-site
+    difference is the DHT11 and DHT22 drivers, which do not exist on esp32c3.
+  - So the riscv-only asymmetry this diagnostic had on this tree is gone. What
+    remains is identical in kind on both ABIs and differs only by which drivers
+    the chip has.
+  - `-Wdiscarded-qualifiers`: **9** on both targets, the same nine sites —
+    eight in `ezlopi_service_uart.c` and
+    [`ezlopi_core_wifi.c:189`](ezlopi-core/ezlopi-core-wifi/ezlopi_core_wifi.c#L189).
+    Still open; this confirms on xtensa what had only been seen on riscv.
+  - Nothing else differs between the two targets at all. The remaining tags are
+    site-for-site identical: **36** `-Wcpp` (the `#warning` backlog), **5**
+    `-Wunused-variable`, **2** `-Wunused-but-set-variable`, **1**
+    `-Wunused-function`, **1** `-Wimplicit-fallthrough=`. Four of those last
+    five are in IDF or vendored code (`l2c_ble.c`, `hci_layer.c`, `pt.h`,
+    `switch.h`) and are not this project's to fix.
+
+  Images are `1767248` bytes on esp32c3 and `1693456` on esp32. Both changed
+  files were confirmed recompiled in the same run as every count above, and for
+  the temperature sensor so was its caller `ezlopi_core_ezlopi.c` — a green
+  build of a stale object looks identical to a green build of a fix, and this
+  document has already recorded three tallies that were wrong for exactly that
+  reason.
+
+  The return-type edit failed first, `rc=2`, on `conflicting types for
+  'ezpi_prepare'`: the four definitions had been changed and their `static`
+  forward declarations left as `int`. That is what the recompile-and-watch step
+  is for, and it is the second time in this audit that an incomplete edit
+  passed inspection and was caught by the build.
+
+  **Not fixed, and recorded because the next reader will find them.** Two more
+  call sites with the identical `uint32_t`-for-`size_t` pattern sit at
+  [`ezlopi_service_uart.c:958`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L958)
+  and
+  [`:966`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L966),
+  inside the `#if 0` at `:953` around
+  `__uart_loop()`; nothing compiles them, so no build could confirm a change to
+  them, and editing code that cannot be verified is worse than saying it is
+  there. In the temperature sensor, `ezpi_init()` cannot report a failure,
+  `ezpi_notify()` reports success even when `temp_sensor_read_celsius()` fails,
+  and three of the five return values are discarded by their callers —
+  including the entry point's, at `ezlopi_core_ezlopi.c:159`. One
+  `int`-returning declaration against `e_ezlopi_actions_t` also survives, at
+  `sensor_0030_oneWire_DS18B20.h:120`; it cannot warn, because
+  `ds18b20_sensor()` is never defined or called anywhere in the tree and its
+  second parameter is `s_ezlopi_device_properties_t`, a device model this code
+  no longer uses. Separately, the three `-Wunused-variable` sites at
+  `ezlopi_core_factory_info.c:163-165` are named `ca_certificate`,
+  `ssl_private_key` and `ssl_shared_key`, which is worth someone's attention
+  for what it suggests about that function rather than for the warning.
+
+  One method correction this forced. The xtensa half of this verification was
+  first run in `/opt/ezlopi`, which is the **upstream baseline** tree kept for
+  comparison, not a build of the audited tree — and it failed `rc=2` on
+  `ezlopi_util_devcfgval.h: No such file or directory`, a header this fork
+  adds. The failure was the tree, not the change. There is now a real xtensa
+  build of the audited tree, and every esp32 figure above comes from it.
 
 - **`REQUIRES tinyusb` was unconditional while every use of it was not.**
   `ezlopi_service_uart.c` wraps all of its USB-CDC code — includes and calls
@@ -11142,15 +11274,24 @@ Listed because a changelog that only mentions what was finished is misleading.
   Re-derived properly, from a `fullclean` build of a freshly synced tree
   (**1491** objects compiled, `rc=0`, so every file in the tree was asked):
 
-  - `-Wincompatible-pointer-types`: **4** distinct sites on esp32c3 —
-    `ezlopi_hal_uart.c:282`, `ezlopi_service_uart.c:707` and `:715`, and
-    `ezlopi_service_system_temperature_sensor.c:201`. The hilink site is gone,
-    and the two in `ezlopi_core_log.c` are fixed under *Log severity* above.
+  - `-Wincompatible-pointer-types`: **4** distinct sites in `.c` files on
+    esp32c3 at that measurement — `ezlopi_hal_uart.c`,
+    `ezlopi_service_uart.c` twice, and
+    `ezlopi_service_system_temperature_sensor.c`. The hilink site was already
+    gone, and the two in `ezlopi_core_log.c` are fixed under *Log severity*
+    above. **All four are now fixed as well**, so this figure is **0** on both
+    esp32c3 and esp32 — see *The last four pointer-type mismatches* under
+    *Build and configuration* above, which carries the current whole-tree
+    numbers for both ABIs. The line numbers quoted in the list further up this
+    entry are pre-fix and have since moved; they are left as they were taken,
+    since they are the record of a measurement rather than a pointer into
+    today's files.
   - `-Wdiscarded-qualifiers`: **9** distinct sites, not 8. Eight are the ones
     named here in `ezlopi_service_uart.c` (`:443-448`, `:534-535`); the ninth is
     [`ezlopi_core_wifi.c:189`](ezlopi-core/ezlopi-core-wifi/ezlopi_core_wifi.c#L189),
     which no entry in this document had ever named because no incremental
-    measurement ever recompiled that file. Still open.
+    measurement ever recompiled that file. Still open, and since confirmed as
+    the same nine sites on esp32 as well, so it is not a riscv-only count.
 
 - **Five markdown links in the root documents are still not examined by
   `check_doc_citations.py`, down from nine, and its "links examined" line
@@ -11182,6 +11323,27 @@ Listed because a changelog that only mentions what was finished is misleading.
   Found while writing the *UART sensor dispatch* entry above, after noticing
   that a `path.c:332` href — the colon form, not `#L332` — had passed the gate
   silently for the same reason.
+
+  **A third class, found by the gate catching its sibling.** Inserting a
+  nineteen-line comment into `ezlopi_service_uart.c` moved everything below it,
+  and two citations in this document pointed into that region. The gate caught
+  one — the citation whose link text was `ezpi_service_uart_set_config()` and
+  whose fragment was `#L1399`, because the text names a token it could look for
+  and the token was no longer on that line. It could not catch the other, whose
+  text was `ezlopi_service_uart.c:1402` against a `#L1402` fragment: the
+  text agrees with the fragment by construction, line 1402 still exists, and
+  nothing in the citation says what is supposed to be there. It had silently
+  come to point at a `break;` in an unrelated `switch`. Both are fixed, at
+  `#L1418` and `#L1421`.
+
+  So the gate detects a line anchor that points past the end of a file, or one
+  that disagrees with a token named in its own link text — and cannot detect a
+  line anchor that has merely drifted onto a different line. The cure is to
+  write citations in the token form wherever a token exists, which makes them
+  self-describing and checkable; the bare `file.c:NNN` form should be treated
+  as unverified by anyone relying on it. Not enforced, because a rule that
+  banned the bare form would fire on citations that have no token to name, such
+  as a pointer into the middle of a function body.
 
 - **A citation written as `[line 898]` pointing at `file.c#L898` was checked by
   nothing, and one had rotted in both halves at once.** (Written unlinked here
