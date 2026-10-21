@@ -1882,9 +1882,9 @@ None of these have been exercised on physical hardware; see Known gaps.
 - **A setting the hub refused to write was answered as if it had been written.**
   The three cloud methods for device settings each called the setting's own
   handler and discarded what it said.
-  [`EZPI_device_settings_value_set_v3`:157](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L157)
+  [`EZPI_device_settings_value_set_v3`:176](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L176)
   called it and ignored the result,
-  [`EZPI_device_settings_reset_v3`:215](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L215)
+  [`EZPI_device_settings_reset_v3`:234](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L234)
   did the same for every setting it walked, and
   [`EZPI_device_settings_list_v3`:96](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L96)
   stamped `"status": "synced"` on each entry before asking whether the read had
@@ -1928,7 +1928,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   `devcfg`'s omitted `badIndex`: omit a member rather than invent a sentinel
   whose meaning no client has agreed to.
 
-  [`__prepare_error`:324](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L324)
+  [`__prepare_error`:343](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L343)
   adds `error: { code, message, data }` *alongside* the `result` member that was
   already there, not in place of it. That is deliberate and it is the precedent
   set by the identically named helper in `ezlopi_cloud_devcfg.c`, whose own
@@ -1937,7 +1937,7 @@ None of these have been exercised on physical hardware; see Known gaps.
   for `error` sees the new information.
 
   Covered by [`tests/host/test_settings_api.c`](tests/host/test_settings_api.c)
-  — **11 cases, 39 checks**, the 35th binary in the host suite. Every case
+  — **13 cases, 43 checks**, the 35th binary in the host suite. Every case
   asserts both that `error` appears *and* that `result` is still present,
   because a fix that replaced `result` would break every existing client while
   passing a test that only looked for the error.
@@ -1970,6 +1970,37 @@ None of these have been exercised on physical hardware; see Known gaps.
   the `found_id` flag is declared inside the device loop, so the
   "settingId not found" warning fires once per device that does not have that
   setting. Log noise only, pre-existing, left for its own commit.
+
+- **Every settings list response carried its `status` member twice.** Found
+  while testing the entry above, and older than it. Five GET paths across the
+  two drivers in the tree that have settings write
+  [`status`:569](ezlopi-sensors-devices/sensor-0067-UART-hilink-presence-sensor/hilink_presence_sensor_setting.c#L569)
+  — and again at `:609` and `:649`, and at
+  [`status`:396](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L396)
+  and `:428` — into the properties object themselves.
+  [`EZPI_device_settings_list_v3`:96](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L96)
+  then added its own, and `cJSON_AddStringToObject` appends without looking for
+  an existing key, so the member went out twice. Stamping it before the handler
+  rather than after produced the same duplicate, so this is not a consequence of
+  the fix above.
+
+  Harmless only while both copies agree, which is a property of today's drivers
+  rather than of the API. A client taking the first member reads a different one
+  than a client taking the last — a difference no response should have — and a
+  driver that wanted to report anything other than `synced`, a setting mid-write
+  say, would have been shadowed by whichever copy the far end's parser happened
+  to pick. The layer now supplies the member only when the handler left it out,
+  so a handler with something specific to say keeps the field and one that says
+  nothing still gets the default.
+
+  **This is the kind of defect a lookup cannot find**, and that is the
+  transferable part. `cJSON_GetObjectItem` stops at the first match, so every
+  check anyone could have written against this response would have passed; the
+  test asserts it by walking the sibling chain and counting. The counter has a
+  case of its own asserting that a key added twice counts as two and an absent
+  key as zero, because a counter that always returned 1 would have made the
+  duplicate case pass by not working. The duplicate case fails against the
+  unfixed layer, naming exactly that assertion and nothing else.
 
 - **The ENS160 compensated its air-quality readings against a heap address.**
   [`ENS160_get_ambient_temp_setting`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L165)
