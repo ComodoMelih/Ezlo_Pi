@@ -10786,31 +10786,69 @@ Listed because a changelog that only mentions what was finished is misleading.
   all four targets and are also still open — the two were briefly conflated by
   a grep loose enough to match both tags, and are counted separately here.
 
-- **Nine markdown links in the root documents are not examined by
-  `check_doc_citations.py` at all, and its "links examined" line cannot show
-  that.** Its `LINK` regex allows `#L<digits>` as the only line fragment and
-  `[A-Za-z0-9_][A-Za-z0-9_./-]*` as the path, so a link whose href does not fit
-  that shape fails the match outright — it is skipped rather than reported, and
-  not even the MISSING rule reaches it. Counted with a permissive scan over the
-  same six documents: 487 local links, 478 matched, **9** unexamined, in three
-  classes.
+- **Five markdown links in the root documents are still not examined by
+  `check_doc_citations.py`, down from nine, and its "links examined" line
+  cannot show that.** Its `LINK` regex matches a href by shape, so a link that
+  does not fit is skipped outright rather than reported — not even the MISSING
+  rule reaches it. There were **9** such links in three classes; two of the
+  classes are now covered and the third is not.
+
+  Fixed here:
 
   - Three hrefs beginning with a dot — all of them
     `.github/workflows/ci.yml`, in `CHANGELOG.md`, `CONTRIBUTING.md` and
-    `README.md`. The leading `.` is not in the first-character class. That CI
-    workflow could be renamed or deleted and the gate would stay green in three
-    documents at once, which is the one failure mode it was written to prevent.
+    `README.md`. The leading `.` was not in the first-character class. That CI
+    workflow could have been renamed or deleted with the gate staying green in
+    three documents at once, which is the one failure mode it exists to
+    prevent. The class now admits a leading dot.
+  - One line *range*, `ezlopi_core_devices.h#L110-L129`. The fragment now
+    accepts a `-L<digits>` tail and checks the first number, which is the one
+    that has to exist.
+
+  Still open:
+
   - Five cross-document anchors, `README.md#6-troubleshooting` and similar. The
     `#` is read as the start of a line fragment and `6-troubleshooting` is not
-    digits.
-  - One line *range*, `ezlopi_core_devices.h#L110-L129`.
+    digits. Checking these means slugifying the target document's headings the
+    way the markdown renderer does, which is a different kind of rule from
+    anything else in the file and is left for a change of its own.
 
   Found while writing the *UART sensor dispatch* entry above, after noticing
   that a `path.c:332` href — the colon form, not `#L332` — had passed the gate
-  silently for the same reason. Those were rewritten before committing; the
-  three classes above are pre-existing and are left for a change of their own,
-  since widening the regex means re-running the ANCHOR rule over citations that
-  have never been subject to it.
+  silently for the same reason.
+
+- **A citation written as `[line 898]` pointing at `file.c#L898` was checked by
+  nothing, and one had rotted in both halves at once.** (Written unlinked here
+  on purpose: as a real link the gate would read `file.c` as a path and report
+  it MISSING — which it did, on the first draft of this entry.)
+  `TEXT_LINE` is anchored at the end of the
+  link text, so it only ever saw the `` `file.c:898` `` form; a citation
+  phrased as prose matched neither it nor `TOKEN`, leaving the line number
+  asserted and never tested. Eight such citations exist in `CHANGELOG.md`.
+  `CHANGELOG.md:2126` was one of them, and when the file it cites shifted by
+  ten lines, the text and the fragment moved together — they agreed with each
+  other while both pointed at the wrong line, which is precisely the state the
+  gate cannot see.
+
+  Two rules close this as far as it can be closed:
+
+  - `PROSE_LINE` reads a link text beginning "line N" or "lines N" as the same
+    claim `TEXT_LINE` reads at the end, and requires it to agree with the
+    fragment. This catches the halves disagreeing. It does **not** catch them
+    agreeing and both being wrong — that is not detectable from the link alone,
+    and saying otherwise would overstate what the check does.
+  - `TOKEN` now accepts a trailing `:123` after the closing backtick, so a
+    citation whose link text is `` `foo`:123 `` and whose href ends `#L123` is
+    verified on both axes at once: the line number against the fragment, and
+    the fragment against the line's actual contents. That is the only
+    fully-checkable citation form in the file, and the one to reach for when
+    writing a new one. (Spelled out in words rather than shown as a link, for
+    the same reason as the note above.)
+
+  The eight existing prose citations all currently agree with their fragments,
+  so nothing in the documents changed. Converting them to the token form would
+  make them content-checked, and is deliberately left alone here: it rewrites
+  eight sentences for a reason that has nothing to do with what they say.
 
 - **The device loop discards every driver's 1-second notify return, for every
   driver in the tree.** `__device_loop()` calls

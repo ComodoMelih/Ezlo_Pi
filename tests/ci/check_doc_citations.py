@@ -122,21 +122,46 @@ import sys
 
 DOCS_DIR = '.'
 
-# [text](path) and [text](path#L123). The path has to look like a
-# repo-relative file, so external URLs and bare `#anchor` links are untouched.
-LINK = re.compile(r'\[(?P<text>[^\]]*)\]\((?P<path>[A-Za-z0-9_][A-Za-z0-9_./-]*)'
-                  r'(?:#L(?P<line>\d+))?\)')
+# [text](path), [text](path#L123) and [text](path#L110-L129). The path has to
+# look like a repo-relative file, so external URLs and bare `#anchor` links are
+# untouched: the charset excludes ':', so `https://...` fails to match and is
+# skipped rather than reported as a missing file.
+#
+# A leading '.' is allowed because three real citations point at
+# `.github/workflows/ci.yml`, and without it they were not examined at all --
+# the path could have rotted silently. For a range only the first number is
+# checked; that is the one that has to exist.
+LINK = re.compile(r'\[(?P<text>[^\]]*)\]\((?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)'
+                  r'(?:#L(?P<line>\d+)(?:-L?\d+)?)?\)')
 
 # A link text that ends in `:123` or `:123`` is making a claim about the line
 # number, which the fragment then has to match.
 TEXT_LINE = re.compile(r':(?P<line>\d+)`?\s*$')
+
+# A link text that *begins* "line 123" / "lines 123" is making the same claim in
+# prose. Worth its own rule because TEXT_LINE is anchored at the end and so
+# never saw these: `[line 898](file.c#L898)` was checked by nothing at all, and
+# one such citation went stale in both halves at once -- the text and the
+# fragment agreed with each other while both pointed at the wrong line.
+#
+# This only catches the halves disagreeing. Agreeing-but-wrong is not
+# detectable from the link alone, which is why the preferred form for a new
+# citation is `` [`symbol`:123](file.c#L123) ``: TOKEN then checks the line's
+# actual contents, not just the link's internal consistency.
+PROSE_LINE = re.compile(r'^\s*lines?\s+(?P<line>\d+)\b')
 
 # A link text that is nothing but one backticked code token -- `TRACE_I`,
 # `foo()`, `EZPI_core_http_get_request`. Such a link is claiming the token is
 # at the cited line, which is checkable. Three characters minimum, so `n` or
 # `ok` in prose cannot drag a citation into the rule. Not prose, not a
 # `file.c:12` claim (MISMATCH already owns those), not a format string.
-TOKEN = re.compile(r'^`([A-Za-z_][A-Za-z0-9_]{2,})(?:\(\))?`$')
+#
+# An optional `:123` after the closing backtick is accepted so a citation can
+# be checked on BOTH axes at once: `` [`foo`:123](file.c#L123) `` has TEXT_LINE
+# compare 123 against the fragment and TOKEN confirm `foo` really is on that
+# line. That combination is the only form the gate can verify completely, so
+# it is the one to reach for when writing a new citation.
+TOKEN = re.compile(r'^`([A-Za-z_][A-Za-z0-9_]{2,})(?:\(\))?`(?::\d+)?$')
 
 
 def line_count(path, cache={}):
@@ -190,6 +215,12 @@ def check_text(text, root):
                 problems.append(('MISMATCH',
                                  ':%d  text says :%s, link says #L%s  (%s)'
                                  % (n, t.group('line'), cited, rel)))
+                continue
+            p = PROSE_LINE.match(m.group('text'))
+            if p and p.group('line') != cited:
+                problems.append(('MISMATCH',
+                                 ':%d  text says line %s, link says #L%s  (%s)'
+                                 % (n, p.group('line'), cited, rel)))
                 continue
             tok = TOKEN.match(m.group('text').strip())
             if tok:
@@ -266,6 +297,42 @@ FIXTURES = [
     ('CONFIG_ prefix is stripped for Kconfig', False,
      '[`CONFIG_EZPI_HTTP_LOG_PAYLOADS`](ezlopi-main/Kconfig.projbuild#L%d)'
      % _HTTP_LOG_PAYLOADS_LINE),
+
+    # PROSE_LINE. `[line N](file#LN)` used to be checked by nothing: TEXT_LINE
+    # is anchored at the end of the text and so never matched it.
+    ('prose line number matches the fragment', False,
+     'See [line 1](tests/ci/check_doc_citations.py#L1) for the header.'),
+    ('prose line number contradicts the fragment', True,
+     'See [line 2](tests/ci/check_doc_citations.py#L1) for the header.'),
+    ('plural prose line number contradicts the fragment', True,
+     'See [lines 7](tests/ci/check_doc_citations.py#L1).'),
+    ('"line" inside ordinary prose is not a claim', False,
+     'The [inline cache](tests/ci/check_doc_citations.py#L1) is per-path.'),
+
+    # TOKEN with a trailing `:N` -- the fully-checked citation form, verified
+    # on the line number AND on the line's contents.
+    ('token with line suffix, both correct', False,
+     '[`TOKEN`:%d](tests/ci/check_doc_citations.py#L%d)'
+     % (_TOKEN_DEF_LINE, _TOKEN_DEF_LINE)),
+    ('token with line suffix, token not on that line', True,
+     '[`TOKEN`:%d](tests/ci/check_doc_citations.py#L%d)'
+     % (_TOKEN_DEF_LINE + 1, _TOKEN_DEF_LINE + 1)),
+    ('token with line suffix disagreeing with the fragment', True,
+     '[`TOKEN`:%d](tests/ci/check_doc_citations.py#L%d)'
+     % (_TOKEN_DEF_LINE, _TOKEN_DEF_LINE + 1)),
+
+    # LINK widening: a leading-dot path is a real citation in these docs and
+    # was previously skipped entirely, so a rotted path could not be noticed.
+    ('leading-dot path resolves', False,
+     'Defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).'),
+    ('leading-dot path that does not resolve', True,
+     'See [`.github/workflows/gone.yml`](.github/workflows/gone.yml).'),
+
+    # A line range cites its first line; that is the one that must exist.
+    ('line range whose start exists', False,
+     '[`check_doc_citations.py:1-5`](tests/ci/check_doc_citations.py#L1-L5)'),
+    ('line range starting past the end of the file', True,
+     '[`check_doc_citations.py`](tests/ci/check_doc_citations.py#L999999-L1000000)'),
 ]
 
 
