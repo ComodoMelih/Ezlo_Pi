@@ -1879,6 +1879,98 @@ None of these have been exercised on physical hardware; see Known gaps.
 
 ### Device settings — [bug]
 
+- **A setting the hub refused to write was answered as if it had been written.**
+  The three cloud methods for device settings each called the setting's own
+  handler and discarded what it said.
+  [`EZPI_device_settings_value_set_v3`:157](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L157)
+  called it and ignored the result,
+  [`EZPI_device_settings_reset_v3`:215](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L215)
+  did the same for every setting it walked, and
+  [`EZPI_device_settings_list_v3`:96](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L96)
+  stamped `"status": "synced"` on each entry before asking whether the read had
+  worked. In all three the reply was an empty success object, identical whether
+  the value had been stored or rejected. An app could set a setting, get an
+  acknowledgement, and read back the old value with nothing anywhere saying why.
+
+  The convention being thrown away is not implicit. The handler is declared as
+  [`int (*func)(...)`:139](ezlopi-core/ezlopi-core-devices/ezlopi_core_devices.h#L139)
+  — plain `int`, zero for success — and all three drivers in the tree that
+  register one (`device_0001_digitalOut_generic.c`,
+  `hilink_presence_sensor_setting.c`,
+  `sensor_0068_ENS160_gas_sensor_settings.c`) honour it. The value survived the
+  whole way up to the cloud layer and died at the last step.
+
+  This is the mirror image of the PMS5003 defect above, and the pair is worth
+  reading together: one file aborted the hub on every return value including
+  success, this one discarded every return value including failure. Both come
+  from the same habit of treating a callee's answer as decoration.
+
+  The set method now separates two silences that used to be one. An unknown
+  `settingId` is `-32602 "Wrong params"` with
+  [`SETTINGS_TOKEN_ID_NOT_FOUND`:74](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L74);
+  a handler that found the setting and refused it is `-32500 "Internal error"`
+  with
+  [`SETTINGS_TOKEN_SET_FAILED`:75](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L75).
+  Those have different causes and different fixes, and collapsing them into one
+  error would have satisfied any check that only asked whether *something* was
+  reported.
+
+  The reset method accumulates failures across its walk instead of keeping the
+  last one. Resetting a device resets every setting it owns, so the obvious
+  `ret =` inside the loop lets a setting that succeeds afterwards erase a
+  failure that already happened. The counter is declared before the walk and
+  incremented in both inner loops — the device-id branch and the setting-id
+  branch — because both can refuse.
+
+  The list method's status moves to *after* the handler and is omitted when the
+  handler fails, rather than being downgraded to some other word. An entry with
+  no status member is the honest answer, and it is the same reasoning as
+  `devcfg`'s omitted `badIndex`: omit a member rather than invent a sentinel
+  whose meaning no client has agreed to.
+
+  [`__prepare_error`:324](ezlopi-cloud/ezlopi-cloud-settings/ezlopi_cloud_settings.c#L324)
+  adds `error: { code, message, data }` *alongside* the `result` member that was
+  already there, not in place of it. That is deliberate and it is the precedent
+  set by the identically named helper in `ezlopi_cloud_devcfg.c`, whose own
+  comment records that the addition is backward-compatible: anything that
+  parsed the old empty-success reply keeps parsing it, and only a client looking
+  for `error` sees the new information.
+
+  Covered by [`tests/host/test_settings_api.c`](tests/host/test_settings_api.c)
+  — **11 cases, 39 checks**, the 35th binary in the host suite. Every case
+  asserts both that `error` appears *and* that `result` is still present,
+  because a fix that replaced `result` would break every existing client while
+  passing a test that only looked for the error.
+
+  **Each of the three subtle cases was watched to fail.** Three regressions were
+  applied to the subject one at a time — the status stamped unconditionally, the
+  set return discarded, the reset loop written last-wins — and each reddened
+  exactly the cases that describe it and nothing else: 1, 4 and 3 failures
+  respectively out of 39 checks. That asymmetry is the evidence; a single
+  breakage that reddened everything would not distinguish a precise test from a
+  blunt one. The failing setting is deliberately placed *first* in the reset
+  fixture, which is the only arrangement under which a last-wins implementation
+  is visible at all.
+
+  One dependency of the subject is faked, and `nm -u` on the compiled object
+  decided that rather than a guess: `EZPI_core_device_get_head`, which is
+  precisely the thing a test wants to control. `cjext.c`,
+  `ezlopi_cloud_keywords.c` and `ezlopi_core_cjson_macros.c` are linked real, so
+  the response objects asserted on are the ones the firmware sends, the member
+  names are the real wire names, and a `settingId` in a request is parsed by the
+  hub's own code instead of by a convenience reimplementation that would have
+  let "a request for id X" mean whatever the test wanted.
+
+  Built green on esp32 and esp32c3 with the object confirmed recompiled in each
+  run. **Not exercised on hardware** — no device with a settable setting is
+  attached here, so the reply shapes are established by the host test, not by
+  watching an app receive them.
+
+  Observed and not fixed, because it is a separate thing: in the reset method
+  the `found_id` flag is declared inside the device loop, so the
+  "settingId not found" warning fires once per device that does not have that
+  setting. Log noise only, pre-existing, left for its own commit.
+
 - **The ENS160 compensated its air-quality readings against a heap address.**
   [`ENS160_get_ambient_temp_setting`](ezlopi-sensors-devices/sensor-0068-I2C-ENS160-gas-sensor/sensor_0068_ENS160_gas_sensor_settings.c#L165)
   and
