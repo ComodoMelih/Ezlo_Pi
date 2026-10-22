@@ -116,6 +116,10 @@ refused by an older hub — and then differ in what happens next. **One of them
 reboots your hub.** The differences matter more than the similarity, so each is
 stated rather than tabulated.
 
+The two serial and BLE routes work on a hub straight out of the box. The third
+does not: it is reached over the network, and a factory-fresh hub has no WiFi.
+That prerequisite is a subsection of its own, immediately before it.
+
 ### Serial, `cmd:3`
 
 The one worth using from a script or a jig: no base64, no chunking, no
@@ -175,6 +179,62 @@ accepted**, which is how the strip comes up without you doing anything else. A
 refused document does not restart it. The characteristic takes writes from
 anyone in radio range, with no pairing.
 
+### First, if you want either network route: the hub has no WiFi
+
+A factory-fresh hub is not on a network, and the only thing that says so is one
+line on the serial log:
+
+```
+ERROR : WiFi Details not set !
+```
+
+([`ezlopi_main.c:257`](../ezlopi-main/ezlopi_main.c#L257).) Until that is dealt
+with there is no local websocket to call and no cloud connection, so the route
+below does not exist yet. The serial channel is the way in, with the
+credentials at the **top level** exactly as `cmd:3` puts the configuration
+there:
+
+<!-- machine-checked: wifi-over-serial -->
+```json
+{
+  "cmd": 2,
+  "ssid": "your-network",
+  "pass": "your-wifi-password"
+}
+```
+
+Three things about this are worth knowing before you conclude it failed:
+
+- **The password must be at least 8 characters.** A shorter one is refused
+  outright, with no association attempted. The example above is checked against
+  the firmware's own `EZPI_CORE_WIFI_PASS_CHAR_MIN_LEN`, so it cannot come to
+  show a password this firmware would reject.
+- **The answer can be ten seconds away.** The handler stores the credentials and
+  then tries to associate `EZPI_CORE_WIFI_CONN_RETRY_ATTEMPT` times, waiting
+  `EZPI_CORE_WIFI_CONN_ATTEMPT_INTERVAL` milliseconds each, and only replies
+  after that loop finishes — 2 attempts and 5000 ms in this build. A read window
+  shorter than that reports no answer for a hub that is still trying.
+- **The reply carries two numbers and they mean different things.**
+  `{"cmd":2,"status_write":1,"status":1}` is stored *and* associated.
+  `status_write: 1` with `status: 0` is the interesting one: the credentials are
+  in storage, and the access point was not reachable. Treating the pair as a
+  single verdict loses that distinction, which is the difference between a typo
+  and an AP out of range.
+
+Once it is up, you do not need to hunt for the DHCP address: the hub advertises
+itself over mDNS as `_ezlo._tcp` on
+[`EZPI_SERV_WS_SERVER_PORT`](../ezlopi-user-config/EZLOPI_USER_CONFIG.h#L148),
+17001 ([`ezlopi_core_mdns.c:590`](../ezlopi-core/ezlopi-core-mdns/ezlopi_core_mdns.c#L590)).
+
+**One note on credentials in logs.** The firmware does not echo the password
+back — the trace that used to print it is commented out at
+[`ezlopi_service_uart.c:1290`](../ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1290)
+— but it *does* print the SSID on every failed attempt
+([`:1326`](../ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1326),
+[`:1330`](../ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1330)).
+A boot log from a hub that could not associate carries the network name, which
+is worth knowing before attaching one to a bug report.
+
 ### `hub.ezlopi.config.set`, over the local websocket or the cloud
 
 The configuration goes in `params.config` as an object. On success the result
@@ -229,6 +289,20 @@ on a real board** while all 17,576 three-letter strings were classified
 correctly on the host. If you are running firmware older than that fix, the
 symptom is that warning line on every boot with a perfectly valid document.
 
+**Verified on an ESP32 over serial `cmd:2`.** A board with no stored network
+took the line above and answered `{"cmd":2,"status_write":1,"status":1}` —
+stored *and* associated. On the next boot `ERROR : WiFi Details not set !` was
+gone, the board printed a DHCP address on its own subnet, and the device list
+still dumped, so storing credentials does not disturb the stored strip
+configuration. The two status numbers were never seen to disagree, so
+`status_write: 1` with `status: 0` is read from the handler, not observed.
+
+**Not verified: the network routes themselves.** Nothing has ever connected to
+this hub on 17001. The port number and the `_ezlo._tcp` advertisement above are
+read from the source; no client has resolved that mDNS name or opened that
+socket, and `hub.ezlopi.config.set` has never been called on real hardware by
+any route. Getting WiFi up is as far as this has been taken.
+
 **Not verified: anything that lights.** No board has driven a multi-pixel strip.
 The actuation — RMT timing at length, `rgbw` producing a fourth byte per pixel,
 the reset gap at the cap — has never run on real hardware, and neither has the
@@ -249,11 +323,12 @@ refused document.
 
 ## How this file is checked
 
-The three blocks marked `<!-- machine-checked: ... -->` are extracted from this
+The four blocks marked `<!-- machine-checked: ... -->` are extracted from this
 file by `tests/host/test_aledonboard.c`. The first is run through the real
 `EZPI_util_devcfgval_check()` and `EZPI_aledcfg_from_json()`; the second is
 what its resolution is compared against; the third is compared with the first.
-The test fails if
+The fourth, the WiFi line, is not a copy of anything here and is checked
+against the firmware directly. The test fails if
 
 - the example is not a configuration this firmware would store, or
 - it does not resolve to the shape the second block claims, or
@@ -261,6 +336,21 @@ The test fails if
   firmware's own enum rather than retyped here, or
 - the serial block carries a `data` wrapper, or wraps a document that is not
   the worked example above, or
+- the WiFi block's `cmd` is not `EZPI_UART_CMD_WIFI` — from that same enum, in
+  which it is adjacent to `SET_CONFIG`, so a transposed 2 and 3 is caught — or
+  it nests under `data`, or its `ssid` and `pass` are not under key names the
+  firmware's own lookup would find — that lookup is case-insensitive, so `SSID`
+  would work and `network` would not, and the test is deliberately no stricter
+  than the firmware here — or
+- the WiFi block's example password is shorter than
+  `EZPI_CORE_WIFI_PASS_CHAR_MIN_LEN`, which the test reads as text out of
+  `ezlopi-user-config/EZLOPI_USER_CONFIG.h` at runtime — it cannot `#include`
+  that header on a host, and the host suite's stand-in for it would have made
+  the check compare this document against a number typed into the test suite,
+  or
+- the WiFi block carries any member beyond those three, since the handler reads
+  nothing else and a `dev_detail` pasted in beside the credentials would be
+  accepted and silently ignored, or
 - any block is missing, unparseable, or its marker cannot be found.
 
 The serial block is therefore a second copy of the example, which would
