@@ -6397,6 +6397,23 @@ flashed.**
   or refused and nothing more. That mapping is pinned on the host, and the
   colours themselves still need eyes on a strip.
 
+- **The hub is on WiFi, which is as far as hardware has taken this.** Serial
+  `cmd:2` on a board with no stored network answered
+  `{"cmd":2,"status_write":1,"status":1}` — stored *and* associated. On the next
+  boot `ERROR : WiFi Details not set !` was gone, the board printed a DHCP
+  address on its own subnet, and the device list still dumped, so writing
+  credentials does not disturb the stored strip configuration. The two status
+  numbers were never observed to disagree, so the `status_write: 1` with
+  `status: 0` case is read from the handler and not measured.
+
+  **Nothing has connected to the hub on 17001.** The port and the `_ezlo._tcp`
+  mDNS advertisement are read from the source; no client has resolved that name
+  or opened that socket, and `hub.ezlopi.config.set` has never been called on
+  real hardware by any route. The board was unplugged before that could be
+  taken further — the credentials are in NVS and persist, so it resumes rather
+  than restarts. Recorded because a WiFi association is easy to mistake for a
+  working local API, and they are not the same claim.
+
 - **No schema change was needed, and that is by prior design rather than luck.**
   `ezlopi-util-devcfgval` is deliberately permissive — it rejects only shapes
   that cannot work on this build and accepts unknown members, precisely so a
@@ -6477,7 +6494,7 @@ flashed.**
   a reader to skim the one column they think they need.
 
 - **That doc's example is machine-checked, so it cannot drift.**
-  `tests/host/test_aledonboard.c` reads the markdown, extracts three marked
+  `tests/host/test_aledonboard.c` reads the markdown, extracts four marked
   blocks, and runs the first through the real `EZPI_util_devcfgval_check()` and
   `EZPI_aledcfg_from_json()`, comparing the result against the shape the second
   block claims. The test holds **no copy of the JSON and no expected numbers**:
@@ -6485,19 +6502,52 @@ flashed.**
   not with the firmware would both pass. The expected chipset string is linked
   from `ezlopi_cloud_keywords.c` rather than typed, so a renamed constant cannot
   leave the test green while every real config is refused. The doc is listed as
-  a prerequisite of the binary, so editing it rebuilds the test. **17 checks**,
+  a prerequisite of the binary, so editing it rebuilds the test. **24 checks**,
   clean under ASan and UBSan.
 
   It extracted two blocks when it was written, and the third is there because
   the corrections above were the kind a reworded paragraph does not prevent
   from happening again. The serial route's example is now its own marked block,
-  and four of the seventeen checks are about it: that its `cmd` is
+  and four of the twenty-four checks are about it: that its `cmd` is
   **`EZPI_UART_CMD_SET_CONFIG`, taken from the real
   `ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.h`**, that it has no
   `data` member, and that the block with its `cmd` removed is
   `cJSON_Compare`-equal to the worked example. There is deliberately **no `3`
   in the test file**; the one that was wrong in the doc was a literal, and a
   literal in the test would have agreed with it.
+
+  The fourth block is the WiFi line, and it is there because the document
+  described a route nobody could follow. Two of its three routes work on a hub
+  out of the box; the `hub.ezlopi.config.set` one is reached over the network,
+  and a factory-fresh hub has none — the only thing that says so is `ERROR :
+  WiFi Details not set !` on the serial log. The doc now covers serial `cmd:2`
+  first: credentials at the top level as with `cmd:3`, the 8-character minimum,
+  the reply being up to ten seconds away because the handler associates before
+  it answers, and `status_write` and `status` meaning **stored** and
+  **associated** rather than being one verdict. Seven checks, aimed at the
+  firmware rather than at another block of the document, since this one is not a
+  copy of anything in it.
+
+  One of those seven reads a number out of a file instead of including it.
+  `EZPI_CORE_WIFI_PASS_CHAR_MIN_LEN` lives in `EZLOPI_USER_CONFIG.h`, which
+  cannot be compiled on a host — it includes `driver/uart.h` — and the suite has
+  a stand-in for it on that very include path, so a plain `#include` would have
+  quietly compared the document against a number typed into the test suite. The
+  test reads the real header as text at runtime, the same way it reads the
+  document, and the header is a prerequisite so raising the minimum re-runs the
+  check. The mutant that proves this is the only one that leaves the document
+  alone: against a header copy reading 32, the unmutated doc goes red at its
+  18-character example. With an `8` typed into the test that mutant would have
+  been green, which is the whole argument for the indirection.
+
+  A mutant written expecting a kill came back green and the expectation was
+  the thing that was wrong. Capitalising the key to `"SSID"` passes, because
+  `cJSON_GetObjectItem` passes `case_sensitive = false` (`cjext.c:2444`) and
+  `ezpi_service_uart_set_wifi()` looks the keys up with that exact call — so a
+  hub accepts it too. Making the test reject it would have been a check stricter
+  than the firmware, asserting a rule the product does not have. It is kept as a
+  green control, with `ssid` renamed to `network` as the red one, so that
+  anybody later tightening that lookup finds out here.
 
   That is the first host test to include a header out of `ezlopi-services/`.
   Only the header, and only for one enumerator — the service itself is FreeRTOS
@@ -6593,14 +6643,21 @@ flashed.**
   the four added for the serial block refuse to run at all if their edit
   matched nothing.
 
-- The full host suite is **6497** checks across **32** binaries, 0 failures,
+- The full host suite is **6748** checks across **35** binaries, 0 failures,
   with every binary reporting in the shape the aggregate greps for. The
   aggregate is re-run rather than adjusted whenever it changes; this figure is
-  what the run printed, not an arithmetic result. The steps behind it:
-  **6390 + 61 + 17 = 6468** across 31 binaries, where the 6390 includes
-  `test_aled`'s 201, then **+18** for `test_ens160set` as the 32nd binary, and
-  then **+11** when the settings allocation-failure checks were added to that
-  same binary. The figure before this work was 6464.
+  what the run printed, not an arithmetic result.
+
+  It stood at **6497** across **32** binaries when this entry was first
+  written, and the steps behind *that* figure were **6390 + 61 + 17 = 6468**
+  across 31 binaries, where the 6390 includes `test_aled`'s 201, then **+18**
+  for `test_ens160set` as the 32nd binary, and then **+11** when the settings
+  allocation-failure checks were added to that same binary. The figure before
+  that work was 6464. Those steps are left as they were measured; of the
+  difference since, `test_aledcfg` accounts for 61 → 81 as the `color_order`
+  defect below was found, and `test_aledonboard` for 17 → 24 as the WiFi block
+  was added. The rest, and the three further binaries, are not re-derived here —
+  the headline is the measured one and is the figure to trust.
 
 ### UUID utility — [bug]
 
