@@ -237,6 +237,32 @@ is worth knowing before attaching one to a bug report.
 
 ### `hub.ezlopi.config.set`, over the local websocket or the cloud
 
+**First you have to get in, and the socket is plain `ws://`.** Reaching for
+`wss://` gets a handshake failure that looks exactly like a wrong key, so it is
+worth saying: the hub calls `httpd_start()` and not `httpd_ssl_start()`
+([`ezlopi_service_ws_server.c:810`](../ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L810)),
+and there is no TLS on this port at all.
+
+An unauthenticated connection may call exactly one method,
+`hub.offline.login.ui`
+([`:336`](../ezlopi-services/ezlopi-service-ws-server/ezlopi_service_ws_server.c#L336));
+everything else is refused until it succeeds. Its params are `{user, token}`
+([`ezlopi_core_offline_login.c:143`](../ezlopi-core/ezlopi-core-offline-login/ezlopi_core_offline_login.c#L143)),
+where `token` is the hub's local API key. In a default build the `user` field is
+**not** checked — `__user_id_accepted()` returns true unless
+`CONFIG_EZPI_OFFLINE_LOGIN_VERIFY_USER_ID` is defined
+([`:344`](../ezlopi-core/ezlopi-core-offline-login/ezlopi_core_offline_login.c#L344)) —
+so the local key is the only credential that matters. Authorisation is recorded
+**per connection**, against the socket, so every later call has to go down the
+same one; reconnecting means logging in again.
+
+Where the key comes from: the hub prints it in its own boot log, inside a boxed
+banner, when `CONFIG_EZPI_LOCAL_KEY_ANNOUNCE` is set
+([`ezlopi_core_local_key.c:376`](../ezlopi-core/ezlopi-core-local-key/ezlopi_core_local_key.c#L376),
+[`Kconfig.projbuild:443`](../ezlopi-main/Kconfig.projbuild#L443)). That is a
+convenience for bring-up and a disclosure the moment a boot log is shared —
+treat a captured log as carrying a credential, because it does.
+
 The configuration goes in `params.config` as an object. On success the result
 carries `deviceCount` and `rebootRequired: true`; the hub does **not** restart
 itself, so the caller decides when. This route additionally refuses an entry
@@ -297,18 +323,43 @@ still dumped, so storing credentials does not disturb the stored strip
 configuration. The two status numbers were never seen to disagree, so
 `status_write: 1` with `status: 0` is read from the handler, not observed.
 
-**Not verified: the network routes themselves.** Nothing has ever connected to
-this hub on 17001. The port number and the `_ezlo._tcp` advertisement above are
-read from the source; no client has resolved that mDNS name or opened that
-socket, and `hub.ezlopi.config.set` has never been called on real hardware by
-any route. Getting WiFi up is as far as this has been taken.
+**Verified: the websocket route, end to end to the driver.** A client on the
+same subnet opened `ws://<hub>:17001`, logged in with `hub.offline.login.ui`
+carrying `{user, token}` where the token is the hub's local API key, and got
+`{"result":{},"error":null}`. `hub.info.get`, `hub.devices.list` and
+`hub.items.list` all answered: the strip came back as one device with six items,
+`reachable` and `ready`. `hub.item.value.set` was then called on the `dimmer`
+and `rgbcolor` items, and the hub's own report changed to match — `dimmer` went
+from 100 to 10 to 30, and a deliberately odd `{"red":12,"green":200,"blue":37}`
+read back as `#0cc825`. That last one is a true round trip: the getter
+re-derives the channels from the pixel buffer through the configured colour
+order, so the value reached the buffer and came back out again.
 
-**Not verified: anything that lights.** No board has driven a multi-pixel strip.
-The actuation — RMT timing at length, `rgbw` producing a fourth byte per pixel,
-the reset gap at the cap — has never run on real hardware, and neither has the
-mapping: that `"rbg"` is *accepted* is measured, that it puts red where red goes
-is not. The serial log reports accepted or refused and nothing more, so this
-half needs eyes on a strip rather than a better test.
+**Two things that round trip does *not* establish**, both worth stating because
+each is easy to over-read. First, `hub.item.value.set` discards the item
+function's return value — `EZPI_items_set_value_v3` adds an empty result object
+and reports nothing about what the driver did — so `"error":null` means *the
+method was dispatched*, not *the strip was driven*. The evidence that the driver
+ran came from the serial log alongside: one `item_id:` trace per call, and no
+`sk6812: could not fill the strip` from the refused-fill branch. Second, the
+colour round trip goes out through the order mapping and back in through the
+same mapping, so it is symmetric: an inverted mapping would round trip just as
+cleanly. It cannot be used as evidence the wire order is right.
+
+**Not verified: anything that lights.** No board has been *seen* to drive a
+multi-pixel strip. The driver has now run on hardware for real — the fill was
+not refused and the flush was reached — but the actuation past that point is
+still unmeasured: RMT timing at length, `rgbw` producing a fourth byte per
+pixel, the reset gap at the cap. The mapping is unmeasured too, and for the same
+reason as above rather than for want of a test to write: that `"rbg"` is
+*accepted* is measured, that it puts red where red goes is not. This half needs
+eyes on a strip. The cheap version of that check is to store `color_order` as
+`"grb"`, set `rgbcolor` to `{"red":255,"green":0,"blue":0}`, and look — red
+means the mapping is right, green means the two channels are swapped.
+
+**Not verified: `hub.ezlopi.config.set`.** It has still never been called on real
+hardware by any route. The route to it is now known to work, which is a
+different claim.
 
 Treat the pixel counts and timings above as what the code computes, not as
 measurements.
