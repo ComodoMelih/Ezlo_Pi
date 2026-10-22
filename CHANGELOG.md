@@ -11872,14 +11872,52 @@ Listed because a changelog that only mentions what was finished is misleading.
   the three other CI targets still have nothing but a clean compile, which only
   removes "it might not even build there" from the list.
 
-  **One colour order has been lit — `grb` — and the other five have not.** With
-  `grb` stored, `{255,0,0}` renders red, so the configured order is the wire
-  order for at least that permutation and the firmware is not transposing the
-  red channel. The remaining five are swept on the host and present in all four
-  ELFs, but which physical LED changes colour under `rbg`, `bgr` and the rest is
-  unobserved, and so is whether the fourth byte of an RGBW strip does anything.
-  Checking the others means storing each in turn and rebooting, because the
-  order is resolved once in `__prepare()`.
+  **The bench reel is wired `brg`, and the single-primary check that said
+  otherwise could not have told the difference.** What this entry said before
+  was: "with `grb` stored, `{255,0,0}` renders red, so the configured order is
+  the wire order for at least that permutation". The observation was real; the
+  conclusion does not follow from it. Under `grb` the packer emits byte0=G,
+  byte1=R, byte2=B — [ezlopi_util_aled.c:32](ezlopi-util/ezlopi-util-aled/ezlopi_util_aled.c:32)
+  maps `grb` to `{1,0,2}` — and a strip wired **BRG** also maps byte1 to red.
+  Red rendering red is therefore consistent with both orders, and the one
+  primary that was tried is exactly the one that cannot separate them.
+
+  All three primaries, same board, `grb` still stored, dimmer at 10:
+
+  | commanded | strip showed | therefore |
+  |---|---|---|
+  | `{"red":0,"green":255,"blue":0}` | blue | byte0 → blue |
+  | `{"red":255,"green":0,"blue":0}` | red | byte1 → red |
+  | `{"red":0,"green":0,"blue":255}` | green | byte2 → green |
+
+  A complete permutation, so the reel is **BRG**. The third row was predicted
+  from the first two and stated before it was looked at. `color_order` was then
+  stored as `brg` over `cmd 3`, read back off the next boot, taken verbatim, and
+  green commanded again: **green**, where the identical command had given blue.
+
+  **Three orders have now been lit and three have not.** `grb` and `rgb` were
+  lit as diagnostics and `brg` as the correct value; `rbg`, `gbr` and `bgr` are
+  swept on the host and present in all four ELFs, but which physical LED changes
+  colour under them is unobserved, as is whether the fourth byte of an RGBW
+  strip does anything. Checking the others means storing each in turn and
+  rebooting, because the order is resolved once in `__prepare()`.
+
+  **The lesson is not about colour.** Every signal available without looking at
+  the strip was green: the config echoed back, no fill was refused, the API
+  returned `"error":null`, and an earlier sweep had shown all six order names
+  accepted by the board. **Acceptance was allowed to stand in for correctness**,
+  and those are two different measurements — the same shape as the discarded
+  fill result recorded above, where the one thing that could have disagreed was
+  never consulted. A sweep that proves six values are *parsed* says nothing
+  about which one is *right*, and it is easy to read the first as the second
+  because both produce a page of green.
+
+  **`color_order` can be derived in three looks, and the procedure is now in
+  [docs/addressable-led-onboarding.md](docs/addressable-led-onboarding.md).**
+  Store `rgb` — which makes byte*i* carry channel *i* — then command red, green
+  and blue in turn; the colours that appear, in that order, spell the value to
+  store. That prediction was tested rather than merely reasoned: with `rgb`
+  stored, commanded red was predicted to show blue, and did.
 
   **A latent off-by-one in the vendored `led_strip` component is recorded and
   not patched.** `led_strip_set_pixel()` validates `num <= strip->length` while

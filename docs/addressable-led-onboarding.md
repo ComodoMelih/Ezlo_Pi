@@ -57,11 +57,24 @@ is wrong:
   lighting 2048 pixels would hide it. `1` is conspicuous and recoverable.
 - **One bad key does not discard the others.** A good `pixel_count` beside a
   nonsense `rgbw` keeps the count.
-- **If the strip lights the wrong colours, `color_order` is the key to change.**
-  All six permutations are honoured. A strip that shows green when you asked
-  for red is wired `rgb` rather than `grb` — the part number does not settle
-  this, since strips sold as WS2812B have shipped in more than one order. The
-  order is named by the order itself for that reason, rather than by chip.
+- **If the strip lights the wrong colours, `color_order` is the key to change,
+  and there is a procedure that finds the right value in three looks.** Store
+  `"rgb"`, then command pure red, pure green and pure blue in turn and write
+  down the colour the strip actually shows for each. **Those three colours, in
+  that order, spell the value to store.** Under `"rgb"` the first byte carries
+  red, the second green and the third blue, so whatever appears for commanded
+  red names the channel the strip puts first, and so on for the other two.
+
+  Worked on the bench reel: commanded red showed **blue**, green showed **red**
+  and blue showed **green**, so the value is `brg` — and storing `brg` made
+  every primary come out as itself. Do not stop after one colour: commanding
+  red alone cannot tell `grb` from `brg`, because both put red in the byte
+  `grb` fills with red, and that near-miss is recorded further down this
+  document because it was made here.
+
+  The part number does not settle this — strips sold as WS2812B have shipped in
+  more than one order, and this reel was labelled SK6812 and wired BRG. The key
+  is named by the order itself for that reason, rather than by chip.
 - **`led_chip` is a different question from `color_order`, and setting one does
   not affect the other.** `color_order` is which of the three bytes goes first;
   `led_chip` is how long a `1` bit is held high. A WS2812B wants 1000 ns and an
@@ -375,27 +388,69 @@ colour round trip goes out through the order mapping and back in through the
 same mapping, so it is symmetric: an inverted mapping would round trip just as
 cleanly. It cannot be used as evidence the wire order is right.
 
-**Verified: a 30-pixel strip lights, in `grb`.** A board with
+**Verified: a 30-pixel strip lights. The order it was verified in was wrong,
+and one primary is why.** A board with
 `{"gpio1":16,"pixel_count":30,"rgbw":false,"color_order":"grb"}` stored lit
 along its whole length on `__init()`'s boot fill, and then rendered **red** for
 `rgbcolor = {"red":255,"green":0,"blue":0}` sent to `20ec6000` over the local
-API with the dimmer at 10. So RMT timing works at that length, the one-LED
-defect does not recur, and the configured order is the wire order for at least
-that permutation.
+API with the dimmer at 10. The length result stands: RMT timing works at 30
+pixels and the one-LED defect does not recur.
 
-The check that produced this is the one prescribed in the paragraph that used
-to be here — store `"grb"`, set pure red, look; red means the mapping is right,
-green means the two channels are swapped. It is recorded because it earned its
-keep: every API-level signal had been green for a long time while the strip was
-dark, and only a person looking at it could tell the difference.
+**The order conclusion drawn from it did not.** It read "the configured order is
+the wire order for at least that permutation", and that does not follow. Under
+`grb` the packer emits byte0=G, byte1=R, byte2=B
+([ezlopi_util_aled.c:32](../ezlopi-util/ezlopi-util-aled/ezlopi_util_aled.c:32)
+maps `grb` to `{1,0,2}`), and a strip wired **BRG** maps byte1 to red as well.
+Red coming out red is consistent with GRB *and* BRG, so the one measurement
+taken could not distinguish the configured order from the one this reel
+actually has.
+
+All three primaries on that same board, config still `grb`, dimmer at 10:
+
+| commanded | strip showed | therefore |
+|---|---|---|
+| `{"red":0,"green":255,"blue":0}` | **blue** | byte0 → blue |
+| `{"red":255,"green":0,"blue":0}` | **red** | byte1 → red |
+| `{"red":0,"green":0,"blue":255}` | **green** | byte2 → green |
+
+A complete permutation: this reel is **BRG**, not GRB. The third row was
+predicted from the first two before it was looked at, which is what separates a
+measurement from three anecdotes.
+
+`color_order` was then stored as `"brg"` over `cmd 3`, read back off the next
+boot, taken verbatim, and green commanded again — **green**, where the same
+command had given blue. The recipe at the top of this document was checked the
+same way: `"rgb"` stored, commanded red predicted to show blue, and it did.
+Two predictions, two hits.
+
+**What this cost, and the general lesson.** Every signal said the strip was
+fine. The config echoed back correctly, no fill was refused, the API returned
+`"error":null`, and the earlier sweep showed all six order names *accepted*.
+None of that is a statement about which order this reel wants. **Acceptance and
+correctness were two different measurements and the first was allowed to stand
+in for the second** — the same shape of mistake as the discarded fill result
+recorded in the CHANGELOG, where the only thing that could have disagreed was
+never consulted.
 
 **Still not verified, and narrowed rather than closed.** One length is not a
 range: `rgbw` producing a fourth byte per pixel is still unexercised, because
 this strip is configured `rgbw: false` and the white channel stays unreachable
-in practice; so is the reset gap at the cap. And five of the six colour orders
-are unlit — that `"rbg"` is *accepted* is measured, that it puts red where red
-goes is not. Checking them means storing each in turn and rebooting, since the
-order is resolved once in `__prepare()`.
+in practice; so is the reset gap at the cap. Of the six orders, three have now
+been lit — `grb` and `rgb` as diagnostics, `brg` as the correct one — and the
+other three, `rbg`, `gbr` and `bgr`, are accepted but unlit. Checking them
+means storing each in turn
+and rebooting, since the order is resolved once in `__prepare()`.
+
+**A reset does not clear the strip, and a stale frame looks exactly like a
+fault.** The LEDs hold their last frame as long as they have power, and
+resetting or reflashing the ESP32 does not interrupt that. A strip left showing
+red by an earlier experiment — or by whatever firmware the board shipped with —
+still shows red while the hub boots, and goes on showing it if the data line is
+broken. Before concluding anything from the colour on a strip, make the
+firmware drive it and watch it change: `__init()` fills `{255,255,255}` at
+brightness 255, so a board that is driving its strip at all turns it **white**
+within a second or two of a reset. That one observation separates "not driven"
+from "driven to the wrong colour", and they have completely different causes.
 
 **Before suspecting the firmware when a strip is dark, check the hardware.**
 This cost a day. Every API-level signal was green, the config echoed back
