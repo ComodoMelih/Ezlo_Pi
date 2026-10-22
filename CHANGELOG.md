@@ -6801,6 +6801,51 @@ itself through
 `EZPI_core_device_value_updated_from_device_broadcast(dimmer_args->switch_item)`,
 so no poll was needed and none was done.
 
+### Addressable LED init reporting — [bug]
+
+**A refused boot fill was reported as a successful init.** `__init()` did
+
+```c
+err |= __fill_strip(dimmer_args, color);
+if (ESP_OK == (err = led_strip_set_brightness(&dimmer_args->sk6812_strip, 255)))
+```
+
+and `led_strip_set_brightness()` is `return ESP_OK;` unconditionally
+([led_strip.c](ezlopi-components/led_strip/src/led_strip.c)). So the second
+line overwrote the fill's result, the unfilled buffer was flushed anyway, and
+the device reported `EZPI_SUCCESS`. The frame buffer comes from `calloc()`, so
+the visible outcome was a dark strip beside a hub insisting the device had
+initialised. `__fill_strip()` refuses on a NULL buffer or a zero wire length,
+both reachable.
+
+The `|=` was not itself the bug — `err` is `ESP_OK` at that point, so the OR is
+an assignment. The bug is the reassignment on the next line. Worth separating,
+because "replace `|=` with `=`" would have looked like the whole fix and
+changed nothing.
+
+**Why this is the same defect as the one that cost a day.** The strip on the
+test bench was dark while every available signal said success, and the search
+went through four RMT timing families and twenty GPIOs before the cause turned
+out to be below the firmware entirely. Throughout that, this function could not
+have told anyone that a fill had failed. Discarding the one return value that
+could disagree is what makes a diagnosis take a day; the fault here was not
+reached, but the silence was real and would have hidden it.
+
+**Only the error path changes.** Each of the three calls now feeds the next
+only on `ESP_OK`, so a refused fill reaches the `TRACE_E` that was already
+there. The happy path is untouched, which bounds what a flash can show:
+re-flashing and seeing the strip light is evidence of *no regression*, not
+evidence the fix works. That is what was done — the board came up with
+`gpio1: 16`, `pixel_count: 30`, `rgbw: false`, `color_order: "grb"` and a
+`Device_id_curr_device` line with no `Couldn't initiate device!`. Provoking the
+failure would need a NULL buffer or a zero wire length, and neither is
+reachable from a stored config: `ALEDCFG_MIN_PIXELS` is `1`, an out-of-range
+`pixel_count` leaves the default of `1` in place, and the wire length is zero
+only for a zero count. That is a consequence of the minimum, not its purpose —
+[ezlopi_util_aledcfg.h](ezlopi-util/ezlopi-util-aledcfg/ezlopi_util_aledcfg.h)
+gives its purpose as matching the shipped driver byte-for-byte for strips
+already in the field.
+
 ### UUID utility — [bug]
 
 **None of this is reachable.** Nothing in the repository calls any function in
