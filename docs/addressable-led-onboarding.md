@@ -191,6 +191,21 @@ The hub answers `{"cmd":3,"status_write":1}`, or `status_write` `0` if the
 document was refused. **It does not reboot and does not tell you that one is
 needed** — see *What this firmware will not do with it*.
 
+**If you see no answer at all, suspect your serial reader before the board.**
+That reply is about 28 bytes, and a reader that hands over whole buffers will
+not emit it on an otherwise quiet board: the bytes arrive, sit in the buffer
+below the threshold, and are discarded when the process exits. It looks exactly
+like a refusal. This was got wrong here three times in a row — reported as
+"nothing was stored" while the configuration had in fact been stored every
+time, which the next boot's config read-back showed. The tell was that every
+capture was an exact multiple of 1024 bytes. If a capture length is suspiciously
+round, or always zero, fix the reader. A quick confirmation either way is to
+send `{"cmd":3,…}{"cmd":1}` as one line: both are dispatched from a single
+buffer, and `cmd:1`'s kilobytes will push the short reply out ahead of them.
+**The check that does not depend on any of this is to reboot and read the
+configuration back** — it observes the stored state instead of a message about
+it, and that is what the verification below uses.
+
 Two things here are easy to get wrong, and both are the kind of mistake that
 looks like it worked:
 

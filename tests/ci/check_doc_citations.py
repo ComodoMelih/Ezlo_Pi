@@ -3,8 +3,8 @@
 
 WHY THIS EXISTS
 
-The CHANGELOG is this fork's main deliverable and it carries 523 links into the
-source, 392 of them with a `#L<n>` line fragment. (It said 230-odd when this
+The CHANGELOG is this fork's main deliverable and it carries 525 links into the
+source, 394 of them with a `#L<n>` line fragment. (It said 230-odd when this
 was written and 431 until docs/ was covered; the count is re-measured whenever
 something here quotes it, because a stale number in the prose of a staleness
 check is a poor advertisement.) Line numbers move
@@ -116,7 +116,8 @@ because it punishes a correct link.
 
 So check_text() now takes the document's own directory and resolves against it,
 and main() walks SUBDIRS as well as the root. Examined links went from 552 to
-583: 30 of the 31 are the links in docs/, and the other was already in the
+583 at that change, and the total rises as entries are added: 30 of the 31 were
+the links in docs/, and the other was already in the
 CHANGELOG, invisible because it was written with a colon rather than a `#L`
 fragment (see below). None of the 31 was broken, so this found nothing; it
 closes the hole that let the three documents in docs/ accumulate citations

@@ -11372,8 +11372,8 @@ enumerators — so the live half of this component was never affected.
 - **The citations in these documents are now checked**, by
   [`check_doc_citations.py`](tests/ci/check_doc_citations.py) — the twentieth
   check and the seventeenth the `hygiene` job invokes. This file is the main
-  thing this fork produces, and the examined documents carry 583 markdown
-  links, 409 of them with a `#L<n>` fragment — 523 and 392 of those are in this
+  thing this fork produces, and the examined documents carry 585 markdown
+  links, 411 of them with a `#L<n>` fragment — 525 and 394 of those are in this
   file alone. (This said 310 *links* when the entry was written and 459 before
   `docs/` was covered; it is re-measured whenever a paragraph below quotes it,
   and whenever an entry added above adds citations of its own.) Line
@@ -11397,9 +11397,9 @@ enumerators — so the live half of this component was never affected.
   cited line, or the path climbs out of the repository altogether. What it
   still cannot do is judge a citation whose text is
   prose: "appended", "the per-chunk dump" and the like have nothing to check
-  against. **78** of the **409** citations with a line fragment are in that
-  class — the fourth rule bears on the **189** that are a single backticked
-  token and the third on the **146** whose text ends `:N`. This said "150 of
+  against. **78** of the **411** citations with a line fragment are in that
+  class — the fourth rule bears on the **190** that are a single backticked
+  token and the third on the **147** whose text ends `:N`. This said "150 of
   the 200" when the rule was added; the proportion improved because citing by
   token became the habit here, not because the rule was loosened.
   The docstring says so, so that a green run is not read as more than it is.
@@ -11417,7 +11417,9 @@ enumerators — so the live half of this component was never affected.
   what was actually missing was resolution. A matched `../` path joined to the
   root resolved nowhere and would have been reported `MISSING`, which is worse
   than not looking, because it punishes a correct link. `check_text()` now
-  takes the document's own directory. Examined links went from 552 to 583.
+  takes the document's own directory. Examined links went from 552 to 583 at
+  that change — the current total is above, and higher, because entries added
+  since cite as they always do.
 
   **Of that 31, one was not in `docs/` at all, and it is the more interesting
   one.** 30 are the `docs/` links. The last was already in this file: it had
@@ -11957,6 +11959,45 @@ Listed because a changelog that only mentions what was finished is misleading.
   and blue in turn; the colours that appear, in that order, spell the value to
   store. That prediction was tested rather than merely reasoned: with `rgb`
   stored, commanded red was predicted to show blue, and did.
+
+  **Two defects reported against this firmware during that work were not in the
+  firmware. They were in the serial reader used to observe it**, and they are
+  recorded because both were stated with confidence and one was stated three
+  times. The reader took 1024 bytes per read from a COM port whose mode sets no
+  read timeout, so a read does not return until 1024 bytes have arrived. On an
+  otherwise quiet board a short reply never gets there: it sits in the buffer
+  and is lost when the process exits. Not truncated — absent.
+
+  So `cmd 3` was reported as *"NO ACKNOWLEDGEMENT — nothing was stored"* on
+  three consecutive runs, each of which had stored the configuration, as the
+  following boot's read-back showed every time. `{"cmd":3,"status_write":1}` is
+  about 28 bytes. And `cmd 4` was reported as stalling with the heartbeat
+  suppressed; it answers `{"cmd":4,"status":1}` with the whole configuration,
+  and the heap heartbeat is in the same capture. Neither handler has a
+  mechanism for what was claimed:
+  [`ezpi_service_uart_get_config`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L1469)
+  sends unconditionally, SUCCESS or FAIL, and the reboot is `cmd 5`'s
+  (`:511`) — which was the second wrong explanation offered for the first wrong
+  finding, before the tool was suspected at all.
+
+  **The evidence was in plain view for the whole time and was read past.** Every
+  capture taken was an exact multiple of 1024 — 2048, 13312 or 0, nine of them,
+  never a byte in between. That is not how a device emitting JSON at its own
+  pace behaves; it is the signature of a reader that only hands over whole
+  buffers. It was settled by sending `cmd 3` and `cmd 1` in one line, since the
+  dispatch walks several objects out of one buffer on purpose
+  ([`:829`](ezlopi-services/ezlopi-service-uart/ezlopi_service_uart.c#L829)), so
+  `cmd 1`'s kilobytes carried the short reply out ahead of them — and there it
+  was, at the head of the capture. With one byte per read, `cmd 3` alone now
+  answers in a 1023-byte capture, a length the old reader could not produce.
+
+  The general form is worth more than the bug: **an instrument that drops data
+  silently produces findings indistinguishable from real defects**, and the
+  conclusion drawn is always about the thing being measured. The onboarding
+  document now warns a reader to suspect their own serial tool before the board
+  when no acknowledgement appears, and points at the check that does not depend
+  on the reply path at all — reboot and read the configuration back, observing
+  stored state rather than a message about it.
 
   **A latent off-by-one in the vendored `led_strip` component is recorded and
   not patched.** `led_strip_set_pixel()` validates `num <= strip->length` while
