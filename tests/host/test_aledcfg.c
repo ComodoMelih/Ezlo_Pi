@@ -37,10 +37,32 @@
  * update silently changes what working hardware does. The "says nothing"
  * checks are therefore not edge cases, they are the main case.
  *
+ * THE SECOND DEFECT, WHICH THIS FILE ORIGINALLY LET THROUGH
+ *
+ * Sections 1 to 5 parse with cJSON_Parse(), which copies each string into its
+ * own NUL-terminated allocation. The device does not: EZPI_device_prepare()
+ * uses cJSON_ParseWithRef() (ezlopi_core_devices.c:630), whose valuestring
+ * points into the stored payload and ends at a quote, with the length in
+ * str_value_len.
+ *
+ * So the resolver read "grb\"}]}", measured 7 bytes, and refused all six
+ * colour orders on a real board -- while section 3 classified all 17,576
+ * three-letter strings correctly on the host. A test file can be thorough
+ * about the wrong input.
+ *
+ * Sections 6 and 7 are the fix for that, and they use the parser the device
+ * actually uses.
+ *
  * WHAT IT WAS MEASURED TO CATCH
  *
  * Run against the subject broken on purpose before being trusted; the mutants
  * and their verdicts are recorded in the CHANGELOG entry for this component.
+ * For sections 6 and 7 specifically, probe/aledmutants.sh restores the shipped
+ * single-argument call and requires these checks to fail: they do, 7 of them,
+ * and "zzz" is still refused, so the catch is selective rather than blanket.
+ * A second mutant that ignores the bound and compares 3 bytes regardless is
+ * caught as well, by ASan rather than by an assertion -- it reads past the
+ * one-byte "" literal in section 3.
  */
 
 #include <stdio.h>
@@ -85,6 +107,48 @@ static bool resolve_str(const char *json, s_aledcfg_t *out)
     }
 
     verbatim = EZPI_aledcfg_from_json(root, out);
+    cJSON_Delete(__FUNCTION__, root);
+    return verbatim;
+}
+
+/* Parse a document the way the DEVICE does, and resolve the device entry out of
+ * it. cJSON_ParseWithRef() is the parser EZPI_device_prepare() uses
+ * (ezlopi_core_devices.c:630), and it does not copy strings: each valuestring
+ * points into `json` and is terminated by the closing quote, not a NUL, with
+ * the length in str_value_len.
+ *
+ * `json` must therefore outlive the resolve, which is why every caller below
+ * passes a string literal. A stack buffer freed first would make the resolver
+ * read freed memory, and the test would be reporting on that instead.
+ *
+ * The document is the full UART `cmd 3` shape rather than a bare device entry,
+ * because the whole point is that bytes follow the value. A single-key object
+ * would end in `"}` and still mislead by looking shorter. */
+static bool resolve_ref_dev0(const char *json, s_aledcfg_t *out)
+{
+    cJSON *const root = cJSON_ParseWithRef(__FUNCTION__, json);
+    cJSON *list;
+    cJSON *dev;
+    bool verbatim;
+
+    list = (NULL != root) ? cJSON_GetObjectItem(__FUNCTION__, root, "dev_detail") : NULL;
+    dev = (NULL != list) ? cJSON_GetArrayItem(list, 0) : NULL;
+
+    /* A document this test failed to navigate would otherwise look exactly
+     * like a device entry the resolver rejected. */
+    if (NULL == dev)
+    {
+        printf("FAIL  this test's own JSON did not parse by reference: %s\n", json);
+        failures++;
+        checks++;
+        out->pixel_count = 0;
+        out->has_white = false;
+        out->order = ALED_ORDER_GRB;
+        cJSON_Delete(__FUNCTION__, root);
+        return false;
+    }
+
+    verbatim = EZPI_aledcfg_from_json(dev, out);
     cJSON_Delete(__FUNCTION__, root);
     return verbatim;
 }
@@ -541,6 +605,167 @@ static void test_the_keys_are_independent(void)
     CHECK(ALED_ORDER_GRB == cfg.order, "...and the bad order defaulted to GRB");
 }
 
+/* ------------------------------------------------------------------------- *
+ * 6. The parser the device actually uses.
+ *
+ * THIS IS THE SECTION THE REST OF THE FILE MISSED.
+ *
+ * Every check above this point goes through cJSON_Parse(), which COPIES each
+ * string into its own NUL-terminated allocation. The device never does that.
+ * EZPI_device_prepare() parses the stored configuration with
+ * cJSON_ParseWithRef() (ezlopi_core_devices.c:630), whose valuestring points
+ * into the payload and ends at a quote.
+ *
+ * So the resolver read "grb\"}]}" where it expected "grb", found a length of 7
+ * rather than 3, and refused all six colour orders on a real board while all
+ * 17,576 strings in section 3 were classified correctly on the host. Measured
+ * from the board itself, printed by temporary instrumentation in device-0009:
+ *
+ *     ALEDDBG: type=0x310 Strmask=0x10 and=0x10 ptr=0x3ffd8564
+ *              str='grb"}]}' from_str=0 order=0
+ *
+ * The type test passed; the string was not a C string. These checks fail
+ * against the resolver as it was before str_value_len was threaded through --
+ * confirmed by reverting that one branch and re-running, which is the only
+ * reason to believe they would catch it again.
+ * ------------------------------------------------------------------------- */
+
+/* The exact 179-byte document the board had stored at flash 0x19000 while it
+ * was refusing the order. color_order is deliberately the LAST key, so the
+ * bytes the resolver over-reads are `"}]}` -- the real failing case, not a
+ * contrived one. */
+#define REF_DOC_HEAD                                 \
+    "{\"cmd\":3,\"chipset\":\"ESP32\",\"dev_detail\":" \
+    "[{\"device_id\":\"1002e001\",\"id_item\":9,"      \
+    "\"dev_name\":\"SP803E Strip\",\"dev_type\":5,"   \
+    "\"gpio1\":16,\"pixel_count\":30,\"rgbw\":false,\"color_order\":\""
+
+static void test_the_parser_the_device_actually_uses(void)
+{
+    s_aledcfg_t cfg;
+    bool verbatim;
+
+    verbatim = resolve_ref_dev0(REF_DOC_HEAD "grb\"}]}", &cfg);
+    CHECK(true == verbatim,
+          "the exact document the board had stored is taken verbatim when "
+          "parsed by reference -- this is the check that was failing on "
+          "hardware while the whole rest of this file passed");
+    CHECK(30 == cfg.pixel_count, "...30 pixels");
+    CHECK(false == cfg.has_white, "...no white channel");
+    CHECK(ALED_ORDER_GRB == cfg.order, "...and GRB, read from a string that is "
+                                       "terminated by a quote rather than a NUL");
+
+    /* All six, because GRB is also the default: accepting it proves nothing on
+     * its own. RGB is the discriminating one -- under the defect it came back
+     * GRB, which is a strip lit in the wrong colours, not a strip that fails. */
+    verbatim = resolve_ref_dev0(REF_DOC_HEAD "rgb\"}]}", &cfg);
+    CHECK((true == verbatim) && (ALED_ORDER_RGB == cfg.order),
+          "\"rgb\" by reference resolves to RGB -- under the defect this "
+          "returned GRB and verbatim=false, i.e. the wrong colours rather than "
+          "a visible failure");
+
+    verbatim = resolve_ref_dev0(REF_DOC_HEAD "brg\"}]}", &cfg);
+    CHECK((true == verbatim) && (ALED_ORDER_BRG == cfg.order), "\"brg\" by reference");
+
+    verbatim = resolve_ref_dev0(REF_DOC_HEAD "rbg\"}]}", &cfg);
+    CHECK((true == verbatim) && (ALED_ORDER_RBG == cfg.order), "\"rbg\" by reference");
+
+    verbatim = resolve_ref_dev0(REF_DOC_HEAD "gbr\"}]}", &cfg);
+    CHECK((true == verbatim) && (ALED_ORDER_GBR == cfg.order), "\"gbr\" by reference");
+
+    verbatim = resolve_ref_dev0(REF_DOC_HEAD "bgr\"}]}", &cfg);
+    CHECK((true == verbatim) && (ALED_ORDER_BGR == cfg.order), "\"bgr\" by reference");
+
+    /* Selective, not blanket: a resolver that accepted everything by reference
+     * would pass all six above. */
+    verbatim = resolve_ref_dev0(REF_DOC_HEAD "zzz\"}]}", &cfg);
+    CHECK((false == verbatim) && (ALED_ORDER_GRB == cfg.order),
+          "\"zzz\" by reference is still refused -- the six checks above are "
+          "only worth anything if a bad order can still be told apart");
+
+    /* A value with another key after it, so the over-read bytes are `","` and
+     * a letter rather than punctuation. The defect refused this one too, but
+     * for a 3-byte value followed by `",` a prefix-matching mutant would not. */
+    verbatim = resolve_ref_dev0(
+        "{\"cmd\":3,\"dev_detail\":[{\"id_item\":9,\"color_order\":\"rbg\","
+        "\"gpio1\":16,\"pixel_count\":12}]}", &cfg);
+    CHECK((true == verbatim) && (ALED_ORDER_RBG == cfg.order) && (12 == cfg.pixel_count),
+          "color_order in the middle of the document, followed by more keys, "
+          "resolves too -- the over-read bytes being punctuation is not what "
+          "makes this work");
+}
+
+/* ------------------------------------------------------------------------- *
+ * 7. The bounded entry point, against buffers no parser was involved in.
+ *
+ * The three ways cjext builds a string give three different relationships
+ * between str_value_len and the real length, documented in the header and
+ * measured in ezlopi_cloud_mqtt_config.c:428-455. One rule has to be right for
+ * all of them: take up to `bound` bytes, stopping early at a NUL -- what
+ * "%.*s" does. These checks are that rule stated as behaviour, built by hand so
+ * they do not depend on any parser agreeing with them.
+ * ------------------------------------------------------------------------- */
+
+static void test_the_bound_is_honoured_both_ways(void)
+{
+    /* No NUL anywhere. Deliberately not a string literal: a literal would
+     * carry a terminator and quietly make this test the same as the old one. */
+    static const char not_terminated[] = {'g', 'r', 'b', '"', '}', ']', '}'};
+    /* An exact length from cJSON_ParseWithRef and cJSON_CreateString. */
+    static const char exact_three[] = {'b', 'g', 'r'};
+    /* An upper bound, which is what cJSON_Parse's allocation_length is: the
+     * value is shorter than the bound and a NUL arrives first. */
+    static const char padded[] = {'r', 'g', 'b', '\0', 'x', 'y'};
+
+    e_aled_order_t order = ALED_ORDER_MAX;
+
+    CHECK(EZPI_aledcfg_order_from_strn(not_terminated, 3u, &order) &&
+              (ALED_ORDER_GRB == order),
+          "a buffer with no NUL in it at all resolves when the bound says 3 -- "
+          "the reference-parser case, reduced to the one fact that matters");
+
+    order = ALED_ORDER_MAX;
+    CHECK(EZPI_aledcfg_order_from_strn(exact_three, 3u, &order) &&
+              (ALED_ORDER_BGR == order),
+          "a bound exactly equal to the length is the ordinary case");
+
+    order = ALED_ORDER_MAX;
+    CHECK(EZPI_aledcfg_order_from_strn(padded, sizeof(padded), &order) &&
+              (ALED_ORDER_RGB == order),
+          "a bound LARGER than the value still resolves, stopping at the NUL -- "
+          "required because cJSON_Parse reports allocation_length, an upper "
+          "bound, so a parsed 3-letter order arrives with str_value_len 4");
+
+    order = ALED_ORDER_MAX;
+    CHECK(false == EZPI_aledcfg_order_from_strn(not_terminated,
+                                                sizeof(not_terminated), &order),
+          "...but a bound that over-states the length of a buffer with no NUL "
+          "is refused rather than guessed at: 'grb\"}]}' is 7 bytes and is not "
+          "an order. This is the defect's own symptom, pinned as behaviour");
+
+    order = ALED_ORDER_MAX;
+    CHECK(false == EZPI_aledcfg_order_from_strn(not_terminated, 2u, &order),
+          "a bound of 2 over \"grb\" is refused -- a prefix compare would have "
+          "matched, and a bound is not permission to read less either");
+
+    order = ALED_ORDER_MAX;
+    CHECK(false == EZPI_aledcfg_order_from_strn(not_terminated, 0u, &order),
+          "a bound of 0 is refused and reads nothing");
+
+    CHECK(false == EZPI_aledcfg_order_from_strn(NULL, 3u, &order),
+          "a NULL string is refused rather than dereferenced");
+
+    CHECK(false == EZPI_aledcfg_order_from_strn(exact_three, 3u, NULL),
+          "a NULL out pointer is refused rather than written through");
+
+    /* The NUL-terminated wrapper must still agree with the bounded form, or
+     * there are two implementations of the table walk to keep in step. */
+    order = ALED_ORDER_MAX;
+    CHECK(EZPI_aledcfg_order_from_str("GBR", &order) && (ALED_ORDER_GBR == order),
+          "the NUL-terminated wrapper still case-folds and still agrees with "
+          "the bounded form it delegates to");
+}
+
 int main(void)
 {
     test_silence_means_what_the_driver_already_did();
@@ -552,6 +777,8 @@ int main(void)
     test_the_white_channel_flag();
     test_wire_len_tracks_the_resolved_shape();
     test_the_keys_are_independent();
+    test_the_parser_the_device_actually_uses();
+    test_the_bound_is_honoured_both_ways();
 
     /* Bare, with no "test_aledcfg: " prefix: "N check(s), M failure(s)" is the
      * shape the suite's aggregate tally reads, and a prefixed line matches
