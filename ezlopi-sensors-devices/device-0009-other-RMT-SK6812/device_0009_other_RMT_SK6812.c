@@ -262,8 +262,19 @@ static ezlopi_error_t __get_cjson_value(l_ezlopi_item_t *item, void *arg)
             }
             else if (ezlopi_item_name_switch == item->cloud_properties.item_name)
             {
+                /* Reported from gpio_in.value, the field the line above
+                ** computes. This used to report gpio_out.value, which is
+                ** written once at setup to false and never again -- the three
+                ** references in this file are this pair and that one
+                ** initialiser -- so the switch item answered false for the
+                ** life of the hub however bright the strip was. Observed over
+                ** the local API: hub.items.list reported
+                ** "name":"switch","value":false while "name":"dimmer" on the
+                ** same strip reported 30. The dimmer branch immediately above
+                ** writes and reads one field, which is what makes this pair
+                ** look like a slip rather than an intent. */
                 item->interface.gpio.gpio_in.value = (0 == sk6812_strip->brightness) ? 0 : 1;
-                EZPI_core_valueformatter_bool_to_cjson(cj_properties, item->interface.gpio.gpio_out.value, item->cloud_properties.scale);
+                EZPI_core_valueformatter_bool_to_cjson(cj_properties, item->interface.gpio.gpio_in.value, item->cloud_properties.scale);
             }
             ret = EZPI_SUCCESS;
         }
