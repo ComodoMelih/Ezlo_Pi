@@ -30,7 +30,32 @@ Anything meant to be re-run by someone else is in [`tests/ci/`](tests/ci/) or
 
 ---
 
-## Unreleased
+## v4.5.0 — 2026-10-22
+
+Baseline is upstream [`v4.4.14`](https://github.com/ezloteam/Ezlo_Pi/releases/tag/v4.4.14)
+(commit `f2a74e5`). The minor bump rather than a patch bump is because this
+release adds capabilities upstream does not have — addressable-LED onboarding
+with a configurable chip family and colour order, local operation, Home
+Assistant integration, a browser install page — alongside the fixes. Nothing
+here removes or renames a public interface, so it is a minor, not a major.
+
+Two things about this release are worth stating where a reader will see them
+before relying on it:
+
+- **It is built and gated, but it is not broadly hardware-tested.** The esp32
+  target compiles clean with zero errors — app `0x19D890`, 17% of the
+  `0x1EFC00` slot free — and the gate set passes. To be exact about what was
+  compiled: the build was run on the commit this release tags, and the tagging
+  commit itself touches only this file, so no source differs between the two.
+  Of the four targets, only esp32 has been flashed and booted on real
+  hardware; the install page says so per target for the same reason. Where an
+  entry below rests on a bench measurement it names the board and what was
+  observed.
+- **Several entries are retractions.** Two defects reported against this
+  firmware during development were not in the firmware at all — they were in
+  the serial reader used to observe it. Those entries were corrected rather
+  than deleted, because a reader who finds the firmware blamed for something
+  it did not do deserves to see that it was withdrawn and why.
 
 ### Memory safety — [sec]
 
