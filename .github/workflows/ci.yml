@@ -396,7 +396,7 @@ jobs:
       - name: No pointer dereferenced above its own NULL test
         run: python3 tests/ci/check_check_after_use.py
 
-      # The CHANGELOG is this fork's main deliverable and carries 525 links
+      # The CHANGELOG is this fork's main deliverable and carries 529 links
       # into the source, 394 with a #L<n> fragment. Line numbers move whenever
       # anything above them is edited, and a link to a renamed file or a line
       # past the end of one renders as ordinary text while reading as
@@ -408,7 +408,7 @@ jobs:
       # resolving line is the *right* line; that is a person's job, and the
       # docstring says so.
       #
-      # The six top-level documents AND docs/ are examined: 585 links in all.
+      # The six top-level documents AND docs/ are examined: 589 links in all.
       # docs/ was outside this check until its links were resolved against
       # each document's own directory, since a citation there is written
       # `../ezlopi-core/...` and reading that from the root reports a correct

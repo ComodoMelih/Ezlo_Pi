@@ -11272,6 +11272,46 @@ enumerators — so the live half of this component was never affected.
   while this is off. Enabling it is two steps, both in
   [`install/README.md`](install/README.md).
 
+- **A prebuilt image can expect a different `ota0` size than this tree's
+  partition table declares, and nothing reports the mismatch.**
+  [`sdkconfig.defaults.esp32`](sdkconfig.defaults.esp32) selects
+  [`ezlopi_partitions_v3_1_4_181_4mb.csv`](ezlopi_partitions_v3_1_4_181_4mb.csv),
+  which sizes `ota0` and `ota1` at `0x1EFC00`. A prebuilt ESP-IDF v5.4.2 image
+  set held in the audit directory carries its own partition table sizing both
+  at `0x1EF000` — 3072 bytes smaller.
+
+  That is the *only* difference between the two tables. `nvs` at `0x9000`,
+  `otadata` at `0x15000`, `phy_init` at `0x17000` and `prov_data` at `0x18000`
+  are identical in offset and size in both, and `ota1` starts at `0x210000`
+  either way, so both `ota0` slots fit the gap and provisioning data sits in
+  the same place regardless of which set a board was flashed from. Measured by
+  decoding both `partition-table.bin` files rather than by reading either CSV
+  (`probe/parttab.sh`).
+
+  The consequence is narrow but worth stating, because it is the kind of thing
+  that is discovered while debugging something else: a slot size is only
+  meaningful against the table actually in flash, and a board flashed from the
+  v5.4.2 set has a 3 KB smaller `ota0` than this tree's build expects. A
+  "does the app fit" calculation that quotes one table while measuring the
+  other build is wrong by exactly that much. Neither number is a typo for the
+  other; both are real, and a bare hex constant cannot say which table it came
+  from, which is how they get crossed in the first place.
+
+- **`esp_app_desc_t` is not a build identity, which is why the checks above
+  compare bytes.** Two app images in the audit directory report the same
+  descriptor — IDF `v4.4.6`, project version `1`, built `Oct 21 2026 12:18:14`
+  — and are different files, with different MD5s. The timestamp comes from
+  `__DATE__`/`__TIME__` in ESP-IDF's own `esp_app_desc.c`, and an incremental
+  build need not recompile that translation unit, so the descriptor can stay
+  frozen while the application around it changes.
+
+  This is recorded here because it retroactively justifies a decision in
+  [`tests/ci/check_merged_bin.py`](tests/ci/check_merged_bin.py) and
+  [`tests/ci/check_install_page.py`](tests/ci/check_install_page.py): both
+  identify images by byte-for-byte comparison and image magic, never by the
+  version strings inside them. Had either been written to trust the
+  descriptor, it would treat those two images as the same build.
+
 ### Documentation — [infra]
 
 - **README rewritten.** Honest licensing section (EASL is source-available,
@@ -11372,8 +11412,8 @@ enumerators — so the live half of this component was never affected.
 - **The citations in these documents are now checked**, by
   [`check_doc_citations.py`](tests/ci/check_doc_citations.py) — the twentieth
   check and the seventeenth the `hygiene` job invokes. This file is the main
-  thing this fork produces, and the examined documents carry 585 markdown
-  links, 411 of them with a `#L<n>` fragment — 525 and 394 of those are in this
+  thing this fork produces, and the examined documents carry 589 markdown
+  links, 411 of them with a `#L<n>` fragment — 529 and 394 of those are in this
   file alone. (This said 310 *links* when the entry was written and 459 before
   `docs/` was covered; it is re-measured whenever a paragraph below quotes it,
   and whenever an entry added above adds citations of its own.) Line

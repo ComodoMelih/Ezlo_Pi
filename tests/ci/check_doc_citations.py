@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS
 
-The CHANGELOG is this fork's main deliverable and it carries 525 links into the
+The CHANGELOG is this fork's main deliverable and it carries 529 links into the
 source, 394 of them with a `#L<n>` line fragment. (It said 230-odd when this
 was written and 431 until docs/ was covered; the count is re-measured whenever
 something here quotes it, because a stale number in the prose of a staleness
