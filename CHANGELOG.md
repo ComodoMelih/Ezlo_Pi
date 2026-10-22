@@ -6397,7 +6397,7 @@ flashed.**
   or refused and nothing more. That mapping is pinned on the host, and the
   colours themselves still need eyes on a strip.
 
-- **The hub is on WiFi, which is as far as hardware has taken this.** Serial
+- **The hub is on WiFi, and the local API behind it now answers.** Serial
   `cmd:2` on a board with no stored network answered
   `{"cmd":2,"status_write":1,"status":1}` — stored *and* associated. On the next
   boot `ERROR : WiFi Details not set !` was gone, the board printed a DHCP
@@ -6406,13 +6406,65 @@ flashed.**
   numbers were never observed to disagree, so the `status_write: 1` with
   `status: 0` case is read from the handler and not measured.
 
-  **Nothing has connected to the hub on 17001.** The port and the `_ezlo._tcp`
-  mDNS advertisement are read from the source; no client has resolved that name
-  or opened that socket, and `hub.ezlopi.config.set` has never been called on
-  real hardware by any route. The board was unplugged before that could be
-  taken further — the credentials are in NVS and persist, so it resumes rather
-  than restarts. Recorded because a WiFi association is easy to mistake for a
-  working local API, and they are not the same claim.
+  **A client has now connected on 17001 and driven the strip's items.** This
+  supersedes the entry that stood here, which said nothing ever had; it was
+  accurate when written. A client on the same subnet opened plain
+  `ws://<hub>:17001` — there is no TLS on that port, `httpd_start()` and not
+  `httpd_ssl_start()` at `ezlopi_service_ws_server.c:810` — logged in with
+  `hub.offline.login.ui` and `{user, token}`, and was answered
+  `{"result":{},"error":null}`. `hub.info.get`, `hub.devices.list` and
+  `hub.items.list` all replied; the strip came back as one device with six
+  items, `reachable` and `ready`. `hub.item.value.set` then moved `dimmer` from
+  100 to 10 to 30 and set `rgbcolor` five times, and the hub's own readback
+  followed: `{"red":12,"green":200,"blue":37}` came back as `#0cc825`, which is
+  a round trip out of the pixel buffer and back through the colour-order
+  mapping.
+
+  **Two limits on that, because `"error":null` is weaker evidence than it
+  looks.** `EZPI_items_set_value_v3` (`ezlopi_cloud_items.c:183`) adds an empty
+  result object and discards the item function's return value, so a successful
+  reply means the method was *dispatched* and says nothing about whether the
+  driver ran. What showed the driver ran was the serial log captured alongside:
+  one `item_id:` trace per call and no `sk6812: could not fill the strip` from
+  the refused-fill branch (`device_0009_other_RMT_SK6812.c:310`). The colour
+  round trip is also symmetric — out through the order mapping and back through
+  the same one — so it cannot detect an inverted mapping and is not evidence
+  the wire order is right. **Nothing has been seen to light**; that still needs
+  eyes on a strip. `hub.ezlopi.config.set` has still never been called on real
+  hardware by any route.
+
+- **`hub.info.get` reports upstream's identity no matter who built the image.**
+  Every field under `build` comes from literals checked into
+  `ezlopi-util/ezlopi-util-version/ezlopi_util_version.h` — `VERSION_STR`
+  `"4.4.14"`, `DEVELOPER "lomas.subedi@ezlo.com"`, `COMMIT_HASH "df41d2a1…"`,
+  `CURRENT_BRANCH "development"`, `COMPILE_TIME "2025-01-31T16:37:13+0545"` —
+  and nothing regenerates them. A hub built from this branch therefore answers
+  `hub.info.get` claiming to be upstream's 2025-01-31 development build, which
+  is what the test board did. **This also corrects a claim made earlier in this
+  work**: "shipped firmware v4.4.14" was recorded as a fact about the board,
+  when it was only this string being echoed back and was never evidence of what
+  was flashed. For a product meant to be supportable in the field, a hub that
+  cannot report which firmware it is running is a defect, not a cosmetic one.
+
+  What the running image actually is was established another way. Our branch
+  compiles string literals upstream does not have — `color_order`,
+  `pixel_count`, and our own source paths via the `TRACE` macros' `__FILE__` —
+  and the live app partition read back from the chip contains them, while both
+  `backup/stock_v4.4.14_full_4mb.bin` and the archive build in `firmware/`
+  contain none of them. So the image is a build of this branch. It is *not*
+  byte-identical to the readback taken on 2026-10-21: 222 of 1,693,456 bytes
+  differ, in four clusters — 32 bytes at `0xb0` (the app descriptor's
+  `app_elf_sha256`), about 150 bytes of Xtensa code near `0xf13e0`, 15 more just
+  after it, and 33 at the tail (the appended image digest). The descriptor's
+  `COMPILE_TIME`, project name and IDF version are identical in both, because
+  `esp_app_desc.o` can be reused across builds, so the descriptor cannot tell
+  them apart. The code difference is the right size and shape for the
+  `color_order` length fix, but **which of the two builds is on the chip was not
+  determined**, and with the stored configuration it cannot be: the board's
+  config has `color_order: "grb"`, and `"grb"` is also the order the broken
+  parser falls back to when it refuses the value, so both builds drive the strip
+  identically here. Distinguishing them would need the stored order changed to
+  something other than the fallback.
 
 - **No schema change was needed, and that is by prior design rather than luck.**
   `ezlopi-util-devcfgval` is deliberately permissive — it rejects only shapes
