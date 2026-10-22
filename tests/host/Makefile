@@ -220,7 +220,18 @@ $(BUILD)/test_aledonboard: ALEDONBOARD_CFLAGS := -std=c99 -O1 -g \
                                                  -Istubs-aledonboard \
                                                  -DDOC_PATH='"../../docs/addressable-led-onboarding.md"' \
                                                  $(SANITIZERS)
+#
+# EZLOPI_USER_CONFIG.h is a prerequisite but deliberately NOT an include: the
+# test reads it as text at runtime for EZPI_CORE_WIFI_PASS_CHAR_MIN_LEN, which
+# is what the firmware refuses a short WiFi password against. That header
+# includes driver/uart.h and ezlopi_core_heap.h and cannot be compiled on a
+# host, and -I$(STUBS_DIR) above would resolve a plain #include to the host
+# stand-in instead -- which would leave the document checked against a number
+# typed into this suite rather than the firmware's. Naming it here is what makes
+# raising the minimum re-run the test, instead of leaving a stale binary that
+# still agrees with the document.
 $(BUILD)/test_aledonboard: test_aledonboard.c \
+                           ../../ezlopi-user-config/EZLOPI_USER_CONFIG.h \
                            $(ALEDCFG_DIR)/ezlopi_util_aledcfg.c \
                            $(ALED_DIR)/ezlopi_util_aled.c \
                            $(DEVCFGVAL_DIR)/ezlopi_util_devcfgval.c \

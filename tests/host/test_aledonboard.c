@@ -16,7 +16,7 @@
  * file: a copy is the thing that drifts, and two copies that agree with each
  * other and not with the firmware would pass.
  *
- * WHY THREE BLOCKS
+ * WHY FOUR BLOCKS
  *
  * The doc carries the configuration, the shape it claims to resolve to, and
  * the same configuration again with a `cmd` member in front of it for the
@@ -25,6 +25,15 @@
  * itself, which means this file holds no expected numbers either. Change 60 to
  * 120 in one block and leave the others, and this goes red -- which is the
  * point.
+ *
+ * The fourth block is different in kind: it is the WiFi line (`cmd:2`) the doc
+ * tells a reader to send before the websocket route, because that route cannot
+ * be reached on a factory-fresh hub -- it has no network. That block is not a
+ * copy of anything in the document, so there is nothing to compare it against;
+ * it is checked against the firmware directly, member by member. See the
+ * comment on test_the_wifi_block_is_what_the_firmware_accepts() for what and
+ * why, including the one check whose value is read out of
+ * ezlopi-user-config/EZLOPI_USER_CONFIG.h at runtime rather than included.
  *
  * The third block is checked for two things beyond being the same document,
  * and both of them were wrong in this doc before the block existed: it named
@@ -54,7 +63,10 @@
  * Any of: the doc's example would not be stored by this firmware; it does not
  * resolve to what the doc says; the serial route's block names a command other
  * than set-config, nests the configuration under `data`, or has stopped being
- * a copy of the worked example; a marker or a fenced block is missing; the file
+ * a copy of the worked example; the WiFi block names a command other than
+ * EZPI_UART_CMD_WIFI, nests under `data`, loses either credential key, shows a
+ * password this firmware would refuse on length, or carries a member the
+ * handler does not read; a marker or a fenced block is missing; either file
  * itself cannot be read. All of those are reported distinctly, because "the doc
  * is wrong" and "this test cannot find the doc" need different fixes and a
  * silent skip would look like a pass in both cases.
@@ -97,10 +109,38 @@
  * every one of them.
  *
  * Deleting the serial marker is worth singling out, because it is the mutation
- * that reports 14 checks where the doc reports 17: four checks stop running
+ * that reports 21 checks where the doc reports 24: four checks stop running
  * and the extraction counts one failure in their place. A test that treated a
  * missing marker as "nothing to check" would have reported a smaller green,
  * and a smaller green is indistinguishable from a pass in a suite tally.
+ *
+ * THE WIFI BLOCK'S OWN MUTANTS
+ *
+ * Added later, and swept the same way -- copies under /tmp with DOC_PATH and
+ * USERCONFIG_PATH repointed, so the worktree is never edited. The document
+ * reports 24 checks and 0 failures. Nine mutants, all killed: cmd 2 -> 3 (the
+ * transposition, since 2 and 3 are adjacent in the enum); the credentials
+ * nested under `data`; the password cut to 3 characters; an empty ssid; `ssid`
+ * renamed to `network`; a `dev_detail` pasted in beside the credentials; the
+ * WiFi marker deleted (18 checks, not a smaller green); the serial marker
+ * deleted (21); and -- the one that matters most -- the real, unmutated
+ * document compiled against a header copy whose
+ * EZPI_CORE_WIFI_PASS_CHAR_MIN_LEN reads 32 instead of 8. That last one went
+ * red, reporting an 18-character example against a 32-character minimum, which
+ * is the evidence that the minimum is genuinely read out of the firmware's
+ * header: had an 8 been typed into this file, that mutant would have been
+ * green. A tenth, a header with the constant deleted entirely, is also red --
+ * a renamed constant must not become a skipped check.
+ *
+ * Two green controls, and one of them corrected an expectation of mine rather
+ * than finding a defect. A different but still-valid placeholder password stays
+ * green, which is what shows the check tests the length and not the literal
+ * string. And capitalising the key to "SSID" stays green: it was written
+ * expecting a kill, and cJSON_GetObjectItem passes case_sensitive = false
+ * (cjext.c:2444), so the firmware accepts it too. The check was right and the
+ * mutant's premise was wrong. A check stricter than the firmware would be a
+ * worse defect than the one it pretended to catch, so it is kept as a green
+ * control instead of being "fixed".
  *
  * A test that can only pass is not a test.
  */
@@ -129,9 +169,16 @@
 #define DOC_PATH "../../docs/addressable-led-onboarding.md"
 #endif
 
+/* Also relative to tests/host. Read as text rather than included, for the
+ * reason set out above read_define_u(). */
+#ifndef USERCONFIG_PATH
+#define USERCONFIG_PATH "../../ezlopi-user-config/EZLOPI_USER_CONFIG.h"
+#endif
+
 #define MARKER_CONFIG "<!-- machine-checked: strip-config -->"
 #define MARKER_SHAPE "<!-- machine-checked: strip-config-resolves-to -->"
 #define MARKER_SERIAL "<!-- machine-checked: strip-config-over-serial -->"
+#define MARKER_WIFI "<!-- machine-checked: wifi-over-serial -->"
 
 /* The region the config is stored in: 0x1000, as EZLOPI_FINFO_LEN_EZLOPI_CONFIG_JSON.
  * Passed so the example is checked against the real size bound too, not just
@@ -152,11 +199,15 @@ static int failures = 0;
         }                                                         \
     } while (0)
 
-/* Read the whole doc. Returns NULL and counts a failure on any problem, so a
- * missing or unreadable file is a red test rather than zero checks run. */
-static char *slurp_doc(void)
+/* Read a whole file. Returns NULL and counts a failure on any problem, so a
+ * missing or unreadable file is a red test rather than zero checks run.
+ *
+ * Takes a path because this test now reads two files out of the tree: the
+ * document it checks, and the firmware header the minimum password length is
+ * read from. Both are fixtures, and neither may be unreadable silently. */
+static char *slurp(const char *path)
 {
-    FILE *const f = fopen(DOC_PATH, "rb");
+    FILE *const f = fopen(path, "rb");
     long size;
     char *buf;
     size_t got;
@@ -165,8 +216,8 @@ static char *slurp_doc(void)
     {
         checks++;
         failures++;
-        printf("FAIL  cannot open %s -- this test cannot find the document it checks\n",
-               DOC_PATH);
+        printf("FAIL  cannot open %s -- this test cannot find a file it checks against\n",
+               path);
         return NULL;
     }
 
@@ -174,7 +225,7 @@ static char *slurp_doc(void)
     {
         checks++;
         failures++;
-        printf("FAIL  cannot size %s\n", DOC_PATH);
+        printf("FAIL  cannot size %s\n", path);
         fclose(f);
         return NULL;
     }
@@ -185,7 +236,7 @@ static char *slurp_doc(void)
     {
         checks++;
         failures++;
-        printf("FAIL  out of memory reading %s\n", DOC_PATH);
+        printf("FAIL  out of memory reading %s\n", path);
         fclose(f);
         return NULL;
     }
@@ -194,6 +245,64 @@ static char *slurp_doc(void)
     buf[got] = '\0';
     fclose(f);
     return buf;
+}
+
+/* Read `#define <name> <digits>` out of an already-slurped C header.
+ *
+ * WHY THIS IS NOT A #include, AND NOT A RETYPED 8
+ *
+ * The wanted constant is EZPI_CORE_WIFI_PASS_CHAR_MIN_LEN, which lives in
+ * ezlopi-user-config/EZLOPI_USER_CONFIG.h. That header cannot go on a host
+ * include path: it includes "driver/uart.h" and "ezlopi_core_heap.h", neither
+ * of which exists off an ESP-IDF build. The host suite has a stand-in at
+ * stubs/EZLOPI_USER_CONFIG.h, and -I$(STUBS_DIR) is on this test's include
+ * path -- so a plain #include here would silently resolve to the stub, and the
+ * check would be comparing the document against a number typed into the test
+ * suite rather than against the firmware's. That is the exact failure this
+ * whole file exists to prevent, one level up.
+ *
+ * Typing 8 in here has the same defect: the check would then agree with my
+ * typo instead of with the firmware. So the real header is read as text, the
+ * same way the document is. Raising the minimum in the firmware makes this test
+ * re-read it; a document whose example password no longer clears it goes red.
+ *
+ * Returns false and counts a failure if the define is absent or unparseable --
+ * a renamed constant must be a red test, not a skipped check. */
+static bool read_define_u(const char *header, const char *name, unsigned long *out)
+{
+    const char *at = (NULL != header) ? strstr(header, name) : NULL;
+
+    while (NULL != at)
+    {
+        const char *p = at + strlen(name);
+
+        /* Require the match to be the whole identifier and to be a #define of
+         * it, not a mention inside a comment or a longer name. */
+        if ((at == header) || ('\n' == at[-1]) || (' ' == at[-1]) || ('\t' == at[-1]))
+        {
+            if ((' ' == *p) || ('\t' == *p))
+            {
+                while ((' ' == *p) || ('\t' == *p))
+                {
+                    p++;
+                }
+                if (('0' <= *p) && ('9' >= *p))
+                {
+                    *out = strtoul(p, NULL, 10);
+                    return true;
+                }
+            }
+        }
+        at = strstr(at + 1, name);
+    }
+
+    checks++;
+    failures++;
+    printf("FAIL  no numeric '#define %s' in %s -- the constant this test reads"
+           " has been renamed or moved, so the document's example password is"
+           " no longer being checked against the firmware\n",
+           name, USERCONFIG_PATH);
+    return false;
 }
 
 /* Pull the fenced JSON block that follows `marker`.
@@ -481,21 +590,133 @@ static void test_the_serial_example_is_the_same_document(cJSON *serial, cJSON *c
     cJSON_Delete(__FUNCTION__, stripped);
 }
 
+/* The WiFi line the doc tells a user to send before the websocket route.
+ *
+ * This block is NOT a copy of the worked example and is not compared against
+ * it -- it is a different command with a different payload, and the only
+ * reason it is in this document at all is that the `hub.ezlopi.config.set`
+ * route cannot be reached until the hub is on a network.
+ *
+ * Checked against the firmware rather than against itself:
+ *
+ *   cmd        EZPI_UART_CMD_WIFI, from the same enum as SET_CONFIG. 2 and 3
+ *              are adjacent in it, which is exactly the pair a reader can
+ *              transpose, and sending a configuration to the WiFi handler or
+ *              credentials to the config handler both look like a hub that
+ *              ignored you.
+ *   ssid/pass  the key spellings from ezlopi_cloud_keywords.c, which is what
+ *              ezpi_service_uart_set_wifi() looks up. Not retyped here.
+ *
+ *              Looked up with cJSON_GetObjectItem, the same call the handler
+ *              makes -- and that one is case-INsensitive in cjext
+ *              (cjext.c:2444 passes case_sensitive = false; the case-sensitive
+ *              behaviour is the separate cJSON_GetObjectItemCaseSensitive).
+ *              So a document spelling the key "SSID" is accepted here, and a
+ *              mutant that capitalised it stayed green. That is correct rather
+ *              than a gap: the firmware would accept it too, and a check
+ *              stricter than the firmware would be asserting a rule the
+ *              product does not have. What it does catch is a key the lookup
+ *              cannot find at all, which the `network` mutant confirms.
+ *   top level  same as cmd:3 and unlike cmd:7 -- the handler reads ssid and
+ *              pass off the received root and never looks for `data`.
+ *   length     the example password must be one this firmware would accept.
+ *              ezpi_service_uart_set_wifi() refuses a password shorter than
+ *              EZPI_CORE_WIFI_PASS_CHAR_MIN_LEN *before* trying to associate,
+ *              so a doc showing a 5-character placeholder would be a doc whose
+ *              example is rejected on length with no attempt made. The minimum
+ *              is read out of the firmware's own header at runtime.
+ *
+ * The example is also required to carry nothing but those three members. A
+ * reader who pastes `dev_detail` in beside the credentials gets a document
+ * that is accepted, stores WiFi, and silently configures no devices -- the
+ * handler simply does not look at anything else. */
+static void test_the_wifi_block_is_what_the_firmware_accepts(cJSON *wifi,
+                                                             const char *userconfig)
+{
+    cJSON *const cj_cmd = cJSON_GetObjectItem(__FUNCTION__, wifi, ezlopi_cmd_str);
+    cJSON *const cj_data = cJSON_GetObjectItem(__FUNCTION__, wifi, ezlopi_data_str);
+    cJSON *const cj_ssid = cJSON_GetObjectItem(__FUNCTION__, wifi, ezlopi_ssid_str);
+    cJSON *const cj_pass = cJSON_GetObjectItem(__FUNCTION__, wifi, ezlopi_pass_str);
+    unsigned long min_len = 0ul;
+    int members = 0;
+    cJSON *it;
+
+    CHECK((NULL != cj_cmd) && cJSON_IsNumber(cj_cmd),
+          "the wifi block carries a numeric cmd");
+
+    if ((NULL != cj_cmd) && cJSON_IsNumber(cj_cmd))
+    {
+        if (EZPI_UART_CMD_WIFI != cj_cmd->valueint)
+        {
+            printf("      doc says cmd %d, EZPI_UART_CMD_WIFI is %d"
+                   " (EZPI_UART_CMD_SET_CONFIG is %d)\n",
+                   cj_cmd->valueint, (int)EZPI_UART_CMD_WIFI,
+                   (int)EZPI_UART_CMD_SET_CONFIG);
+        }
+        CHECK(EZPI_UART_CMD_WIFI == cj_cmd->valueint,
+              "the wifi block's cmd is EZPI_UART_CMD_WIFI, from the firmware's enum");
+    }
+
+    CHECK(NULL == cj_data,
+          "the wifi block has no data wrapper -- ssid and pass sit at the top level");
+
+    CHECK((NULL != cj_ssid) && cJSON_IsString(cj_ssid) &&
+              (NULL != cj_ssid->valuestring) && ('\0' != cj_ssid->valuestring[0]),
+          "the wifi block carries a non-empty string ssid, under the firmware's own key");
+
+    CHECK((NULL != cj_pass) && cJSON_IsString(cj_pass) &&
+              (NULL != cj_pass->valuestring),
+          "the wifi block carries a string pass, under the firmware's own key");
+
+    if (read_define_u(userconfig, "EZPI_CORE_WIFI_PASS_CHAR_MIN_LEN", &min_len) &&
+        (NULL != cj_pass) && cJSON_IsString(cj_pass) && (NULL != cj_pass->valuestring))
+    {
+        const size_t len = strlen(cj_pass->valuestring);
+
+        if (len < (size_t)min_len)
+        {
+            printf("      the example password is %lu character(s); this firmware"
+                   " refuses anything under %lu without trying to associate\n",
+                   (unsigned long)len, min_len);
+        }
+        CHECK(len >= (size_t)min_len,
+              "the example password clears EZPI_CORE_WIFI_PASS_CHAR_MIN_LEN,"
+              " read from the firmware's header");
+    }
+
+    for (it = wifi->child; NULL != it; it = it->next)
+    {
+        members++;
+    }
+    if (3 != members)
+    {
+        printf("      the wifi block has %d member(s); it must carry cmd, ssid and"
+               " pass and nothing else\n",
+               members);
+    }
+    CHECK(3 == members,
+          "the wifi block carries only cmd, ssid and pass -- the handler reads nothing else");
+}
+
 int main(void)
 {
-    char *doc = slurp_doc();
+    char *doc = slurp(DOC_PATH);
+    char *userconfig = slurp(USERCONFIG_PATH);
     char *config_block = NULL;
     char *shape_block = NULL;
     char *serial_block = NULL;
+    char *wifi_block = NULL;
     cJSON *config = NULL;
     cJSON *shape = NULL;
     cJSON *serial = NULL;
+    cJSON *wifi = NULL;
 
     if (NULL != doc)
     {
         config_block = extract_block(doc, MARKER_CONFIG);
         shape_block = extract_block(doc, MARKER_SHAPE);
         serial_block = extract_block(doc, MARKER_SERIAL);
+        wifi_block = extract_block(doc, MARKER_WIFI);
     }
 
     if (NULL != config_block)
@@ -509,6 +730,18 @@ int main(void)
     if (NULL != serial_block)
     {
         serial = parse_block(serial_block, "strip-config-over-serial");
+    }
+    if (NULL != wifi_block)
+    {
+        wifi = parse_block(wifi_block, "wifi-over-serial");
+    }
+
+    /* Outside the `if (NULL != config)` below on purpose: the WiFi block is not
+     * derived from the worked example, so a broken config block must not take
+     * these checks silently out of the run. */
+    if (NULL != wifi)
+    {
+        test_the_wifi_block_is_what_the_firmware_accepts(wifi, userconfig);
     }
 
     if (NULL != config)
@@ -541,9 +774,15 @@ int main(void)
     {
         cJSON_Delete(__FUNCTION__, serial);
     }
+    if (NULL != wifi)
+    {
+        cJSON_Delete(__FUNCTION__, wifi);
+    }
     free(config_block);
     free(shape_block);
     free(serial_block);
+    free(wifi_block);
+    free(userconfig);
     free(doc);
 
     /* Zero checks is a failure in its own right: it means the extraction never
