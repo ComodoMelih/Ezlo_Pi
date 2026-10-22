@@ -209,17 +209,43 @@ other two let the storer refuse the write.
   cap sits where the strip stops looking animated on one RMT channel. No board
   has been driven at it.
 
-## Not verified on hardware
+## What is verified on hardware, and what is not
 
-**No board has driven a multi-pixel strip.** The configuration parsing is
-host-tested and the driver compiles clean on all four CI targets, c3 included,
-but the actuation — RMT timing at length, `rgbw` producing a fourth byte per
-pixel, the reset gap at the cap — has never run on real hardware. Four green
-builds remove "it might not even build there"; they say nothing about whether
-the strip lights.
+Split, because these two halves are now in different states and lumping them
+together was how a real defect stayed hidden behind a green host suite.
+
+**Verified on an ESP32 over serial `cmd:3`.** A board stores the document
+above, and on the next boot the resolver reads all three keys from it: all six
+`color_order` names are accepted, `"zzz"` and `"grbx"` are refused, and a
+refused order leaves the good `pixel_count` in place rather than taking it down
+with it. The refusal is reported as `sk6812: config not taken verbatim; using N
+pixel(s)` on the serial log, so a jig can tell the two apart.
+
+That took finding a defect that no host test could have caught. A device
+configuration reaches the driver through `cJSON_ParseWithRef()`, whose strings
+point into the stored payload and end at a quote rather than a NUL, so reading
+`color_order` as a C string saw `grb"}]}` and **every colour order was refused
+on a real board** while all 17,576 three-letter strings were classified
+correctly on the host. If you are running firmware older than that fix, the
+symptom is that warning line on every boot with a perfectly valid document.
+
+**Not verified: anything that lights.** No board has driven a multi-pixel strip.
+The actuation — RMT timing at length, `rgbw` producing a fourth byte per pixel,
+the reset gap at the cap — has never run on real hardware, and neither has the
+mapping: that `"rbg"` is *accepted* is measured, that it puts red where red goes
+is not. The serial log reports accepted or refused and nothing more, so this
+half needs eyes on a strip rather than a better test.
 
 Treat the pixel counts and timings above as what the code computes, not as
 measurements.
+
+**The practical recipe, since the serial route tells you nothing.** Send the
+`cmd:3` line, wait for `status_write: 1`, then reset the board — the
+configuration is read in `__prepare()` at boot, so nothing you sent is in
+effect until then. Send *after* the application is up, not straight after a
+reset: the UART control channel does not exist in the bootloader, and a line
+written too early is swallowed with no error, which looks exactly like a
+refused document.
 
 ## How this file is checked
 
