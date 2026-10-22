@@ -58,10 +58,10 @@
  *                          C++ Declaration Wrapper
  *******************************************************************************/
 
-#ifdef __cpluplus
+#ifdef __cplusplus
 extern "C"
 {
-#endif // __cpluplus
+#endif // __cplusplus
     /*******************************************************************************
      *                          Type & Macro Declarations
      *******************************************************************************/
@@ -345,9 +345,9 @@ extern "C"
      */
     int EZPI_ble_service_get_ble_mac(uint8_t mac[6]);
 
-#ifdef __cpluplus
+#ifdef __cplusplus
 }
-#endif // __cpluplus
+#endif // __cplusplus
 
 #endif // CONFIG_EZPI_BLE_ENABLE
 
