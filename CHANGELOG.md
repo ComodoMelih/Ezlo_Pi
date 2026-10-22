@@ -6122,13 +6122,33 @@ flashed.**
   to do it. `is_rgbw` had never been assigned anywhere in the firmware, so this
   is the first time the white channel of an SK6812-RGBW is reachable at all.
 
-  **The resolver is verified on hardware; the strip is not.** A board now
-  accepts all three keys and all six colour orders, and refuses a bad one —
-  see the `color_order` entry below, which is where that was measured and why
-  it took a rebuild to get. But no board has yet *driven* a multi-pixel strip,
-  and that is the half of the fix no host test and no UART log can reach — it
-  needs an RMT peripheral, the IDF, and something to look at. What is also
-  verified is a build on **all four CI
+  **Both halves are now verified on hardware.** A board accepts all three keys
+  and all six colour orders, and refuses a bad one — see the `color_order`
+  entry below, which is where that was measured and why it took a rebuild to
+  get. And a board has now *driven* a multi-pixel strip: with
+  `{"gpio1":16,"pixel_count":30,"rgbw":false,"color_order":"grb"}` stored in
+  `prov_data`, an ESP32-D0WD-V3 running this tree lit the whole strip on the
+  boot fill — the observer reported "around 30, all white", i.e. all of them
+  rather than a prefix, which is precisely the one-LED defect not recurring —
+  and then rendered **red** when `20ec6000` was set to `{255,0,0}` over the
+  local API with `20ec6001` at 10.
+
+  Those are two separate results and neither substitutes for the other. The
+  full-length white fill is the first hardware evidence for `pixel_count`,
+  which until then had only ever been "it compiles"; before this the claim
+  rested on a host test and a buffer size. Red rendering red is the only test
+  that can catch a permuted `color_order`, because the API round trip is
+  symmetric through the same mapping it would need to detect — and
+  `hub.item.value.get` does not exist on this firmware
+  (`rpc.method.notfound`), so there is no read-back path to lean on even in
+  principle. An observer was required for both.
+
+  Honest about the count: "around 30" is an eyeball, not a tally. What it
+  establishes is "the whole strip, not the first LED", which is the claim being
+  made; it is not independent confirmation that the strip has exactly 30
+  pixels.
+
+  What is also verified is a build on **all four CI
   targets** with zero diagnostics in either touched file, and `nm` on each
   linked ELF showing `EZPI_aledcfg_from_json` and the order parser present, so
   the driver's call survives `--gc-sections` rather than being compiled and
@@ -6394,8 +6414,17 @@ flashed.**
   which independently confirms the per-field fallback: a bad order does not take
   the good count down with it. What this does **not** show is the mapping —
   whether `"rbg"` lights the strip in RBG — because the board reports accepted
-  or refused and nothing more. That mapping is pinned on the host, and the
-  colours themselves still need eyes on a strip.
+  or refused and nothing more. That mapping is pinned on the host.
+
+  **One point on the mapping has since been checked by eye.** With `"grb"`
+  stored, setting `{255,0,0}` renders **red** on the strip, so the configured
+  order is the order on the wire for at least that permutation, and the
+  firmware is not silently transposing channels. That is one cell of the table,
+  not the table: the other five permutations remain host-only, and confirming
+  them would mean storing each in turn and rebooting, since the order is
+  resolved once in `__prepare()`. Worth stating because red-renders-red is
+  easy to over-read as "the colour order is verified" when what it rules out is
+  specifically a permutation that moves the red channel.
 
 - **The hub is on WiFi, and the local API behind it now answers.** Serial
   `cmd:2` on a board with no stored network answered
@@ -6429,8 +6458,17 @@ flashed.**
   the refused-fill branch (`device_0009_other_RMT_SK6812.c:310`). The colour
   round trip is also symmetric — out through the order mapping and back through
   the same one — so it cannot detect an inverted mapping and is not evidence
-  the wire order is right. **Nothing has been seen to light**; that still needs
-  eyes on a strip. `hub.ezlopi.config.set` has still never been called on real
+  the wire order is right.
+
+  **Both of those limits held, and the strip has since been seen to light.** An
+  observer watched the full strip come up white on the boot fill and then go
+  **red** for `{255,0,0}` sent to `20ec6000` over this same socket, with
+  `20ec6001` at 10. So the dispatch-versus-driven gap and the symmetry of the
+  round trip were both real limits rather than pedantry — they are exactly why
+  the eventual evidence had to be a person looking at the strip, and why months
+  of green API replies never amounted to it. `hub.item.value.get` turns out not
+  to exist at all (`rpc.method.notfound`), which closes off the read-back route
+  permanently. `hub.ezlopi.config.set` has still never been called on real
   hardware by any route.
 
 - **`hub.info.get` reports upstream's identity no matter who built the image.**
@@ -11647,20 +11685,26 @@ Listed because a changelog that only mentions what was finished is misleading.
   production jig would use, and the one with no signal at all. Narrowed rather
   than deleted because the gap is real; it was the scope that was wrong.
 
-  **No board has driven a multi-pixel strip.** The parser is host-tested and
-  the driver compiles clean on all four CI targets, c3 included, but the
-  actuation — RMT timing at length, `is_rgbw` producing a fourth byte per
-  pixel, the `>=50 µs` reset gap at 2048 pixels — has never run on hardware.
-  Compiling on four targets says nothing about any of that; it only removes
-  "it might not even build there" from the list. The 2048 cap in particular is
-  derived from the wire protocol on paper and has not been observed to be
-  drivable.
+  **A 30-pixel strip has now been driven; the rest of the range has not.** On
+  an esp32 board a `pixel_count: 30` strip lit along its whole length on the
+  boot fill and took a colour change over the local API, so RMT timing at
+  length is observed to work at 30 and the one-LED defect is observed not to
+  recur. What that does not reach: `is_rgbw` producing a fourth byte per pixel
+  (this strip is configured `rgbw: false`, so the previously-unreachable white
+  channel is still unreachable in practice), the `>=50 µs` reset gap, and the
+  2048 cap — which remains derived from the wire protocol on paper and has not
+  been observed to be drivable. One length is a data point, not a range; and
+  the three other CI targets still have nothing but a clean compile, which only
+  removes "it might not even build there" from the list.
 
-  **No strip has been lit in any colour order, `grb` included.** That closed
-  gap above is closed *in source*. The permutation is swept on the host and the
-  calls are in all four ELFs; which physical LED changes colour is unobserved,
-  and so is whether the previously-unreachable fourth byte of an RGBW strip
-  does anything.
+  **One colour order has been lit — `grb` — and the other five have not.** With
+  `grb` stored, `{255,0,0}` renders red, so the configured order is the wire
+  order for at least that permutation and the firmware is not transposing the
+  red channel. The remaining five are swept on the host and present in all four
+  ELFs, but which physical LED changes colour under `rbg`, `bgr` and the rest is
+  unobserved, and so is whether the fourth byte of an RGBW strip does anything.
+  Checking the others means storing each in turn and rebooting, because the
+  order is resolved once in `__prepare()`.
 
   **A latent off-by-one in the vendored `led_strip` component is recorded and
   not patched.** `led_strip_set_pixel()` validates `num <= strip->length` while

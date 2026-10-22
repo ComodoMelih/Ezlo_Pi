@@ -346,16 +346,37 @@ colour round trip goes out through the order mapping and back in through the
 same mapping, so it is symmetric: an inverted mapping would round trip just as
 cleanly. It cannot be used as evidence the wire order is right.
 
-**Not verified: anything that lights.** No board has been *seen* to drive a
-multi-pixel strip. The driver has now run on hardware for real — the fill was
-not refused and the flush was reached — but the actuation past that point is
-still unmeasured: RMT timing at length, `rgbw` producing a fourth byte per
-pixel, the reset gap at the cap. The mapping is unmeasured too, and for the same
-reason as above rather than for want of a test to write: that `"rbg"` is
-*accepted* is measured, that it puts red where red goes is not. This half needs
-eyes on a strip. The cheap version of that check is to store `color_order` as
-`"grb"`, set `rgbcolor` to `{"red":255,"green":0,"blue":0}`, and look — red
-means the mapping is right, green means the two channels are swapped.
+**Verified: a 30-pixel strip lights, in `grb`.** A board with
+`{"gpio1":16,"pixel_count":30,"rgbw":false,"color_order":"grb"}` stored lit
+along its whole length on `__init()`'s boot fill, and then rendered **red** for
+`rgbcolor = {"red":255,"green":0,"blue":0}` sent to `20ec6000` over the local
+API with the dimmer at 10. So RMT timing works at that length, the one-LED
+defect does not recur, and the configured order is the wire order for at least
+that permutation.
+
+The check that produced this is the one prescribed in the paragraph that used
+to be here — store `"grb"`, set pure red, look; red means the mapping is right,
+green means the two channels are swapped. It is recorded because it earned its
+keep: every API-level signal had been green for a long time while the strip was
+dark, and only a person looking at it could tell the difference.
+
+**Still not verified, and narrowed rather than closed.** One length is not a
+range: `rgbw` producing a fourth byte per pixel is still unexercised, because
+this strip is configured `rgbw: false` and the white channel stays unreachable
+in practice; so is the reset gap at the cap. And five of the six colour orders
+are unlit — that `"rbg"` is *accepted* is measured, that it puts red where red
+goes is not. Checking them means storing each in turn and rebooting, since the
+order is resolved once in `__prepare()`.
+
+**Before suspecting the firmware when a strip is dark, check the hardware.**
+This cost a day. Every API-level signal was green, the config echoed back
+correctly, `led_strip_init`/fill/flush all returned `ESP_OK`, a four-way RMT
+timing sweep found nothing and a 20-pin GPIO sweep found nothing — because the
+fault was never in the firmware. Ask first: is there a DC power input separate
+from USB, and is anything in it (on controllers of this class the strip's V+
+comes from there, not from USB, so a USB-only board can have a dead output rail
+and a perfect data line); which end of the strip is in the connector, since
+they are directional; and is the strip 5 V or 12 V.
 
 **Not verified: `hub.ezlopi.config.set`.** It has still never been called on real
 hardware by any route. The route to it is now known to work, which is a
