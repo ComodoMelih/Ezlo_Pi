@@ -6104,6 +6104,10 @@ flashed.**
   names — `pixel_count`, `rgbw`, `color_order` — are in
   `ezlopi-cloud-constants` with every other config key.
 
+  A fourth key, `led_chip`, and two more functions were added later; the
+  measurements recorded through the rest of this entry are of the three above,
+  and are left as they were taken. See *Addressable LED chip family* below.
+
   A correction to what an earlier draft of this entry claimed: that wrapper is
   **not** what sizes the strip's buffer, and describing it as "provably the
   same arithmetic" as the driver's allocation was wrong. `led_strip_init()`
@@ -6733,10 +6737,16 @@ flashed.**
   the four added for the serial block refuse to run at all if their edit
   matched nothing.
 
-- The full host suite is **6791** checks across **36** binaries, 0 failures,
+- The full host suite is **6850** checks across **36** binaries, 0 failures,
   with every binary reporting in the shape the aggregate greps for. The
   aggregate is re-run rather than adjusted whenever it changes; this figure is
   what the run printed, not an arithmetic result.
+
+  It was **6791** before the `led_chip` key, and the whole difference is
+  accounted for: 6850 − 6791 = 59, and `test_aledcfg` went 81 → 140, which is
+  also 59. That agreement is the check worth doing — a headline that moved by
+  more than the binary that changed would mean something else moved too and
+  nothing in the aggregate's output would have said so.
 
   **The figure recorded here before was 6748 across 35, and it was an
   under-count rather than a figure that has since moved.** The missing binary is
@@ -6757,10 +6767,120 @@ flashed.**
   for `test_ens160set` as the 32nd binary, and then **+11** when the settings
   allocation-failure checks were added to that same binary. The figure before
   that work was 6464. Those steps are left as they were measured; of the
-  difference since, `test_aledcfg` accounts for 61 → 81 as the `color_order`
+  difference since, `test_aledcfg` accounted for 61 → 81 as the `color_order`
   defect below was found, and `test_aledonboard` for 17 → 24 as the WiFi block
-  was added. The rest, and the four further binaries beyond that 32, are not
-  re-derived here — the headline is the measured one and is the figure to trust.
+  was added. That 81 is `test_aledcfg`'s figure at that point and not its
+  current one — the binary reports **140 check(s), 0 failure(s)** today, for the
+  reason given under the headline above. The rest, and the four further binaries
+  beyond that 32, are not re-derived here — the headline is the measured one and
+  is the figure to trust.
+
+### Addressable LED chip family — [feat]
+
+**The driver had four timing families and the config schema had no way to name
+one.** `device_0009`'s `__init()` contained
+
+```c
+dimmer_args->sk6812_strip.type = LED_STRIP_SK6812;
+```
+
+as a literal, while `led_params[]`
+([led_strip.c](ezlopi-components/led_strip/src/led_strip.c)) carries WS2812,
+SK6812, APA106 and SM16703 with genuinely different bit timings — a `1` bit is
+held high for 600 ns on an SK6812 and 1000 ns on a WS2812. So a WS2812B, which
+is the commonest addressable reel sold, was clocked at SK6812's timings no
+matter what was provisioned, because there was no key to say otherwise.
+
+A new optional key, `led_chip`, selects one: `sk6812`, `ws2812`, `apa106`,
+`sm16703`, case-insensitive, with `ws2812b` accepted as an alias for `ws2812`.
+
+**`SK6812` is enumerator 0, and that is the load-bearing decision.** Not
+alphabetical and not the driver's own numbering, which starts at
+`LED_STRIP_WS2812`. SK6812 is what the literal above was driving, so it is what
+every strip already in the field is working on today; putting it at 0 means a
+zeroed `s_aledcfg_t`, a `memset`, and a resolver that returns early all mean
+"behave as the shipped firmware did" rather than "re-time this install on the
+next update". `e_aled_order_t` puts `ALED_ORDER_GRB` at 0 for the same reason.
+
+The tempting alternative is worth naming because it is wrong in a way that
+looks like a courtesy: defaulting to WS2812 would suit more *new* installs,
+since it is the more popular part, and would silently change the timings of
+every *existing* one. Which strips are already out there is the only input that
+decides this.
+
+**Changing the chip changes only the timings here, which is the opposite of
+what the vendored API implies.** `led_params[]` carries a `color_order` per
+family as well as timings — APA106's row says `ORDER_RGB` — so the obvious fear
+is that selecting APA106 would flip a strip from GRB to RGB behind the user's
+back. It does not, because `led_params[strip->type].order` is read at exactly
+one site, inside `led_strip_set_pixel()`, and this firmware never calls it:
+`__fill_strip()` packs the frame buffer itself through `EZPI_aled_fill()` using
+the stored `color_order`. `led_chip` and `color_order` are therefore genuinely
+independent, and the stored order stays authoritative. `led_strip_install()`
+also builds the RMT item pair for all four families in one loop, so selecting a
+different one needs no install-time change.
+
+**Near-miss names are refused, not approximated.** `ws2813` and `ws2815` are
+real parts whose timings are close to WS2812's, and both resolve to the
+default with the config reported as not taken verbatim. That is deliberate and
+is the one judgement in this entry that could reasonably have gone the other
+way: a guess would be defensible on the datasheets and invisible when wrong.
+`ws2812b` is aliased because the `B` is a packaging revision rather than a
+different protocol, and it is what is printed on the reel — refusing the name a
+user reads off their own hardware would send the commonest strip on the market
+to a 600 ns default.
+
+**The failure mode is why this key got more care than the others, not less.** A
+wrong `pixel_count` lights part of the strip; a wrong `color_order` lights it in
+the wrong colours. Both are obvious the moment anyone looks. Wrong timings sit
+inside the parts' tolerances often enough that the strip mostly works and
+occasionally shows one wrong pixel — the hardest class of fault to attribute,
+and this project has already spent a day attributing a dark strip to the wrong
+layer. So the driver's one warning about a config it could not take verbatim now
+names the chip it settled on, via `EZPI_aledcfg_chip_name()`, because `chip=1`
+would be a riddle rather than a diagnosis. That warning is the only place a
+wrong `led_chip` becomes visible to anyone.
+
+**The mapping switch has no `default:` label, and the absence is checked rather
+than asserted.** `__led_strip_type_of()` names every enumerator so that adding
+a family to `e_aled_chip_t` and forgetting the driver does not compile. Deleting
+the APA106 arm and rebuilding gives
+
+    error: enumeration value 'ALED_CHIP_APA106' not handled in switch
+    [-Werror=switch]
+
+— an error, not a warning, because the project builds with `-Werror=all`.
+Adding a `default:` would switch that off entirely. The alternative, an array
+indexed by the config enum, would have been shorter and would have failed the
+other way: a missing row leaves a zero, and zero is `LED_STRIP_WS2812` — a
+plausible wrong answer, which is worse here than an obviously wrong one. The
+comment in that function originally claimed only a warning; it was corrected
+after the check was run, because a comment promising a safety net the build does
+not provide is worse than no comment.
+
+**What is measured, and what is not.** `tests/host/test_aledcfg.c` is at 140
+checks, 0 failures, and was confirmed able to fail first: a mutant defaulting to
+WS2812 is caught by 8 checks, and one replacing the exact-length name compare
+with a prefix compare — which accepts `ws2812` as `ws2812b` — by 5. The name
+table is a list of pairs rather than an array indexed by the enum, because the
+`ws2812b` alias makes the mapping many-to-one, so a test walks it and requires
+every chip to round trip name → enum → name; a merely shuffled table would
+otherwise still print *a* name for every chip and parse *a* chip for every name.
+
+Not measured: a strip lit at any timing but SK6812's. The bench strip is an
+SK6812 whose stored config carries no `led_chip`, so it resolves to the timings
+it was already running — re-flashing it is a regression check and no more.
+Confirming the other three families needs a strip of that family or a scope on
+the data line. The direction of the risk is worth stating: the default is
+unchanged, so this key can only be wrong for someone who sets it.
+
+The first attempt at the mutant harness reported both mutants as surviving. It
+compiled a copy of the component with a hand-written `gcc` line and got the
+include paths wrong, so neither mutant built — the right verdict for the wrong
+reason, and one that would have been the *wrong* verdict had the flags happened
+to work while differing from the Makefile's. It now mutates the file in place
+and lets `make` build it, which is the only way the mutant is compiled exactly
+as the subject is.
 
 ### Addressable LED switch item — [bug]
 

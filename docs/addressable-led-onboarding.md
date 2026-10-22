@@ -32,15 +32,16 @@ stored, or stored and then silently skipped at boot:
 | `dev_type` | number | `5`, meaning `EZLOPI_DEVICE_INTERFACE_PWM`. |
 | `gpio1` | number | The data pin the strip's DIN is wired to. |
 
-And these three describe the strip itself:
+And these four describe the strip itself:
 
 | Key | JSON type | Default if absent or malformed | Meaning |
 |---|---|---|---|
 | `pixel_count` | number, integer, 1..2048 | `1` | How many LEDs are on the strip. |
 | `rgbw` | boolean | `false` | True for an SK6812-**RGBW**, which has a fourth white channel and so four bytes per pixel instead of three. |
 | `color_order` | string | `"grb"` | Byte order on the wire. Any of `grb`, `rgb`, `brg`, `rbg`, `gbr`, `bgr`, case-insensitive. |
+| `led_chip` | string | `"sk6812"` | Which family's bit timings to clock the data out at. One of `sk6812`, `ws2812` (alias `ws2812b`), `apa106`, `sm16703`, case-insensitive. |
 
-Notes on the three strip keys, because each is a place where a reasonable guess
+Notes on the four strip keys, because each is a place where a reasonable guess
 is wrong:
 
 - **A quoted count is refused, not parsed.** `"pixel_count": "60"` resolves to
@@ -61,9 +62,35 @@ is wrong:
   for red is wired `rgb` rather than `grb` — the part number does not settle
   this, since strips sold as WS2812B have shipped in more than one order. The
   order is named by the order itself for that reason, rather than by chip.
-- **Omitting all three is fully supported and is the pre-existing behaviour**:
-  one GRB pixel, no white channel. Every strip provisioned before these keys
-  existed has exactly that configuration, and continues to behave the same.
+- **`led_chip` is a different question from `color_order`, and setting one does
+  not affect the other.** `color_order` is which of the three bytes goes first;
+  `led_chip` is how long a `1` bit is held high. A WS2812B wants 1000 ns and an
+  SK6812 wants 600 ns. This is worth stating because the driver's own per-chip
+  table carries a colour order as well as timings, so the obvious fear — that
+  selecting `apa106`, whose row says RGB, would flip your strip's byte order —
+  is true of that library's documented behaviour and false here: this firmware
+  packs the frame buffer itself and never uses that field. Your `color_order`
+  stays authoritative whatever `led_chip` says.
+- **A chip name that is nearly right is refused, not approximated.** `ws2813`
+  and `ws2815` are real parts with timings close to WS2812's, and both resolve
+  to the default. That is deliberate: close enough that a guess would look
+  defensible, far enough that a wrong guess would be invisible. Only the four
+  families the driver actually has are accepted, plus `ws2812b` as an alias for
+  `ws2812`, because the `B` is a packaging revision rather than a different
+  protocol and it is what is printed on the reel.
+- **Wrong timings are the one mistake here with no obvious symptom.** A wrong
+  `pixel_count` lights part of the strip; a wrong `color_order` lights it in the
+  wrong colours; both are plain on sight. Wrong timings are inside the parts'
+  tolerances often enough that the strip mostly works and occasionally shows one
+  wrong pixel. If that is what you are seeing, `led_chip` is the key to check,
+  and the boot log names the one it settled on.
+- **Omitting all four is fully supported and is the pre-existing behaviour**:
+  one GRB pixel, no white channel, SK6812 timings. Every strip provisioned
+  before these keys existed has exactly that configuration, and continues to
+  behave the same. For `led_chip` in particular the default is the *shipped*
+  chip rather than the *common* one — WS2812B is the more popular part, so
+  defaulting to it would have suited more new installs and silently re-timed
+  every existing one.
 
 ## A worked example
 
@@ -301,11 +328,13 @@ Split, because these two halves are now in different states and lumping them
 together was how a real defect stayed hidden behind a green host suite.
 
 **Verified on an ESP32 over serial `cmd:3`.** A board stores the document
-above, and on the next boot the resolver reads all three keys from it: all six
-`color_order` names are accepted, `"zzz"` and `"grbx"` are refused, and a
-refused order leaves the good `pixel_count` in place rather than taking it down
-with it. The refusal is reported as `sk6812: config not taken verbatim; using N
-pixel(s)` on the serial log, so a jig can tell the two apart.
+above, and on the next boot the resolver reads all three of the keys that
+document carries: all six `color_order` names are accepted, `"zzz"` and
+`"grbx"` are refused, and a refused order leaves the good `pixel_count` in
+place rather than taking it down with it. The refusal is reported as
+`sk6812: config not taken verbatim; using N pixel(s), rgbw=0, chip=sk6812` on
+the serial log, so a jig can tell the two apart. `led_chip` was added later and
+is not part of this measurement — see below.
 
 That took finding a defect that no host test could have caught. A device
 configuration reaches the driver through `cJSON_ParseWithRef()`, whose strings
@@ -377,6 +406,23 @@ from USB, and is anything in it (on controllers of this class the strip's V+
 comes from there, not from USB, so a USB-only board can have a dead output rail
 and a perfect data line); which end of the strip is in the connector, since
 they are directional; and is the strip 5 V or 12 V.
+
+**Not verified on hardware: `led_chip` selecting anything but the default.**
+Three things are measured and they are all host-side or compile-side: the
+resolver accepts the five accepted names and refuses the near-misses (140
+checks in `tests/host/test_aledcfg.c`, with the suite confirmed to fail against
+a subject that defaults to WS2812 and against one that accepts `ws2812` as
+`ws2812b`); the firmware builds; and omitting a family from the driver's
+mapping switch is a build error rather than a silent fallback, measured by
+deleting a case and rebuilding.
+
+None of that is a strip lit at WS2812 timings. The bench strip **is** an
+SK6812, and its stored config carries no `led_chip`, so it resolves to exactly
+the timings it was already being driven at — re-flashing it is a regression
+check and nothing more. Confirming the other three families needs either a
+strip of that family or a scope on the data line, and neither has been done.
+What *is* worth noting is the direction of the risk: the default is unchanged,
+so this key can only be wrong for someone who sets it.
 
 **Not verified: `hub.ezlopi.config.set`.** It has still never been called on real
 hardware by any route. The route to it is now known to work, which is a

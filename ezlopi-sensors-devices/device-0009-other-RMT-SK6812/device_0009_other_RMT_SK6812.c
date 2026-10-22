@@ -151,6 +151,76 @@ ezlopi_error_t DEVICE_0009_other_rmt_sk6812(e_ezlopi_actions_t action, l_ezlopi_
  *                         Static Function Definitions
  *******************************************************************************/
 
+/* The one place a configured chip becomes the driver's strip type.
+**
+** The two enums are deliberately separate. ezlopi-util-aledcfg must stay
+** compilable by a plain host compiler, so it cannot include led_strip.h, which
+** pulls in driver/rmt.h -- see the note on e_aled_chip_t. This switch is the
+** seam, and it is the whole cost of that separation.
+**
+** NO `default:` LABEL, ON PURPOSE
+**
+** With every enumerator named and no default, adding a family to e_aled_chip_t
+** and forgetting this function does not compile. Measured rather than assumed:
+** deleting the APA106 arm and rebuilding gives
+**
+**     device_0009_other_RMT_SK6812.c: error: enumeration value
+**     'ALED_CHIP_APA106' not handled in switch [-Werror=switch]
+**
+** (the line number is omitted because it is the mutated file's, not this one's)
+**
+** -- an error, because this project builds with -Werror=all, not merely a
+** warning to be scrolled past. Adding a `default:` label would switch that off
+** entirely, which is the whole reason there isn't one.
+**
+** An array indexed by the config enum would have been shorter and would have
+** failed the other way: a missing row leaves a zero, and 0 is
+** LED_STRIP_WS2812 -- a plausible wrong answer, which is worse here than an
+** obviously wrong one.
+**
+** A value outside the enum's range cannot come from the resolver, which only
+** ever writes a value it parsed from the name table, but if one arrived it
+** would fall past every case and leave the initialiser's SK6812 in place. That
+** is the same fallback as every other field in this component: when in doubt,
+** behave as the shipped firmware did.
+**
+** WHAT THIS DOES *NOT* CHANGE
+**
+** Only the bit timings move. The driver's per-type table carries a colour order
+** too, but `led_params[strip->type].order` is read at one site only, inside
+** led_strip_set_pixel() (led_strip.c:259), and __fill_strip() below exists
+** precisely because this firmware does not call it. So selecting APA106, whose
+** row says ORDER_RGB, does not re-order a strip's bytes here -- the stored
+** `color_order` stays authoritative. led_strip_install() also builds the RMT
+** item pair for all four families in one loop, so no install-time change is
+** needed to use a different one.
+*/
+static led_strip_type_t __led_strip_type_of(e_aled_chip_t chip)
+{
+    led_strip_type_t ret = LED_STRIP_SK6812;
+
+    switch (chip)
+    {
+    case ALED_CHIP_WS2812:
+        ret = LED_STRIP_WS2812;
+        break;
+    case ALED_CHIP_APA106:
+        ret = LED_STRIP_APA106;
+        break;
+    case ALED_CHIP_SM16703:
+        ret = LED_STRIP_SM16703;
+        break;
+    case ALED_CHIP_SK6812:
+    case ALED_CHIP_MAX:
+        /* SK6812 is the initialiser above, so it needs no body; ALED_CHIP_MAX
+        ** is named only to keep the switch exhaustive and takes the same
+        ** fallback. */
+        break;
+    }
+
+    return ret;
+}
+
 /* Fill the whole strip with one colour, honouring the configured byte order.
 **
 ** Not led_strip_fill(): that path reaches led_strip_set_pixel(), which takes
@@ -366,7 +436,14 @@ static ezlopi_error_t __init(l_ezlopi_item_t *item)
             {
                 if (0 == dimmer_args->sk6812_led_strip_initialized)
                 {
-                    dimmer_args->sk6812_strip.type = LED_STRIP_SK6812;
+                    /* Was `LED_STRIP_SK6812`, a literal. The driver has four
+                    ** timing families and the stored config could name none of
+                    ** them, so a WS2812B -- the commonest reel on the market --
+                    ** was clocked at SK6812's 600ns t1h whatever the
+                    ** configuration said. SK6812 remains what a config that
+                    ** says nothing resolves to, so this changes nothing for a
+                    ** strip already provisioned. */
+                    dimmer_args->sk6812_strip.type = __led_strip_type_of(dimmer_args->aled_cfg.chip);
                     /* Was `length = 1`, a literal, and `is_rgbw` was never
                     ** assigned anywhere -- the struct is memset to 0, so
                     ** COLOR_SIZE() was permanently 3 and a 60-pixel strip lit
@@ -590,9 +667,15 @@ static ezlopi_error_t __prepare(void *arg)
                 ** fine at the wrong length. */
                 if (false == EZPI_aledcfg_from_json(prep_arg->cjson_device, &dimmer_args->aled_cfg))
                 {
-                    TRACE_W("sk6812: config not taken verbatim; using %u pixel(s), rgbw=%d",
+                    /* The chip is named, not printed as a number. It is the one
+                    ** substituted field whose effect is invisible -- a wrong
+                    ** length or order is obvious on the strip, wrong timings
+                    ** just make it unreliable -- so this line is the only place
+                    ** it surfaces. */
+                    TRACE_W("sk6812: config not taken verbatim; using %u pixel(s), rgbw=%d, chip=%s",
                         (unsigned)dimmer_args->aled_cfg.pixel_count,
-                        (int)dimmer_args->aled_cfg.has_white);
+                        (int)dimmer_args->aled_cfg.has_white,
+                        EZPI_aledcfg_chip_name(dimmer_args->aled_cfg.chip));
                 }
 
                 /* All six colour orders are honoured now, so there is nothing

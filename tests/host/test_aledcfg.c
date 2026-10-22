@@ -103,6 +103,11 @@ static bool resolve_str(const char *json, s_aledcfg_t *out)
         out->pixel_count = 0;
         out->has_white = false;
         out->order = ALED_ORDER_GRB;
+        /* ALED_CHIP_MAX, not the default: this is the path where the test's own
+         * JSON was broken, and a field left at its default here could make a
+         * later CHECK pass for the wrong reason. MAX cannot satisfy any of
+         * them. */
+        out->chip = ALED_CHIP_MAX;
         return false;
     }
 
@@ -144,6 +149,11 @@ static bool resolve_ref_dev0(const char *json, s_aledcfg_t *out)
         out->pixel_count = 0;
         out->has_white = false;
         out->order = ALED_ORDER_GRB;
+        /* ALED_CHIP_MAX, not the default: this is the path where the test's own
+         * JSON was broken, and a field left at its default here could make a
+         * later CHECK pass for the wrong reason. MAX cannot satisfy any of
+         * them. */
+        out->chip = ALED_CHIP_MAX;
         cJSON_Delete(__FUNCTION__, root);
         return false;
     }
@@ -172,6 +182,10 @@ static void test_silence_means_what_the_driver_already_did(void)
     CHECK(ALED_ORDER_GRB == cfg.order,
           "...and GRB, which is both the zeroed enum value and what a WS2812 "
           "actually wants");
+    CHECK(ALED_CHIP_SK6812 == cfg.chip,
+          "...and SK6812 timings, which is what device_0009 hardcoded, so the "
+          "strips already in the field keep the 600ns t1h they are working on "
+          "today rather than being re-timed by a firmware update");
     CHECK(true == verbatim,
           "an empty config is not a disagreement -- it is a valid configuration "
           "meaning one pixel, so it must not make the caller log about every "
@@ -190,13 +204,16 @@ static void test_silence_means_what_the_driver_already_did(void)
     cfg.pixel_count = 999;
     cfg.has_white = true;
     cfg.order = ALED_ORDER_BGR;
+    cfg.chip = ALED_CHIP_APA106;
     verbatim = EZPI_aledcfg_from_json(NULL, &cfg);
     CHECK(1 == cfg.pixel_count,
           "a NULL device object fills the defaults rather than leaving the "
-          "caller's struct untouched -- it was pre-poisoned with 999/true/BGR "
-          "above, so this check fails if the function returns early");
+          "caller's struct untouched -- it was pre-poisoned with "
+          "999/true/BGR/APA106 above, so this check fails if the function "
+          "returns early");
     CHECK(false == cfg.has_white, "...including has_white");
     CHECK(ALED_ORDER_GRB == cfg.order, "...including the order");
+    CHECK(ALED_CHIP_SK6812 == cfg.chip, "...including the chip");
     CHECK(true == verbatim, "...and a missing device object is not a disagreement");
 
     /* A NULL out is the one case with nowhere to put an answer. */
@@ -766,6 +783,242 @@ static void test_the_bound_is_honoured_both_ways(void)
           "the bounded form it delegates to");
 }
 
+/* ------------------------------------------------------------------------- *
+ * 8. led_chip -- which timing family the data is clocked out at.
+ *
+ * WHAT THIS KEY IS FOR
+ *
+ * device_0009 assigned `type = LED_STRIP_SK6812` as a literal while the driver
+ * carried four timing families (led_strip.c:168-171). A WS2812B, which is the
+ * commonest addressable reel sold, was therefore clocked with SK6812's 600ns
+ * t1h instead of its own 1000ns, whatever the stored configuration said --
+ * there was no key to say it with.
+ *
+ * WHY THE FAILURE MODE JUSTIFIES MORE CARE THAN THE OTHER KEYS, NOT LESS
+ *
+ * A wrong pixel_count lights a prefix of the strip. A wrong color_order lights
+ * it in the wrong colours. Both are obvious the moment anyone looks. Wrong bit
+ * timings are not: they are within the parts' tolerances often enough that the
+ * strip mostly works and occasionally shows one wrong pixel, which is the
+ * hardest class of fault to attribute -- and this project has already spent a
+ * day attributing a dark strip to the wrong layer.
+ *
+ * So the checks below are weighted towards the quiet wrongs: that a name which
+ * is nearly right is refused rather than guessed at, that the default is the
+ * shipped timing rather than the more popular part, and that every chip the
+ * enum offers can actually be named.
+ * ------------------------------------------------------------------------- */
+
+static void test_only_the_named_chips_are_a_chip(void)
+{
+    static const struct
+    {
+        const char *str;
+        e_aled_chip_t want;
+    } k_ok[] = {
+        {"sk6812", ALED_CHIP_SK6812},
+        {"ws2812", ALED_CHIP_WS2812},
+        {"ws2812b", ALED_CHIP_WS2812},
+        {"apa106", ALED_CHIP_APA106},
+        {"sm16703", ALED_CHIP_SM16703},
+        /* Case folding, on each of the two name lengths. */
+        {"SK6812", ALED_CHIP_SK6812},
+        {"Ws2812B", ALED_CHIP_WS2812},
+        {"SM16703", ALED_CHIP_SM16703},
+    };
+
+    /* Every one of these is a plausible thing for a person to type off a reel
+     * or a datasheet, which is exactly why each must be refused rather than
+     * accepted approximately. A substituted chip leaves SK6812 in place and is
+     * reported, so the user gets a working-looking strip and a log line --
+     * whereas a guess would get them marginal timings and silence. */
+    static const char *const k_refused[] = {
+        "ws2813",   /* a real part, close timings. Guessing would be the trap */
+        "ws2815",   /* ditto, and 12V -- not something to infer from a name   */
+        "ws2812c",  /* not a part this driver has a row for                   */
+        "ws281",    /* truncated                                             */
+        "ws2812bb", /* over-long: a bounded compare of 7 would accept this    */
+        "sk6812rgbw", /* the white channel is the `rgbw` key's job, not this  */
+        "sk",
+        "",
+        " ws2812",  /* leading space: not trimmed, because trimming one field
+                     * and not the others is worse than trimming none         */
+        "ws2812 ",
+        "neopixel", /* a brand, not a timing family                           */
+        "apa102",   /* a real part, but SPI -- this driver cannot drive it at
+                     * all, so mapping it to anything would be a lie          */
+    };
+
+    for (size_t i = 0u; i < (sizeof(k_ok) / sizeof(k_ok[0])); i++)
+    {
+        e_aled_chip_t got = ALED_CHIP_MAX;
+        const bool ok = EZPI_aledcfg_chip_from_strn(k_ok[i].str,
+                                                    strlen(k_ok[i].str), &got);
+
+        CHECK(ok && (k_ok[i].want == got), k_ok[i].str);
+    }
+
+    for (size_t i = 0u; i < (sizeof(k_refused) / sizeof(k_refused[0])); i++)
+    {
+        e_aled_chip_t got = ALED_CHIP_MAX;
+        const bool ok = EZPI_aledcfg_chip_from_strn(k_refused[i],
+                                                    strlen(k_refused[i]), &got);
+
+        /* Refused AND untouched. A parser that returned false after writing
+         * the out parameter would pass a return-value-only check while
+         * corrupting a caller that kept its default in that variable. */
+        CHECK((false == ok) && (ALED_CHIP_MAX == got), k_refused[i]);
+    }
+
+    e_aled_chip_t spare = ALED_CHIP_MAX;
+
+    CHECK(false == EZPI_aledcfg_chip_from_strn(NULL, 6u, &spare),
+          "a NULL string is refused rather than dereferenced");
+    CHECK(false == EZPI_aledcfg_chip_from_strn("ws2812", 6u, NULL),
+          "a NULL out pointer is refused rather than written through");
+}
+
+static void test_the_chip_bound_is_honoured(void)
+{
+    /* No NUL anywhere in the value, which is what cJSON_ParseWithRef() hands
+     * over: the bytes after the name are the rest of the payload. Written as a
+     * sized array with no terminator so that reading past it is a real
+     * overrun for ASan to find, not a read of a convenient zero. */
+    static const char not_terminated[] = {'w', 's', '2', '8', '1', '2', '"', '}', ']', '}'};
+    e_aled_chip_t chip = ALED_CHIP_MAX;
+
+    CHECK(EZPI_aledcfg_chip_from_strn(not_terminated, 6u, &chip) &&
+              (ALED_CHIP_WS2812 == chip),
+          "a 6-byte bound over an unterminated buffer reads exactly the name "
+          "-- the colour-order parser's field defect, pinned for this key "
+          "before it can happen rather than after");
+
+    chip = ALED_CHIP_MAX;
+    CHECK(false == EZPI_aledcfg_chip_from_strn(not_terminated,
+                                               sizeof(not_terminated), &chip),
+          "...and a bound that over-states the length is refused rather than "
+          "guessed at: 'ws2812\"}]}' is not a chip");
+
+    chip = ALED_CHIP_MAX;
+    CHECK(false == EZPI_aledcfg_chip_from_strn(not_terminated, 5u, &chip),
+          "a bound of 5 over \"ws2812\" is refused -- a prefix compare would "
+          "have matched 'ws281' against nothing, but strncmp(str, name, len) "
+          "would have matched it against \"ws2812\"");
+
+    chip = ALED_CHIP_MAX;
+    CHECK(false == EZPI_aledcfg_chip_from_strn(not_terminated, 0u, &chip),
+          "a bound of 0 is refused and reads nothing");
+
+    /* A NUL inside the bound stops the measurement, so a short name in a
+     * generously-bounded buffer still works -- the rule "%.*s" uses, and the
+     * one the order parser uses, stated for this one too. */
+    chip = ALED_CHIP_MAX;
+    CHECK(EZPI_aledcfg_chip_from_strn("apa106", 64u, &chip) &&
+              (ALED_CHIP_APA106 == chip),
+          "a bound well past a NUL-terminated name stops at the NUL, which is "
+          "what cJSON_Parse()'s allocation-sized str_value_len needs");
+}
+
+static void test_every_chip_can_be_named_and_printed(void)
+{
+    /* The name table is a list of pairs rather than an array indexed by the
+     * enum, so nothing in the code guarantees the two are in step. A chip the
+     * enum offers that no string can select would be a configuration that
+     * silently cannot be requested; a chip with no name would make the
+     * driver's warning print "?" on the one path where it matters. */
+    for (unsigned c = 0u; c < (unsigned)ALED_CHIP_MAX; c++)
+    {
+        const char *const name = EZPI_aledcfg_chip_name((e_aled_chip_t)c);
+        e_aled_chip_t back = ALED_CHIP_MAX;
+
+        CHECK((NULL != name) && ('?' != name[0]),
+              "every chip the enum offers has a printable name");
+
+        /* Round trip. This is what actually ties the two directions of the
+         * table together: a shuffled table would still print *a* name for
+         * every chip and still parse *a* chip for every name, and only the
+         * round trip notices that they are not the same pairing. */
+        CHECK(EZPI_aledcfg_chip_from_strn(name, strlen(name), &back) &&
+                  ((e_aled_chip_t)c == back),
+              name);
+    }
+
+    /* Canonical, not an echo: the alias must never be what gets printed. */
+    CHECK(0 == strcmp("ws2812", EZPI_aledcfg_chip_name(ALED_CHIP_WS2812)),
+          "ALED_CHIP_WS2812 prints as \"ws2812\", never as the \"ws2812b\" "
+          "alias that may have selected it");
+
+    /* The logging helper is called on a path that is already going wrong, so
+     * it is the worst possible place to fault. */
+    CHECK(NULL != EZPI_aledcfg_chip_name(ALED_CHIP_MAX),
+          "ALED_CHIP_MAX gives a string rather than indexing past the table");
+    CHECK(0 == strcmp("?", EZPI_aledcfg_chip_name((e_aled_chip_t)99)),
+          "and so does a value that is not an enumerator at all");
+}
+
+static void test_the_chip_key_through_both_parsers(void)
+{
+    s_aledcfg_t cfg;
+    bool verbatim;
+
+    verbatim = resolve_str("{\"led_chip\":\"ws2812b\"}", &cfg);
+    CHECK(true == verbatim, "a recognised led_chip is taken verbatim");
+    CHECK(ALED_CHIP_WS2812 == cfg.chip, "...and selects WS2812 timings");
+    CHECK(1 == cfg.pixel_count, "...without disturbing the other defaults");
+    CHECK(ALED_ORDER_GRB == cfg.order, "...including the order");
+
+    /* The device's own parser, which is the one that broke for color_order. */
+    verbatim = resolve_ref_dev0(
+        "{\"dev_detail\":[{\"gpio1\":16,\"pixel_count\":30,"
+        "\"color_order\":\"grb\",\"led_chip\":\"ws2812\"}]}",
+        &cfg);
+    CHECK(true == verbatim,
+          "a full device entry read by reference -- the parser the device "
+          "actually uses -- is taken verbatim with led_chip last, so the bytes "
+          "the parser could over-read are the real `\"}]}`");
+    CHECK(ALED_CHIP_WS2812 == cfg.chip, "...and the chip survives it");
+    CHECK(30 == cfg.pixel_count, "...alongside the count");
+    CHECK(ALED_ORDER_GRB == cfg.order, "...and the order");
+
+    /* An unrecognised name must not take the other keys down with it. */
+    verbatim = resolve_str("{\"led_chip\":\"ws2813\",\"pixel_count\":30,"
+                           "\"rgbw\":true,\"color_order\":\"rgb\"}",
+                           &cfg);
+    CHECK(false == verbatim, "an unknown led_chip makes the config non-verbatim");
+    CHECK(ALED_CHIP_SK6812 == cfg.chip, "...and falls back to the shipped chip");
+    CHECK(30 == cfg.pixel_count, "...with the good count kept");
+    CHECK(true == cfg.has_white, "...the good rgbw kept");
+    CHECK(ALED_ORDER_RGB == cfg.order, "...and the good order kept");
+
+    /* Wrong JSON types. A number is the tempting one to accept, and accepting
+     * it would make the enum's numbering part of the stored format -- the same
+     * argument color_order makes, and the reason SK6812 could be renumbered
+     * without touching a single provisioned device. */
+    CHECK((false == resolve_str("{\"led_chip\":1}", &cfg)) &&
+              (ALED_CHIP_SK6812 == cfg.chip),
+          "a numeric led_chip is refused rather than used as an enum index");
+    CHECK((false == resolve_str("{\"led_chip\":null}", &cfg)) &&
+              (ALED_CHIP_SK6812 == cfg.chip),
+          "a null led_chip is refused");
+    CHECK((false == resolve_str("{\"led_chip\":true}", &cfg)) &&
+              (ALED_CHIP_SK6812 == cfg.chip),
+          "a boolean led_chip is refused");
+    CHECK((false == resolve_str("{\"led_chip\":{\"name\":\"ws2812\"}}", &cfg)) &&
+              (ALED_CHIP_SK6812 == cfg.chip),
+          "an object led_chip is refused rather than searched");
+
+    /* The key name itself. A reader looking for the wrong spelling finds
+     * nothing and reports verbatim, which is the silent failure the key
+     * constants in ezlopi-cloud-constants exist to prevent. */
+    verbatim = resolve_str("{\"chip\":\"ws2812\"}", &cfg);
+    CHECK(true == verbatim,
+          "a key named \"chip\" is not this key and is not the resolver's "
+          "business, so it is not a disagreement");
+    CHECK(ALED_CHIP_SK6812 == cfg.chip,
+          "...and it does not select anything either -- the spelling is "
+          "\"led_chip\"");
+}
+
 int main(void)
 {
     test_silence_means_what_the_driver_already_did();
@@ -779,6 +1032,10 @@ int main(void)
     test_the_keys_are_independent();
     test_the_parser_the_device_actually_uses();
     test_the_bound_is_honoured_both_ways();
+    test_only_the_named_chips_are_a_chip();
+    test_the_chip_bound_is_honoured();
+    test_every_chip_can_be_named_and_printed();
+    test_the_chip_key_through_both_parsers();
 
     /* Bare, with no "test_aledcfg: " prefix: "N check(s), M failure(s)" is the
      * shape the suite's aggregate tally reads, and a prefixed line matches

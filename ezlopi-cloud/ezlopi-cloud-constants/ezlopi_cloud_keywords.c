@@ -447,6 +447,7 @@ const char *ezlopi_pull_up_str = "pull_up";
 const char *ezlopi_pixel_count_str = "pixel_count";
 const char *ezlopi_rgbw_str = "rgbw";
 const char *ezlopi_color_order_str = "color_order";
+const char *ezlopi_led_chip_str = "led_chip";
 
 const char *ezlopi_red_str = "red";
 const char *ezlopi_green_str = "green";

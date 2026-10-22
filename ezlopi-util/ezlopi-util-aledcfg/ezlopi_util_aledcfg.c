@@ -47,7 +47,7 @@
 
 /* The key names themselves live in ezlopi-cloud-constants with every other
 ** config key, rather than as literals here. That is the house convention, and
-** it matters more than usual for these three: a key whose spelling differs
+** it matters more than usual for these four: a key whose spelling differs
 ** between the writer and the reader is not a visible failure, it is a strip
 ** that silently keeps the default length. */
 #include "ezlopi_cloud_keywords.h"
@@ -74,6 +74,32 @@ static const char *const k_order_names[ALED_ORDER_MAX] = {
     "bgr", /* ALED_ORDER_BGR */
 };
 
+/* The LED family names, paired with the enum value each one selects.
+**
+** NOT indexed by the enum, unlike k_order_names above, and the difference is
+** deliberate: "ws2812b" and "ws2812" both select ALED_CHIP_WS2812, so the
+** mapping is many-to-one and an array indexed by the enum could not express it.
+** The pair is written out instead, which also means a name can be added or
+** removed without renumbering anything.
+**
+** The cost of that choice is that nothing here guarantees every chip has a
+** name. An array indexed by the enum would at least have been the right size.
+** So the host test walks this table and requires all four of ALED_CHIP_* to be
+** produced by some name -- a chip the enum offers and no string can reach
+** would be a key that silently cannot be set.
+*/
+static const struct
+{
+    const char *name;
+    e_aled_chip_t chip;
+} k_chip_names[] = {
+    {"sk6812", ALED_CHIP_SK6812},
+    {"ws2812", ALED_CHIP_WS2812},
+    {"ws2812b", ALED_CHIP_WS2812}, /* the alias; see the header for why */
+    {"apa106", ALED_CHIP_APA106},
+    {"sm16703", ALED_CHIP_SM16703},
+};
+
 /*******************************************************************************
  *                          Static Function Definitions
  *******************************************************************************/
@@ -89,6 +115,30 @@ static const char *const k_order_names[ALED_ORDER_MAX] = {
 static char __ascii_lower(char c)
 {
     return ((c >= 'A') && (c <= 'Z')) ? (char)(c - 'A' + 'a') : c;
+}
+
+/* Does @p str, of exactly @p len bytes, case-fold to the whole of @p name?
+**
+** "the whole of" is the part that earns a named function. The colour orders are
+** all 3 bytes, so that parser could require `3 == len` once and compare three
+** bytes; the chip names are 6 and 7 bytes, so the length has to be compared per
+** candidate. Doing that with strncmp(str, name, len) would accept "ws2812" as
+** "ws2812b", and with strncmp(..., strlen(name)) would read past the end of a
+** shorter `str`. Hence: lengths equal first, then bytes.
+**
+** @p str is read for at most @p len bytes and never scanned for a NUL, so a
+** reference string pointing into a JSON payload is safe here.
+*/
+static bool __ascii_ieq_exact(const char *str, size_t len, const char *name)
+{
+    bool ret = (strlen(name) == len);
+
+    for (size_t i = 0u; ret && (i < len); i++)
+    {
+        ret = (__ascii_lower(str[i]) == name[i]);
+    }
+
+    return ret;
 }
 
 /*******************************************************************************
@@ -154,6 +204,60 @@ bool EZPI_aledcfg_order_from_str(const char *str, e_aled_order_t *out)
                          : false;
 }
 
+bool EZPI_aledcfg_chip_from_strn(const char *str, size_t bound, e_aled_chip_t *out)
+{
+    bool ret = false;
+
+    if ((NULL != str) && (NULL != out))
+    {
+        /* Same measurement rule as the colour order: up to `bound` bytes,
+        ** stopping early at a NUL. The two parsers have to agree about this,
+        ** because they are handed the same kind of string from the same kind of
+        ** cJSON item, and a config read by cJSON_ParseWithRef() has no NUL to
+        ** find within the value at all. */
+        size_t len = 0u;
+
+        while ((len < bound) && ('\0' != str[len]))
+        {
+            len++;
+        }
+
+        for (size_t i = 0u; i < (sizeof(k_chip_names) / sizeof(k_chip_names[0])); i++)
+        {
+            if (__ascii_ieq_exact(str, len, k_chip_names[i].name))
+            {
+                *out = k_chip_names[i].chip;
+                ret = true;
+                break;
+            }
+        }
+    }
+
+    return ret;
+}
+
+const char *EZPI_aledcfg_chip_name(e_aled_chip_t chip)
+{
+    /* The same table read the other way, rather than a second list of the same
+    ** strings. A second list is how a name and the chip it prints for drift
+    ** apart, and this one is only ever read on a path that is already
+    ** reporting a problem -- the least useful place to be wrong. */
+    const char *ret = "?";
+
+    for (size_t i = 0u; i < (sizeof(k_chip_names) / sizeof(k_chip_names[0])); i++)
+    {
+        if (chip == k_chip_names[i].chip)
+        {
+            /* First match, so an alias never wins: "ws2812" precedes
+            ** "ws2812b" in the table. */
+            ret = k_chip_names[i].name;
+            break;
+        }
+    }
+
+    return ret;
+}
+
 size_t EZPI_aledcfg_wire_len(const s_aledcfg_t *cfg)
 {
     size_t ret = 0u;
@@ -185,6 +289,7 @@ bool EZPI_aledcfg_from_json(cJSON *cj_device, s_aledcfg_t *out)
     out->pixel_count = ALEDCFG_DEFAULT_PIXELS;
     out->has_white = false;
     out->order = ALED_ORDER_GRB;
+    out->chip = ALEDCFG_DEFAULT_CHIP;
 
     if (NULL == cj_device)
     {
@@ -308,6 +413,37 @@ bool EZPI_aledcfg_from_json(cJSON *cj_device, s_aledcfg_t *out)
                 ** then both be accepted for the same field, and the enum's
                 ** numbering is an implementation detail that a stored config
                 ** must not depend on. */
+                verbatim = false;
+            }
+        }
+    }
+
+    /* ---- led_chip ------------------------------------------------------- */
+    {
+        cJSON *const cj_c = cJSON_GetObjectItem(__FUNCTION__, cj_device, ezlopi_led_chip_str);
+
+        if (NULL != cj_c)
+        {
+            e_aled_chip_t parsed = ALEDCFG_DEFAULT_CHIP;
+
+            /* str_value_len for the same reason as color_order above, and this
+            ** is the one place where copying that reasoning is cheaper than
+            ** rediscovering it: the single-argument form of the order parser
+            ** refused all six orders on a real board for exactly this. */
+            if ((0 != (cj_c->type & cJSON_String)) &&
+                EZPI_aledcfg_chip_from_strn(cj_c->valuestring,
+                                            cj_c->str_value_len, &parsed))
+            {
+                out->chip = parsed;
+            }
+            else
+            {
+                /* An unrecognised family name leaves SK6812 in place, and that
+                ** substitution is worth a log line more than the others are: a
+                ** wrong chip does not produce a dark strip or an obviously
+                ** wrong length, it produces marginal timings. The symptom is a
+                ** strip that mostly works and occasionally shows a wrong pixel,
+                ** which is the hardest class of fault to attribute. */
                 verbatim = false;
             }
         }
