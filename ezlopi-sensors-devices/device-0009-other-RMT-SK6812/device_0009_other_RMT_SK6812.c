@@ -397,14 +397,41 @@ static ezlopi_error_t __init(l_ezlopi_item_t *item)
                             .blue = 255,
                         };
 
-                        err |= __fill_strip(dimmer_args, color);
-                        if (ESP_OK == (err = led_strip_set_brightness(&dimmer_args->sk6812_strip, 255)))
+                        /* Was:
+                        **
+                        **     err |= __fill_strip(dimmer_args, color);
+                        **     if (ESP_OK == (err = led_strip_set_brightness(...)))
+                        **
+                        ** which threw the fill's result away. The `|=` was
+                        ** harmless on its own -- err is ESP_OK here, so the OR
+                        ** is an assignment -- but the next line reassigns err
+                        ** from led_strip_set_brightness(), and that function
+                        ** `return ESP_OK;` unconditionally (led_strip.c:296).
+                        ** So a refused fill was overwritten with ESP_OK, the
+                        ** unfilled buffer was flushed anyway, and the device
+                        ** reported EZPI_SUCCESS with nothing logged. The
+                        ** calloc'd buffer is all zeros, so the visible result
+                        ** was a dark strip and a hub insisting it was fine.
+                        **
+                        ** That is worth naming rather than just fixing: it is
+                        ** the same shape as the defect that made this strip
+                        ** take a day to diagnose -- every signal green because
+                        ** the only thing that could have disagreed had been
+                        ** discarded. __fill_strip() refuses on a NULL buffer
+                        ** or a zero wire length, both of which are reachable. */
+                        err = __fill_strip(dimmer_args, color);
+                        if (ESP_OK == err)
                         {
-                            if (ESP_OK == (err = led_strip_flush(&dimmer_args->sk6812_strip)))
-                            {
-                                dimmer_args->sk6812_led_strip_initialized = true;
-                                ret = EZPI_SUCCESS;
-                            }
+                            err = led_strip_set_brightness(&dimmer_args->sk6812_strip, 255);
+                        }
+                        if (ESP_OK == err)
+                        {
+                            err = led_strip_flush(&dimmer_args->sk6812_strip);
+                        }
+                        if (ESP_OK == err)
+                        {
+                            dimmer_args->sk6812_led_strip_initialized = true;
+                            ret = EZPI_SUCCESS;
                         }
                     }
                     if (ESP_OK != err)
