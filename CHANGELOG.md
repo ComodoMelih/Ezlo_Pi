@@ -6695,10 +6695,23 @@ flashed.**
   the four added for the serial block refuse to run at all if their edit
   matched nothing.
 
-- The full host suite is **6748** checks across **35** binaries, 0 failures,
+- The full host suite is **6791** checks across **36** binaries, 0 failures,
   with every binary reporting in the shape the aggregate greps for. The
   aggregate is re-run rather than adjusted whenever it changes; this figure is
   what the run printed, not an arithmetic result.
+
+  **The figure recorded here before was 6748 across 35, and it was an
+  under-count rather than a figure that has since moved.** The missing binary is
+  `test_settings_api` and the missing checks are its 43: 6748 + 43 = 6791 and
+  35 + 1 = 36, exactly. It was not a binary added afterwards — it was already
+  tracked and already listed in the Makefile's binary list at the commit that
+  recorded 6748, so the aggregate that produced that number had simply not built
+  and run it. Left visible rather than quietly overwritten, because the lesson
+  is about the measurement and not the total: an aggregate that silently omits a
+  binary reports a smaller number with the same confidence as a correct one, and
+  nothing in its output said anything was missing. The current run's own
+  bookkeeping does say so — it prints `binaries : 36`, `matched total : 36` and
+  `UNMATCHED : none`, and those three agreeing is the part worth checking.
 
   It stood at **6497** across **32** binaries when this entry was first
   written, and the steps behind *that* figure were **6390 + 61 + 17 = 6468**
@@ -6708,8 +6721,8 @@ flashed.**
   that work was 6464. Those steps are left as they were measured; of the
   difference since, `test_aledcfg` accounts for 61 → 81 as the `color_order`
   defect below was found, and `test_aledonboard` for 17 → 24 as the WiFi block
-  was added. The rest, and the three further binaries, are not re-derived here —
-  the headline is the measured one and is the figure to trust.
+  was added. The rest, and the four further binaries beyond that 32, are not
+  re-derived here — the headline is the measured one and is the figure to trust.
 
 ### Addressable LED switch item — [bug]
 
