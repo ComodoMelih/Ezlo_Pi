@@ -399,7 +399,7 @@ pixels and the one-LED defect does not recur.
 **The order conclusion drawn from it did not.** It read "the configured order is
 the wire order for at least that permutation", and that does not follow. Under
 `grb` the packer emits byte0=G, byte1=R, byte2=B
-([ezlopi_util_aled.c:32](../ezlopi-util/ezlopi-util-aled/ezlopi_util_aled.c:32)
+([ezlopi_util_aled.c:32](../ezlopi-util/ezlopi-util-aled/ezlopi_util_aled.c#L32)
 maps `grb` to `{1,0,2}`), and a strip wired **BRG** maps byte1 to red as well.
 Red coming out red is consistent with GRB *and* BRG, so the one measurement
 taken could not distinguish the configured order from the one this reel

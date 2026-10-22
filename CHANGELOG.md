@@ -11372,10 +11372,11 @@ enumerators — so the live half of this component was never affected.
 - **The citations in these documents are now checked**, by
   [`check_doc_citations.py`](tests/ci/check_doc_citations.py) — the twentieth
   check and the seventeenth the `hygiene` job invokes. This file is the main
-  thing this fork produces, and these documents carry 459 markdown links,
-  320 of them with a `#L<n>` fragment. (This said 310 *links* when the entry
-  was written; it is re-measured whenever a paragraph below quotes it, and
-  whenever an entry added above adds citations of its own.) Line
+  thing this fork produces, and the examined documents carry 583 markdown
+  links, 409 of them with a `#L<n>` fragment — 523 and 392 of those are in this
+  file alone. (This said 310 *links* when the entry was written and 459 before
+  `docs/` was covered; it is re-measured whenever a paragraph below quotes it,
+  and whenever an entry added above adds citations of its own.) Line
   numbers move whenever anything
   above them is edited, and nothing in the toolchain notices: a link to a
   renamed file, or to a line past the end of one, renders as ordinary text and
@@ -11390,19 +11391,57 @@ enumerators — so the live half of this component was never affected.
   and that is the one shape a reader has no way to spot. The link now says
   `#L140`.
 
-  Four mechanical failures are caught — the path is gone, the file is shorter
+  Five mechanical failures are caught — the path is gone, the file is shorter
   than the cited line, the link text ends `foo.c:123` while its own fragment
-  says `#L456`, or the link text is one backticked code token that is not on
-  the cited line. What it still cannot do is judge a citation whose text is
+  says `#L456`, the link text is one backticked code token that is not on the
+  cited line, or the path climbs out of the repository altogether. What it
+  still cannot do is judge a citation whose text is
   prose: "appended", "the per-chunk dump" and the like have nothing to check
-  against. **78** of the **320** citations with a line fragment are in that
-  class — the fourth rule bears on the **140** that are a single backticked
-  token and the third on the **102** whose text ends `:N`. This said "150 of
+  against. **78** of the **409** citations with a line fragment are in that
+  class — the fourth rule bears on the **189** that are a single backticked
+  token and the third on the **146** whose text ends `:N`. This said "150 of
   the 200" when the rule was added; the proportion improved because citing by
   token became the habit here, not because the rule was loosened.
   The docstring says so, so that a green run is not read as more than it is.
   Links to directories are skipped, because `tests/host/` is linked that way
   deliberately.
+
+  **`docs/` is examined too, and was not until a citation added there had to be
+  hand-checked to be trusted.** The three documents in `docs/` carry 30 links
+  between them, 14 with a line fragment, and none of them was checked by
+  anything: the glob listed one directory. The docstring had recorded this as
+  near-pointless to fix, because the regex then required a root-relative path
+  while a citation in a subdirectory is written `../ezlopi-core/...`. Half of
+  that had since stopped being true — the regex was widened to accept a leading
+  dot for `.github/workflows/ci.yml`, which incidentally made `../` match — so
+  what was actually missing was resolution. A matched `../` path joined to the
+  root resolved nowhere and would have been reported `MISSING`, which is worse
+  than not looking, because it punishes a correct link. `check_text()` now
+  takes the document's own directory. Examined links went from 552 to 583.
+
+  **Of that 31, one was not in `docs/` at all, and it is the more interesting
+  one.** 30 are the `docs/` links. The last was already in this file: it had
+  been written `[ezlopi_util_aled.c:32](…/ezlopi_util_aled.c:32)`, with a colon
+  where the fragment belongs, and the regex excludes `:` from a path — so it
+  matched nothing, was reported as neither broken nor fine, and was exempt from
+  every rule. A non-match leaves no trace, which makes it the quietest way for
+  a citation to escape. Both such links were rewritten `#L32` rather than
+  teaching the regex a second syntax, because the `#L` form is the convention
+  here and the existing `TEXT_LINE` rule exists precisely to check prose
+  reading `file.c:32` against it. The docstring now records the exemption so
+  the next colon-style link is a known shape rather than a rediscovery.
+
+  **Nothing was broken in those 31 newly covered links.** This closes a hole
+  rather than fixing a defect, and it is recorded that way: the value is that a
+  citation added to `docs/` tomorrow is a claim CI tests, not that anything was
+  found today. Accepting `../` did introduce one new way to be wrong, so it is
+  checked — a path can now climb clean out of the repository, and
+  `../../etc/hostname` exists on the runner and would have resolved. `OUTSIDE`
+  flags it. That the extension can fail at all was then verified on the real
+  path rather than inferred from the fixtures, which call `check_text()`
+  directly and would all still pass if the new glob examined nothing: a scratch
+  document with a broken parent-relative citation makes the gate exit non-zero
+  and name the file, and a correct one in the same position passes.
 
   **That fourth rule was declined once, on measurement, and then added when the
   measurement changed.** The HTTP body-logging change under *Credentials*
@@ -11877,7 +11916,7 @@ Listed because a changelog that only mentions what was finished is misleading.
   was: "with `grb` stored, `{255,0,0}` renders red, so the configured order is
   the wire order for at least that permutation". The observation was real; the
   conclusion does not follow from it. Under `grb` the packer emits byte0=G,
-  byte1=R, byte2=B — [ezlopi_util_aled.c:32](ezlopi-util/ezlopi-util-aled/ezlopi_util_aled.c:32)
+  byte1=R, byte2=B — [ezlopi_util_aled.c:32](ezlopi-util/ezlopi-util-aled/ezlopi_util_aled.c#L32)
   maps `grb` to `{1,0,2}` — and a strip wired **BRG** also maps byte1 to red.
   Red rendering red is therefore consistent with both orders, and the one
   primary that was tried is exactly the one that cannot separate them.

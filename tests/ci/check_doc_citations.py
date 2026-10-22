@@ -3,11 +3,11 @@
 
 WHY THIS EXISTS
 
-The CHANGELOG is this fork's main deliverable and it carries 431 links into the
-source, 317 of them with a `#L<n>` line fragment. (It said 230-odd when this
-was written; the count is re-measured whenever something here quotes it,
-because a stale number in the prose of a staleness check is a poor
-advertisement.) Line numbers move
+The CHANGELOG is this fork's main deliverable and it carries 523 links into the
+source, 392 of them with a `#L<n>` line fragment. (It said 230-odd when this
+was written and 431 until docs/ was covered; the count is re-measured whenever
+something here quotes it, because a stale number in the prose of a staleness
+check is a poor advertisement.) Line numbers move
 whenever anything above them is edited, and nothing in the toolchain notices:
 a link to a renamed file, or to a line past the end of a file, renders as
 ordinary text and reads as evidence. Several entries here turn on a specific
@@ -103,15 +103,43 @@ ones: their text ends `:547` and `:597` and their fragments said `#L547` and
 citation agrees with itself, not whether it is right, and two numbers that rot
 together rot invisibly.
 
-WHERE IT DOES NOT LOOK AT ALL
+docs/ IS NOW SCANNED, AND WHAT IT TOOK
 
-main() lists *.md in one directory, so docs/ is not scanned -- but pointing it
-there would cover little, because LINK requires a repo-root-relative path
-(`[A-Za-z0-9_]` first) and every citation in a subdirectory document is written
-`../ezlopi-core/...`. Measured: the three files in docs/ carry 23 local links
-between them and this regex can see exactly 1. Covering them means resolving
-each link against its own document's directory, which is a real change and not
-a wider glob.
+This section used to say docs/ was not scanned, and that pointing the glob at
+it would cover little because LINK required a repo-root-relative path while a
+citation in a subdirectory document is written `../ezlopi-core/...`. Half of
+that is no longer true: LINK was later widened to accept a leading dot, for
+`.github/workflows/ci.yml`, and that incidentally made `../` paths match too.
+What was still missing was resolution -- a matched `../ezlopi-core/...` was
+joined to the root and reported MISSING, which is worse than not looking,
+because it punishes a correct link.
+
+So check_text() now takes the document's own directory and resolves against it,
+and main() walks SUBDIRS as well as the root. Examined links went from 552 to
+583: 30 of the 31 are the links in docs/, and the other was already in the
+CHANGELOG, invisible because it was written with a colon rather than a `#L`
+fragment (see below). None of the 31 was broken, so this found nothing; it
+closes the hole that let the three documents in docs/ accumulate citations
+nobody checked. A link added there today is now a claim CI tests.
+
+The resolution brought a new way to be wrong, so it is checked: with `../`
+accepted, a path can climb out of the repository entirely, and
+`../../etc/hostname` exists on the machine running CI. OUTSIDE flags that,
+rather than calling it resolved.
+
+WHERE IT STILL DOES NOT LOOK
+
+Not a recursive walk. Every vendored component carries a README this fork does
+not maintain, and their links are not its claims. SUBDIRS names the
+directories whose documents this fork writes; add to it rather than widening to
+a tree walk.
+
+A citation written `path/file.c:32` instead of `path/file.c#L32` does not match
+LINK and is therefore exempt from every rule here -- silently, since a
+non-match is not a finding. Two such links were committed and then converted to
+the `#L` form rather than teaching the regex a second syntax; prose may still
+read `file.c:32`, and TEXT_LINE checks that against the fragment, which is the
+intended shape.
 
 Links to directories are counted and skipped: `tests/host/` is linked that way
 deliberately and has no line to resolve.
@@ -121,6 +149,10 @@ import re
 import sys
 
 DOCS_DIR = '.'
+
+# Directories below the root whose *.md this fork maintains, and whose
+# citations are therefore its own claims. Not a recursive walk: see main().
+SUBDIRS = ('docs',)
 
 # [text](path), [text](path#L123) and [text](path#L110-L129). The path has to
 # look like a repo-relative file, so external URLs and bare `#anchor` links are
@@ -186,17 +218,34 @@ def cited_line_text(path, n, cache={}):
     return lines[n - 1] if 0 < n <= len(lines) else None
 
 
-def check_text(text, root):
+def check_text(text, root, subdir=''):
     """Every problem in one document's text, as (kind, detail) pairs.
 
     Returned rather than printed so the self-test can call this directly
     instead of writing temporary files and parsing output.
+
+    `subdir` is the document's own directory relative to `root`, because a link
+    is relative to the document that contains it, not to the repository root. A
+    document in docs/ cites `../ezlopi-core/...`; the same path read from the
+    root would be outside the repository altogether. Defaults to '' so every
+    existing caller, and every self-test fixture, keeps root-relative
+    behaviour.
     """
     problems = []
     for n, raw in enumerate(text.splitlines(), 1):
         for m in LINK.finditer(raw):
             rel = m.group('path')
-            full = os.path.join(root, rel)
+            # Resolve against the document, then express the result relative to
+            # the root so a link that climbs out of the repository is visible
+            # as such. Allowing `../` without this check would let a citation
+            # point at a file that happens to exist on one machine and nowhere
+            # else, and report it as fine.
+            from_root = os.path.normpath(os.path.join(subdir, rel))
+            if from_root.startswith('..'):
+                problems.append(('OUTSIDE', ':%d  %s  (resolves to %s, outside '
+                                 'the repository)' % (n, rel, from_root)))
+                continue
+            full = os.path.join(root, from_root)
             if os.path.isdir(full):
                 continue
             if not os.path.isfile(full):
@@ -333,13 +382,38 @@ FIXTURES = [
      '[`check_doc_citations.py:1-5`](tests/ci/check_doc_citations.py#L1-L5)'),
     ('line range starting past the end of the file', True,
      '[`check_doc_citations.py`](tests/ci/check_doc_citations.py#L999999-L1000000)'),
+
+    # Documents in a subdirectory. These carry a fourth field, the document's
+    # own directory, and they are the reason docs/ is scanned at all: read from
+    # the root, `../tests/...` is nonsense, and the first fixture below would
+    # have been reported MISSING while being perfectly correct.
+    ('subdirectory doc, parent-relative link resolves', False,
+     '[`check_doc_citations.py`](../tests/ci/check_doc_citations.py)', 'docs'),
+    ('subdirectory doc, parent-relative link that does not resolve', True,
+     '[`gone.py`](../tests/ci/gone.py)', 'docs'),
+    ('subdirectory doc, sibling link resolves', False,
+     '[the schema](provisioning-schema.md)', 'docs'),
+    ('subdirectory doc, line suffix still checked', True,
+     '[`check_doc_citations.py:999999`](../tests/ci/check_doc_citations.py#L999999)',
+     'docs'),
+    # Climbing out of the repository. Without the OUTSIDE check this is a file
+    # that may well exist on the machine running CI, and would pass.
+    ('link that climbs out of the repository', True,
+     '[something](../../etc/hostname)', 'docs'),
+    ('root-relative link cannot climb out', True,
+     '[something](../outside.md)'),
 ]
 
 
 def self_test(root):
     ok = True
-    for name, must_fire, text in FIXTURES:
-        problems = check_text(text, root)
+    for fixture in FIXTURES:
+        # The fourth field, the document's directory, is optional: most
+        # fixtures are root-relative and adding '' to two dozen of them would
+        # be noise.
+        name, must_fire, text = fixture[:3]
+        subdir = fixture[3] if len(fixture) > 3 else ''
+        problems = check_text(text, root, subdir)
         if must_fire and not problems:
             print('SELF-TEST FAILED: the "%s" fixture produced no problem, so '
                   'this check cannot fail on that shape.' % name)
@@ -363,13 +437,22 @@ def main():
     if not self_test(root):
         return 1
 
+    # The top-level documents, plus docs/. Deliberately not a recursive walk of
+    # the whole tree: that would pull in the README of every vendored component,
+    # which this fork does not maintain and whose links are not its claims.
+    # SUBDIRS is the list of directories whose documents this fork does write.
     docs = [n for n in sorted(os.listdir(root)) if n.endswith('.md')]
+    for sub in SUBDIRS:
+        d = os.path.join(root, sub)
+        if os.path.isdir(d):
+            docs += [os.path.join(sub, n)
+                     for n in sorted(os.listdir(d)) if n.endswith('.md')]
     rc, total = 0, 0
     for doc in docs:
         with open(os.path.join(root, doc), encoding='utf-8') as fh:
             text = fh.read()
         total += len(LINK.findall(text))
-        for kind, detail in check_text(text, root):
+        for kind, detail in check_text(text, root, os.path.dirname(doc)):
             rc = 1
             print('%-8s %s%s' % (kind, doc, detail))
     print('\ndocuments: %s' % ' '.join(docs))
