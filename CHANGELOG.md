@@ -6711,6 +6711,35 @@ flashed.**
   was added. The rest, and the three further binaries, are not re-derived here —
   the headline is the measured one and is the figure to trust.
 
+### Addressable LED switch item — [bug]
+
+**The strip's `switch` item reported `false` for the life of the hub, however
+bright the strip was.** The getter computed the state into
+`item->interface.gpio.gpio_in.value` and then handed
+`item->interface.gpio.gpio_out.value` to the formatter — writing one field and
+reading another. `gpio_out.value` is assigned exactly once, at setup, to
+`false`, and never again; before this change the file's only three references to
+the pair were that initialiser and these two lines, so no code path existed that
+could make the item answer `true`. It is not a stale value or a race, it is a
+constant.
+
+**Found from hardware, and it is the kind of defect reading does not surface.**
+Over the local API a single `hub.items.list` reply carried
+`"name":"switch","value":false` and `"name":"dimmer","value":30` for the same
+strip, which cannot both be true. The two lines look unremarkable in isolation —
+`gpio_in` and `gpio_out` differ by three characters, both compile, and neither
+warns. What flags it as a slip rather than an intent is the `dimmer` branch
+immediately above, which writes and reads `pwm.duty_cycle` consistently.
+
+**Upstream's, not ours.** The same two lines are present verbatim on the
+untouched baseline at `master`, and `git blame` attributes them to an upstream
+merge. Recorded here because this fork carries the fix, not to claim the bug.
+
+**Compiled, not yet verified on hardware.** The tree builds for esp32 with rc=0
+and no warning naming the file. The chip still holds the image that was on it
+before, so nothing has confirmed the item now tracks brightness on a device; a
+flash and one `hub.items.list` would settle it.
+
 ### UUID utility — [bug]
 
 **None of this is reachable.** Nothing in the repository calls any function in
