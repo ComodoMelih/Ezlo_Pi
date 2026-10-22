@@ -6786,10 +6786,20 @@ immediately above, which writes and reads `pwm.duty_cycle` consistently.
 untouched baseline at `master`, and `git blame` attributes them to an upstream
 merge. Recorded here because this fork carries the fix, not to claim the bug.
 
-**Compiled, not yet verified on hardware.** The tree builds for esp32 with rc=0
-and no warning naming the file. The chip still holds the image that was on it
-before, so nothing has confirmed the item now tracks brightness on a device; a
-flash and one `hub.items.list` would settle it.
+**Verified on hardware.** An esp32 running an image built from this tree
+emitted `hub.item.updated` carrying
+`{"_id":"20ec6005","name":"switch","value":true,"valueType":"bool"}` after an
+`rgbcolor` set on the same device. By this entry's own argument that is
+decisive rather than suggestive: before the fix the item could not answer
+`true` by any path, because `gpio_out.value` was assigned `false` once at setup
+and never again. One observation of `true` is therefore enough — it is not a
+sampling question.
+
+The broadcast also arrived unsolicited, which is worth noting because the
+settling test proposed here was a `hub.items.list` poll. The item announces
+itself through
+`EZPI_core_device_value_updated_from_device_broadcast(dimmer_args->switch_item)`,
+so no poll was needed and none was done.
 
 ### UUID utility — [bug]
 
