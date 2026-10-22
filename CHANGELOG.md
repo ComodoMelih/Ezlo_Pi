@@ -6095,7 +6095,10 @@ flashed.**
 - **`ezlopi-util-aledcfg` is the parser for that, and only the parser.**
   `EZPI_aledcfg_from_json()` resolves a pixel count, a white-channel flag and a
   wire byte order from a device-config object;
-  `EZPI_aledcfg_order_from_str()` parses `"grb"`; `EZPI_aledcfg_wire_len()`
+  `EZPI_aledcfg_order_from_strn()` parses `"grb"` from a string of a given
+  length, and `EZPI_aledcfg_order_from_str()` is its `strlen()` wrapper for the
+  NUL-terminated case — a distinction that turned out to be the whole
+  component, for the reason set out below; `EZPI_aledcfg_wire_len()`
   wraps `EZPI_aled_wire_len()` so the byte count a resolved shape implies is
   written once, carries the overflow check, and is host-tested. The three key
   names — `pixel_count`, `rgbw`, `color_order` — are in
@@ -6119,13 +6122,17 @@ flashed.**
   to do it. `is_rgbw` had never been assigned anywhere in the firmware, so this
   is the first time the white channel of an SK6812-RGBW is reachable at all.
 
-  **Not verified on hardware.** No board has driven a multi-pixel strip, and
-  this is the half of the fix no host test can reach — it needs an RMT
-  peripheral and the IDF. What *is* verified is a build on **all four CI
+  **The resolver is verified on hardware; the strip is not.** A board now
+  accepts all three keys and all six colour orders, and refuses a bad one —
+  see the `color_order` entry below, which is where that was measured and why
+  it took a rebuild to get. But no board has yet *driven* a multi-pixel strip,
+  and that is the half of the fix no host test and no UART log can reach — it
+  needs an RMT peripheral, the IDF, and something to look at. What is also
+  verified is a build on **all four CI
   targets** with zero diagnostics in either touched file, and `nm` on each
-  linked ELF showing `EZPI_aledcfg_from_json` and
-  `EZPI_aledcfg_order_from_str` present, so the driver's call survives
-  `--gc-sections` rather than being compiled and dropped:
+  linked ELF showing `EZPI_aledcfg_from_json` and the order parser present, so
+  the driver's call survives `--gc-sections` rather than being compiled and
+  dropped:
 
   | Target | `set-target` | build | diagnostics in touched files | resolver in ELF | image |
   |---|---|---|---|---|---|
@@ -6133,6 +6140,13 @@ flashed.**
   | esp32s2 | 0 | 0 | 0 | present | `0x151590` |
   | esp32s3 | 0 | 0 | 0 | present | `0x1a0d30` |
   | esp32c3 | 0 | 0 | 0 | present | `0x1af080` |
+
+  Those four rows were measured before the `str_value_len` fix, and the symbol
+  checked was `EZPI_aledcfg_order_from_str`. On the current source that exact
+  symbol is **gone** from the esp32 ELF and `EZPI_aledcfg_order_from_strn` is
+  there instead — the firmware no longer calls the NUL-terminated wrapper, so
+  `--gc-sections` drops it, which is the table working rather than failing. The
+  four-target sweep has not been re-run since; only esp32 has.
 
   The esp32 image leaves 17% of the app partition free. esp32c3 is in that
   table for a reason rather than for completeness: device-0009 drives an RMT
@@ -6343,6 +6357,46 @@ flashed.**
   against the enum round-trips perfectly and lights the strip in the wrong
   colours.
 
+- **That sweep was thorough about the wrong input, and a board found out.** On
+  hardware, every `color_order` the firmware was given was refused — all six
+  names, and numbers too — while `pixel_count` and `rgbw` on their own were both
+  accepted. The cause is that a device configuration reaches a driver through
+  `cJSON_ParseWithRef()` (`ezlopi_core_devices.c:630`), which does not copy
+  strings: `valuestring` points into the stored payload and ends at the closing
+  quote, with the length in `str_value_len`. Read as a C string it is
+  `grb"}]}` — seven bytes, and not an order. The resolver's strict length check
+  was doing exactly what it was written to do, on a value that was never a C
+  string.
+
+  Every test in `test_aledcfg.c` had parsed with `cJSON_Parse()`, which *does*
+  copy into a NUL-terminated allocation, so all 17,576 strings above were
+  classified against input the device never produces. `cJSON_ParseWithRef()` is
+  now used as well, on the exact document the board had stored, and the bounded
+  entry point is exercised against buffers built by hand with no terminator at
+  all. Restoring the shipped single-argument call fails 7 of the new checks
+  while `"zzz"` stays refused, so the catch is selective rather than blanket.
+
+  Getting there cost a rebuild, and only because every cheaper avenue was closed
+  first: the exact document resolves verbatim on the host, flash `0x19000`
+  round-trips it byte for byte with `color_order` intact, the chip's image md5
+  **equals** the build so it was not a stale flash, and numeric orders were
+  refused too so it was not the value. Two of those probes had to be redone
+  because their controls were circular — they used the presence of `sk6812` in
+  the boot log as proof the driver had initialised, and the only line containing
+  `sk6812` **is** the warning, so "driver never ran" and "no warning" were one
+  event and the quiet case could not be reported. The marker is now `Device-0`,
+  from the device-list dump, which is printed either way.
+
+- **Verified on hardware, which the rest of this component still is not.** With
+  the fix flashed, all six permutations are accepted by the board and both
+  `"zzz"` and `"grbx"` are still refused, so the check that reports acceptance
+  can still report refusal. The refusal lines also read `using 30 pixel(s)`,
+  which independently confirms the per-field fallback: a bad order does not take
+  the good count down with it. What this does **not** show is the mapping —
+  whether `"rbg"` lights the strip in RBG — because the board reports accepted
+  or refused and nothing more. That mapping is pinned on the host, and the
+  colours themselves still need eyes on a strip.
+
 - **No schema change was needed, and that is by prior design rather than luck.**
   `ezlopi-util-devcfgval` is deliberately permissive — it rejects only shapes
   that cannot work on this build and accepts unknown members, precisely so a
@@ -6351,9 +6405,11 @@ flashed.**
   three new keys persist with no storage-layer change. There is no key
   whitelist to register with.
 
-- **61 checks; 17 mutants, 17 killed, 0 survived.** One is killed by ASan alone
+- **81 checks; 19 mutants, 19 killed, 0 survived.** Two are killed by ASan alone
   with no check failing: dropping the length check before the string compare
-  reads past a two-byte string and reports a global-buffer-overflow.
+  reads past a two-byte string, and ignoring the bound in
+  `EZPI_aledcfg_order_from_strn()` reads past the one-byte `""` literal. Both
+  report a global-buffer-overflow.
 
   Two of the seventeen were **mis-anchored on the first pass** — the default
   pixel count is a `#define` in the header rather than in the `.c` the sweep was
