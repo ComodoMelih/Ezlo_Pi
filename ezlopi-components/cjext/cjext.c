@@ -1257,7 +1257,39 @@ static bool parse_string_with_ref(const char *who, cJSON *const item, parse_buff
         ** Delegating to parse_string() rather than decoding here keeps one copy
         ** of the escape and surrogate-pair logic, and gives the item exactly
         ** the shape cJSON_Parse() would have given it: owned, NUL-terminated,
-        ** str_value_len the quote-to-quote span. Mixed ownership inside one
+        ** and str_value_len set to that function's allocation_length.
+        **
+        ** Which is NOT a length. An earlier version of this comment called it
+        ** "the quote-to-quote span", which can be read as either 3 or 4 for
+        ** "grb" depending on whether the quotes are counted -- and one byte is
+        ** the entire difference between the two parsers here, so being
+        ** ambiguous about it is the same as being wrong about it. Measured, by
+        ** parsing the same document both ways:
+        **
+        **   document            copy path   ref path   strlen of the value
+        **   {"k":"grb"}             4           3            3
+        **   {"k":""}                1           0            0
+        **   {"k":"abcdefghij"}     11          10           10
+        **   {"k":"a\tb"}            4           4            3   (ref copies)
+        **   {"k":"\u00e9"}          6           6            2   (ref copies)
+        **   {"k":"\u00e9\u00e9"}   11          11            4   (ref copies)
+        **
+        ** So: the reference path records an exact length. The copy path records
+        ** an allocation size -- decoded length plus one for the NUL with no
+        ** escapes or simple ones, and an over-estimate for \uXXXX, because
+        ** skipped_bytes counts one byte per backslash while \u00e9 is six raw
+        ** bytes for two decoded. It is the figure the malloc on the next line
+        ** needs, not the figure a reader wants.
+        **
+        ** A reader therefore cannot treat str_value_len as a length. The one
+        ** rule correct for every row above is what "%.*s" does: read up to
+        ** str_value_len bytes and stop early at a NUL. The same conclusion,
+        ** with the arithmetic spelled out, is in ezlopi_cloud_mqtt_config.c's
+        ** __take_field(); EZPI_aledcfg_order_from_strn() is that rule written
+        ** out as a function, and exists because reading a referenced
+        ** valuestring as a C string refused every colour order on a board.
+        **
+        ** Mixed ownership inside one
         ** tree is already what the teardown expects -- cJSON_Delete() decides
         ** per item, and parse_object_with_ref() only marks a key const when
         ** is_key_ref says it is a reference -- so a copied string here is freed
