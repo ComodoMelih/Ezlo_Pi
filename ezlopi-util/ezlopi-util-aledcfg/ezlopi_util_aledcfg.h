@@ -214,8 +214,43 @@ extern "C"
      * @param   str    NUL-terminated; may be NULL.
      * @param   out    set only when the function returns true.
      * @return  true if @p str is one of the six permutations.
+     *
+     * @warning Do NOT pass a cJSON valuestring to this function. A string
+     *          parsed by cJSON_ParseWithRef() points into the JSON payload and
+     *          is terminated by a quote, not a NUL, so this function sees
+     *          "grb\"}]}" and refuses it. Use
+     *          EZPI_aledcfg_order_from_strn() with str_value_len instead.
+     *          That is not hypothetical: it is the defect this note was added
+     *          for, and it refused every colour order on a real board.
      */
     bool EZPI_aledcfg_order_from_str(const char *str, e_aled_order_t *out);
+
+    /**
+     * @brief   As EZPI_aledcfg_order_from_str(), for a string that is not
+     *          necessarily NUL-terminated.
+     *
+     * The length is taken the way "%.*s" takes it: up to @p bound bytes,
+     * stopping early at a NUL. That single rule is correct for all three ways
+     * cjext builds a string, which is why the bound is not required to be the
+     * exact length:
+     *
+     *   - cJSON_ParseWithRef()  str_value_len is exact, and valuestring points
+     *                           into the payload with no NUL to stop at.
+     *   - cJSON_Parse()         str_value_len is an *allocation* size, strlen
+     *                           + 1 for a string with no escapes, and the NUL
+     *                           is what stops the scan.
+     *   - cJSON_CreateString()  str_value_len is strlen(), so exact.
+     *
+     * The same reasoning, with the measurements behind it, is recorded at
+     * length in ezlopi_cloud_mqtt_config.c's __take_field().
+     *
+     * @param   str    need not be NUL-terminated; may be NULL.
+     * @param   bound  how many bytes of @p str may be read. Pass
+     *                 cJSON's str_value_len for a parsed item.
+     * @param   out    set only when the function returns true.
+     * @return  true if @p str is one of the six permutations.
+     */
+    bool EZPI_aledcfg_order_from_strn(const char *str, size_t bound, e_aled_order_t *out);
 
     /**
      * @brief   The byte count a resolved config needs on the wire.

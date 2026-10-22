@@ -43,6 +43,7 @@
 #include "ezlopi_util_aledcfg.h"
 
 #include <stddef.h>
+#include <string.h> /* strlen, for the NUL-terminated wrapper only */
 
 /* The key names themselves live in ezlopi-cloud-constants with every other
 ** config key, rather than as literals here. That is the house convention, and
@@ -94,17 +95,32 @@ static char __ascii_lower(char c)
  *                          Public Function Definitions
  *******************************************************************************/
 
-bool EZPI_aledcfg_order_from_str(const char *str, e_aled_order_t *out)
+bool EZPI_aledcfg_order_from_strn(const char *str, size_t bound, e_aled_order_t *out)
 {
     bool ret = false;
 
     if ((NULL != str) && (NULL != out))
     {
-        /* Length checked before the compare, so that "rg" cannot match the
-        ** first two bytes of "rgb" and "rgbx" cannot match all three of them.
-        ** Measured against both: a prefix compare accepts the first and a
-        ** bounded compare of 3 accepts the second. */
-        if (('\0' != str[0]) && ('\0' != str[1]) && ('\0' != str[2]) && ('\0' == str[3]))
+        /* The length is taken the way "%.*s" takes it -- up to `bound` bytes,
+        ** stopping at a NUL -- because that is the one rule correct for all
+        ** three ways cjext builds a string. See the header for which path
+        ** gives an exact length and which gives an upper bound.
+        **
+        ** Scanning no further than `bound` is what makes this safe on a
+        ** reference string, where the bytes after the value are the rest of the
+        ** JSON payload and there is no NUL to find at all. */
+        size_t len = 0u;
+
+        while ((len < bound) && ('\0' != str[len]))
+        {
+            len++;
+        }
+
+        /* Exact length required before the compare, so that "rg" cannot match
+        ** the first two bytes of "rgb" and "rgbx" cannot match all three of
+        ** them. Measured against both: a prefix compare accepts the first and
+        ** a bounded compare of 3 accepts the second. */
+        if (3u == len)
         {
             const char want[3] = {
                 __ascii_lower(str[0]),
@@ -127,6 +143,15 @@ bool EZPI_aledcfg_order_from_str(const char *str, e_aled_order_t *out)
     }
 
     return ret;
+}
+
+bool EZPI_aledcfg_order_from_str(const char *str, e_aled_order_t *out)
+{
+    /* A NUL-terminated string is the case where the bound can be anything at
+    ** or above the real length, so scanning for the terminator is the bound.
+    ** Delegating keeps one copy of the table walk and the case folding. */
+    return (NULL != str) ? EZPI_aledcfg_order_from_strn(str, strlen(str), out)
+                         : false;
 }
 
 size_t EZPI_aledcfg_wire_len(const s_aledcfg_t *cfg)
@@ -262,8 +287,17 @@ bool EZPI_aledcfg_from_json(cJSON *cj_device, s_aledcfg_t *out)
         {
             e_aled_order_t parsed = ALED_ORDER_GRB;
 
+            /* str_value_len, not a NUL scan: this component's one real
+            ** field defect. A device configuration reaches the driver through
+            ** cJSON_ParseWithRef() (ezlopi_core_devices.c:630), whose strings
+            ** point into the stored JSON payload and end at a quote rather
+            ** than a NUL. Reading valuestring as a C string therefore saw
+            ** "grb\"}]}" and refused every one of the six orders on a real
+            ** board, while the host suite -- which used cJSON_Parse(), the
+            ** copying parser -- accepted all six. */
             if ((0 != (cj_o->type & cJSON_String)) &&
-                EZPI_aledcfg_order_from_str(cj_o->valuestring, &parsed))
+                EZPI_aledcfg_order_from_strn(cj_o->valuestring,
+                                             cj_o->str_value_len, &parsed))
             {
                 out->order = parsed;
             }
